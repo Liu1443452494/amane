@@ -1,0 +1,82 @@
+name: Sync Amane source
+
+on:
+  schedule:
+    # 每天 UTC 18:00，即北京时间次日凌晨 02:00
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: sync-amane-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'Liu1443452494/amane' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.AMANE_SYNC_TOKEN }}
+      SOURCE_REPO: sqzw-x/amane
+      TARGET_REPO: Liu1443452494/amane
+
+    steps:
+      - name: Merge upstream while preserving the sync workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo '::error::Add the AMANE_SYNC_TOKEN secret to your amane fork.'
+            exit 1
+          fi
+
+          upstream_sha="$(gh api "repos/$SOURCE_REPO/git/ref/heads/main" --jq '.object.sha')"
+
+          # 合并上游，保留自己的同步配置和已有历史。
+          # 已经同步过时，GitHub 返回空响应，不创建新提交。
+          result="$(gh api --method POST "repos/$TARGET_REPO/merges" \
+            -f base=main \
+            -f head="$upstream_sha" \
+            -f 'commit_message=Sync sqzw-x/amane main [skip ci]')"
+
+          if [[ -z "$result" ]]; then
+            printf 'No new upstream commits. main already includes %s.\n' \
+              "$upstream_sha" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf 'Merged upstream main at %s.\n' \
+              "$upstream_sha" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Keep the public repository active after 45 idle days
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          commit_info="$(gh api "repos/$TARGET_REPO/commits/main" \
+            --jq '[.sha, .commit.tree.sha, .commit.committer.date] | @tsv')"
+
+          IFS=$'\t' read -r current_sha tree_sha commit_date <<< "$commit_info"
+          last_commit_time="$(date -u -d "$commit_date" +%s)"
+          now="$(date -u +%s)"
+
+          if (( now - last_commit_time < 45 * 24 * 60 * 60 )); then
+            exit 0
+          fi
+
+          # 复用原来的文件树，只添加空提交，不修改任何文件。
+          keepalive_sha="$(gh api --method POST "repos/$TARGET_REPO/git/commits" \
+            -f 'message=Keep daily upstream sync active [skip ci]' \
+            -f tree="$tree_sha" \
+            -f "parents[]=$current_sha" \
+            --jq '.sha')"
+
+          # 不强制覆盖，防止覆盖同时发生的其他修改。
+          gh api --method PATCH "repos/$TARGET_REPO/git/refs/heads/main" \
+            -f sha="$keepalive_sha" \
+            -F force=false > /dev/null
+
+          printf 'Added an empty keepalive commit; all files are unchanged.\n' \
+            >> "$GITHUB_STEP_SUMMARY"
