@@ -1,0 +1,119 @@
+name: 自用 Windows 压缩包
+run-name: Windows 压缩包构建 · ${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 构建版本，以 v 开头，例如 v1.0.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: liu1443452494-windows-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  BUILD_VERSION: ${{ inputs.version }}
+  PYTHONUTF8: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+
+jobs:
+  windows:
+    name: 构建 Windows x64 ZIP
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: 取得源码
+        uses: actions/checkout@v7
+
+      - name: 准备隔离 Python 工具
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          python-version: "3.14"
+          enable-cache: true
+
+      - name: 校验版本并应用补丁
+        id: prepare
+        run: uv run --no-project --python 3.14 python liu1443452494-patches/build.py prepare
+
+      - name: 检查发布版本是否已存在
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: uv run --no-project --python 3.14 python liu1443452494-patches/build.py check-release
+
+      - name: 准备 Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+
+      - name: 准备 pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: "11"
+
+      - name: 准备 .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: 准备 MSVC
+        uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: x64
+
+      - name: 准备 just
+        uses: extractions/setup-just@v4
+
+      - name: 安装隔离测试依赖
+        run: just _ci-sync-python
+
+      - name: 检查 Python 格式和类型
+        run: just lint typecheck
+
+      - name: 验证补丁逻辑
+        env:
+          BUILD_TEST_TEMP: ${{ runner.temp }}/amane-custom-tests
+        run: uv run --frozen python liu1443452494-patches/build.py test
+
+      - name: 构建 Windows 压缩包程序
+        run: just windows-app
+
+      - name: 打包 ZIP
+        id: zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($path in @('dist/Amane/Amane.exe', 'dist/Amane/onedir/Amane.Server.exe', 'dist/Amane/web/dist/index.html')) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "构建产物缺失: $path" }
+          }
+          $archive = "dist/Amane-$env:BUILD_VERSION-windows-x64.zip"
+          Compress-Archive -LiteralPath 'dist/Amane' -DestinationPath $archive
+          "zip=$archive" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: 保留 Actions 下载产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: Amane-${{ inputs.version }}-windows-x64
+          path: ${{ steps.zip.outputs.zip }}
+          if-no-files-found: error
+
+      - name: 发布到 GitHub Releases
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ inputs.version }}
+          name: Amane 自用构建 ${{ inputs.version }}
+          target_commitish: ${{ github.sha }}
+          files: ${{ steps.zip.outputs.zip }}
+          fail_on_unmatched_files: true
+          body: |
+            Windows x64 ZIP 自用构建，软件内部版本沿用上游。
+
+            构建版本：`${{ inputs.version }}`
+            源码提交：`${{ steps.prepare.outputs.source_sha }}`
+
+            [补丁与使用说明](${{ github.server_url }}/${{ github.repository }}/blob/${{ github.sha }}/liu1443452494-patches/README.md)
