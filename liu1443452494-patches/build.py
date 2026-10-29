@@ -59,6 +59,7 @@ def prepare(root: Path, directory: Path, version: str) -> None:
         "0002-nfo.patch",
         "0003-actresses.patch",
         "0004-actor-mapping.patch",
+        "0005-metadata-tags.patch",
     )
     actual = {path.name for path in directory.glob("*.patch")}
     if actual != set(patches):
@@ -107,6 +108,11 @@ def check_release(version: str) -> None:
 
 def run_tests(root: Path) -> None:
     cases = (
+        "tests/db/test_liu1443452494_metadata_tags.py",
+        "tests/db/test_repository.py::TestMetadataRepo",
+        "tests/db/test_facets.py::TestFacetSync",
+        "tests/db/test_facets.py::TestFacetRenameMergeDelete",
+        "tests/api/test_liu1443452494_metadata_tags.py",
         "tests/api/test_tasks.py::TestSubmitTask::test_submit_payloads_and_rejects",
         "tests/handlers/test_file_ops.py",
         "tests/handlers/test_liu1443452494_library_images.py",

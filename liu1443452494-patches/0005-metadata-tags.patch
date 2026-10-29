@@ -1,0 +1,377 @@
+diff --git a/docs/dev/data-model.md b/docs/dev/data-model.md
+index 2a88e70c71880f71311cf53e43c849eeb280b6a0..ac2eba10a8d1ae23ca955233529041742ec04759 100644
+--- a/docs/dev/data-model.md
++++ b/docs/dev/data-model.md
+@@ -4,7 +4,7 @@
+ 
+ ## 数据所有权
+ 
+-**SQLite 是唯一数据源**, NFO / 海报 / fanart 等磁盘文件是从 DB 派生的副产物 (兼容 Emby / Jellyfin / Kodi). 重建顺序为 DB → 派生文件, 不反向; 不允许从 NFO 反推 Metadata. `media/nfo.py::write_nfo` 接收整理阶段的 `FileInfo`, 仅在 NFO 中省略导演并追加演员、字幕与马赛克性质标签; 连续写入 tag 后写入同序 genre, 不回写 Metadata.
++**SQLite 是唯一数据源**, NFO / 海报 / fanart 等磁盘文件是从 DB 派生的副产物 (兼容 Emby / Jellyfin / Kodi). 重建顺序为 DB → 派生文件, 不反向; 不允许从 NFO 反推 Metadata. `media/nfo.py::write_nfo` 读取数据库标签, 根据整理阶段的 `FileInfo` 追加当前文件的字幕与马赛克性质标签; 连续写入 tag 后写入同序 genre, 仅在 NFO 中省略导演, 不回写 Metadata.
+ 
+ 实体边界:
+ 
+@@ -138,6 +138,8 @@ PATCH 三态: **省略键** = 不更新 (`exclude_unset`); **显式值** = 写
+ 
+ 影片刮削在写入前经 `src/amane/liu1443452494_actor_mapping.py::map_actor_names` 读取数据目录的 `mapping_actor.xml`; 唯一匹配转换为标准名, 原名交给现有别名解析. 歧义与未匹配保留原始输入, raw 快照不变; 每次读取支持用户更新文件.
+ 
++自用刮削在 `src/amane/db/repos/metadata.py::MetadataRepoMixin.upsert_metadata` 启用 `enrich_tags`: 演员姓名归一后、分类规则与投影同步前, 经 `src/amane/liu1443452494_metadata_tags.py::build_metadata_tags` 将原始标签转简体并追加最终演员姓名. 标签锁定时跳过, 不转换演员姓名或修改 raw, 不依赖 LLM; 手动编辑不触发, 存量标签在下次刮削写入时更新.
++
+ 写入时先清洗 `Metadata.actors` 的 `name(alias1, alias2)` 形式: 展示名留真值, 别名并入对应演员的 `ActorAlias` 行. 每个名字经 `resolve_actor_by_name` 解析 (展示名精确命中 → 别名唯一命中 → 歧义 / 无命中以名字本身为展示名新建实体), 因此站点给的**裸别名**会折到已认定演员, 不再另建重复实体; block 判定在解析前后各执行一次. 影片名单顺序由第一成功源锁定, 其后已抓源按展示名填空性别. 写入时若带 `FilmActor.gender`, 只对 `Actor.gender == unknown` 且 gender 未锁的行填空, 不覆盖已有值, 不写入 `field_sources`. `Metadata.actors` 存库始终是展示名, 站点 `raw` 快照保留原始带括号形式.
+ 
+ 用户对爬取侧分类的改名 / 合并 / 删除意图落在 `FacetRule` (按 `(kind, source_name)` 唯一), **不**修改投影表本身:
+diff --git a/src/amane/db/repos/metadata.py b/src/amane/db/repos/metadata.py
+index 980d257407c1acd443cea4daf683b876a2c871d5..1b881ef259d5cfb85350dc3b7619653d9a62c1d8 100644
+--- a/src/amane/db/repos/metadata.py
++++ b/src/amane/db/repos/metadata.py
+@@ -7,6 +7,7 @@ from sqlalchemy.sql.functions import count
+ from sqlmodel import col, select
+ 
+ from ...enums import ActorGender, MetadataField
++from ...liu1443452494_metadata_tags import build_metadata_tags
+ from ...parsing import ContentType, Mosaic, infer_content_type
+ from ...utils.collections import unique_ids
+ from ...utils.text import normalize_long_text
+@@ -247,6 +248,7 @@ class MetadataRepoMixin(RepositoryMixinBase):
+         *,
+         content_type: ContentType | None = None,
+         actor_genders: Mapping[str, ActorGender] | None = None,
++        enrich_tags: bool = False,
+         **kwargs: Unpack[MetadataFields],
+     ) -> Metadata:
+         """查重忽略大小写; 已存在时不改写 number 的原始大小写, 也不改写类型.
+@@ -254,6 +256,7 @@ class MetadataRepoMixin(RepositoryMixinBase):
+         判定与写入同处一个写事务, 见 docs/dev/database.md; 临界区内不允许出现等待.
+         ``actor_genders`` 只填 ``Actor.gender`` 空位, 不是 Metadata 列.
+         ``content_type`` 只在插入时落库, None 按番号推断; 已存在时不改写 (契约见 docs/dev/data-model.md).
++        ``enrich_tags`` 仅由自用刮削启用，标签未锁定时转换简繁并追加最终演员姓名。
+         """
+         fields = _normalize_text_fields(kwargs)
+         async with self._session() as session:
+@@ -272,6 +275,8 @@ class MetadataRepoMixin(RepositoryMixinBase):
+                 session.add(existing)
+                 await session.flush()
+                 await clean_actor_names(session, existing, actor_genders)
++                if enrich_tags and "tags" in fields:
++                    existing.tags = build_metadata_tags(existing.tags, existing.actors)
+                 await apply_facet_rules_to_metadata(session, existing)
+                 await sync_metadata_facets(session, existing)
+                 await session.commit()
+@@ -281,6 +286,8 @@ class MetadataRepoMixin(RepositoryMixinBase):
+             session.add(meta)
+             await session.flush()
+             await clean_actor_names(session, meta, actor_genders)
++            if enrich_tags:
++                meta.tags = build_metadata_tags(meta.tags, meta.actors)
+             await apply_facet_rules_to_metadata(session, meta)
+             await sync_metadata_facets(session, meta)
+             await session.commit()
+diff --git a/src/amane/handlers/scrape.py b/src/amane/handlers/scrape.py
+index fe6e6eb5af71a0850269931a5cf676ba2732e560..c2e2b077565b22ac7de855c1ff28c3eb4e7b38fc 100644
+--- a/src/amane/handlers/scrape.py
++++ b/src/amane/handlers/scrape.py
+@@ -178,6 +178,7 @@ class ScrapeHandler(TaskHandler[ScrapePayload, ScrapeResult]):
+             number=payload.number,
+             content_type=payload.content_type,
+             actor_genders={item.name: item.gender for item in cast if item.gender != ActorGender.UNKNOWN},
++            enrich_tags=True,
+             title=result.metadata.title,
+             actors=[item.name for item in cast],
+             studio=result.metadata.studio,
+diff --git a/src/amane/liu1443452494_metadata_tags.py b/src/amane/liu1443452494_metadata_tags.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..bb21e4d2408959040efe0cb2fcb2feef17eb1740
+--- /dev/null
++++ b/src/amane/liu1443452494_metadata_tags.py
+@@ -0,0 +1,13 @@
++"""自用刮削标签：原始标签转简体，再追加已归一的演员姓名。"""
++
++from collections.abc import Sequence
++
++import zhconv
++
++
++def build_metadata_tags(tags: Sequence[str], actors: Sequence[str]) -> list[str]:
++    """不修改输入或转换演员姓名；空标签排除，重复标签保留首次出现的位置。"""
++    # 通用简体保留原有用词，避免地区词汇替换。
++    labels = [zhconv.convert(tag, "zh-hans").strip() for tag in tags]
++    labels.extend(actors)
++    return list(dict.fromkeys(label for label in labels if label))
+diff --git a/src/amane/media/nfo.py b/src/amane/media/nfo.py
+index c87152488565ba1516f8b4cc3b5d1a02a5c96399..9c3807fe0a7c805d3d7f9aa1658ed5458f9545e2 100644
+--- a/src/amane/media/nfo.py
++++ b/src/amane/media/nfo.py
+@@ -97,7 +97,7 @@ async def write_nfo(metadata: Metadata, nfo_path: Path, *, file_info: FileInfo |
+             code.write(f"  <publisher>{_escape_xml(metadata.publisher)}</publisher>\n")
+             code.write(f"  <label>{_escape_xml(metadata.publisher)}</label>\n")
+ 
+-        labels = [*metadata.tags, *metadata.actors]
++        labels = list(metadata.tags)
+         if file_info is not None and file_info.has_subtitle:
+             labels.append("中文字幕")
+         nature = mosaic_nature(file_info.mosaic if file_info is not None else None, metadata.content_type)
+diff --git a/tests/api/test_liu1443452494_metadata_tags.py b/tests/api/test_liu1443452494_metadata_tags.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e53e57bd0cd9a0b12089ede6aadd616efdf0ef8f
+--- /dev/null
++++ b/tests/api/test_liu1443452494_metadata_tags.py
+@@ -0,0 +1,41 @@
++"""自用刮削标签在影片详情与标签筛选中的接线。"""
++
++import pytest
++from httpx2 import AsyncClient
++
++from amane.config import HotSettings
++from amane.crawlers.models import FilmActor, MediaMetadata
++from amane.db.repository import Repository
++from amane.handlers import ScrapeHandler, ScrapePayload
++from amane.handlers.models import CacheKind
++from amane.media import ResourceStore
++from amane.parsing import ContentType
++from tests.handlers.test_scraper import FakeFactory, MockCrawler
++
++
++@pytest.mark.asyncio
++async def test_scraped_actor_tags_are_visible_and_filterable(
++    client: AsyncClient, repo: Repository, resource_store: ResourceStore
++) -> None:
++    source = MediaMetadata(number="MIDV-123", actors=[FilmActor(name="枫花恋")], tags=["單體作品", "单体作品"])
++    await repo.upsert_metadata(number=source.number, raw={"javdb": source.model_dump(mode="json")})
++    handler = ScrapeHandler(
++        repo=repo,
++        factory=FakeFactory({"javdb": MockCrawler()}),
++        resource_store=resource_store,
++        pipeline_config=HotSettings(),
++    )
++    result = await handler.handle(
++        ScrapePayload(number=source.number, content_type=ContentType.CENSORED, use_cache={CacheKind.metadata})
++    )
++    assert result.success
++    meta = await repo.get_metadata_by_number(source.number)
++    assert meta is not None
++    detail = await client.get(f"metadata/{meta.id}")
++    assert detail.status_code == 200
++    body = detail.json()
++    assert body["metadata"]["tags"] == ["单体作品", "枫花恋"]
++    assert set(body["tag_ids"]) == {"单体作品", "枫花恋"}
++    selected = await client.get("metadata", params={"tag_ids": body["tag_ids"]["枫花恋"]})
++    assert selected.status_code == 200
++    assert [item["number"] for item in selected.json()["items"]] == [source.number]
+diff --git a/tests/db/test_liu1443452494_metadata_tags.py b/tests/db/test_liu1443452494_metadata_tags.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..2168c1ce42be75e16fee28a7a9b0c2a4bbb75201
+--- /dev/null
++++ b/tests/db/test_liu1443452494_metadata_tags.py
+@@ -0,0 +1,131 @@
++"""自用刮削标签的简繁转换、演员归一、查询关联与写入边界。"""
++
++import pytest
++
++from amane.crawlers.models import MediaMetadata
++from amane.db.models import FacetKind
++from amane.db.repo_types import WriteMode
++from amane.db.repository import Repository
++from amane.enums import MetadataField
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    ("source_tags", "source_actors", "expected_actors", "expected_tags"),
++    [
++        (
++            ["單體作品", "单体作品", " 高畫質 ", "", " \t"],
++            ["枫花恋(枫可怜)", "枫花恋", "明里䌷"],
++            ["枫花恋", "明里䌷"],
++            ["单体作品", "高画质", "枫花恋", "明里䌷"],
++        ),
++        (["單體作品"], ["楓可憐(枫可怜)"], ["楓可憐"], ["单体作品", "楓可憐"]),
++        (["Drama", "オリジナル", "HD"], [], [], ["Drama", "オリジナル", "HD"]),
++        (["明里䌷", "劇情"], ["明里䌷"], ["明里䌷"], ["明里䌷", "剧情"]),
++        ([], ["甲", "乙", "丙", "丁"], ["甲", "乙", "丙", "丁"], ["甲", "乙", "丙", "丁"]),
++        (["", " \t"], [], [], []),
++        ([], [], [], []),
++    ],
++)
++async def test_scraped_tags_are_simplified_and_linked(
++    repo: Repository,
++    source_tags: list[str],
++    source_actors: list[str],
++    expected_actors: list[str],
++    expected_tags: list[str],
++) -> None:
++    source = MediaMetadata.model_validate({"number": "MIDV-123", "tags": source_tags, "actors": source_actors})
++    snapshot = source.model_dump(mode="json")
++    meta = await repo.upsert_metadata(
++        number=source.number,
++        tags=source.tags,
++        actors=[actor.name for actor in source.actors],
++        raw={"javdb": snapshot},
++        enrich_tags=True,
++    )
++    assert meta.actors == expected_actors
++    assert meta.tags == expected_tags
++    assert meta.raw == {"javdb": snapshot}
++    assert source.tags == source_tags
++    facets, total = await repo.list_facets(FacetKind.TAG)
++    assert total == len(expected_tags)
++    assert {facet.name for facet in facets} == set(expected_tags)
++    for facet in facets:
++        found, count = await repo.list_metadata(tag_ids=[facet.id])
++        assert count == 1 and [item.id for item in found] == [meta.id]
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    ("locks", "expected_actor", "expected_tags"),
++    [
++        ([], "新演员", ["新标签", "新演员"]),
++        ([MetadataField.TAGS], "新演员", ["旧标签", "旧演员"]),
++        ([MetadataField.ACTORS], "旧演员", ["新标签", "旧演员"]),
++        ([MetadataField.TAGS, MetadataField.ACTORS], "旧演员", ["旧标签", "旧演员"]),
++    ],
++)
++async def test_rescrape_replaces_tags_and_respects_locks(
++    repo: Repository,
++    locks: list[MetadataField],
++    expected_actor: str,
++    expected_tags: list[str],
++) -> None:
++    meta = await repo.upsert_metadata(
++        number="MIDV-123",
++        actors=["旧演员"],
++        tags=["舊標籤"],
++        field_sources={"tags": "javdb"},
++        enrich_tags=True,
++    )
++    assert meta.id is not None
++    await repo.set_metadata_locks(meta.id, locks)
++    updated = await repo.upsert_metadata(
++        number=meta.number,
++        actors=["新演员"],
++        tags=["新標籤"],
++        field_sources={"tags": "javbus"},
++        raw={"javbus": {"tags": ["新標籤"]}},
++        enrich_tags=True,
++    )
++    assert updated.actors == [expected_actor]
++    assert updated.tags == expected_tags
++    assert updated.raw == {"javbus": {"tags": ["新標籤"]}}
++    assert updated.field_sources["tags"] == ("javdb" if MetadataField.TAGS in locks else "javbus")
++    _, _, _, tag_ids, _, _, _ = await repo.resolve_metadata_facet_ids(updated)
++    assert set(tag_ids) == set(expected_tags)
++
++
++@pytest.mark.asyncio
++async def test_manual_and_unrequested_tag_writes_are_preserved(repo: Repository) -> None:
++    meta = await repo.upsert_metadata(number="MIDV-123", actors=["演员"], tags=["原始標籤"])
++    assert meta.id is not None and meta.tags == ["原始標籤"]
++    unchanged = await repo.upsert_metadata(number=meta.number, title="更新标题", enrich_tags=True)
++    assert unchanged.tags == ["原始標籤"]
++    manual = await repo.update_metadata(meta.id, mode=WriteMode.MANUAL, tags=["手動標籤"])
++    assert manual is not None and manual.tags == ["手動標籤"]
++    scraped = await repo.upsert_metadata(number=meta.number, actors=["新演员"], tags=["劇情"], enrich_tags=True)
++    assert scraped.tags == ["手動標籤"]
++    assert scraped.actors == ["新演员"]
++
++
++@pytest.mark.asyncio
++async def test_actor_aliases_and_facet_rules_are_respected(repo: Repository) -> None:
++    meta = await repo.upsert_metadata(
++        number="MIDV-123", actors=["标准名(旧名)", "剔除演员"], tags=["單體作品"], enrich_tags=True
++    )
++    facets, _ = await repo.list_facets(FacetKind.TAG)
++    tag_ids = {facet.name: facet.id for facet in facets}
++    await repo.rename_facet(FacetKind.TAG, tag_ids["单体作品"], "自定义标签")
++    await repo.delete_facet(FacetKind.TAG, tag_ids["标准名"])
++    blocked_actor = (await repo.get_actors_by_names(["剔除演员"]))[0]
++    assert blocked_actor.id is not None
++    await repo.delete_facet(FacetKind.ACTOR, blocked_actor.id)
++
++    updated = await repo.upsert_metadata(
++        number=meta.number, actors=["旧名", "剔除演员"], tags=["單體作品"], enrich_tags=True
++    )
++    assert updated.actors == ["标准名"]
++    assert updated.tags == ["自定义标签"]
++    _, _, _, actual_tags, _, _, _ = await repo.resolve_metadata_facet_ids(updated)
++    assert set(actual_tags) == {"自定义标签"}
+diff --git a/tests/handlers/test_liu1443452494_actor_mapping.py b/tests/handlers/test_liu1443452494_actor_mapping.py
+index 681f147ba5a5a9ed2631ffe95d612ee940dbb1c1..c24978d12cde142ca4501045f86e87b30bcb658b 100644
+--- a/tests/handlers/test_liu1443452494_actor_mapping.py
++++ b/tests/handlers/test_liu1443452494_actor_mapping.py
+@@ -98,8 +98,10 @@ async def test_scrape_uses_standard_name_before_saving(
+     metadata = await repo.get_metadata_by_number("MIDV-123")
+     assert metadata is not None
+     assert metadata.actors == ["枫花恋"]
++    assert metadata.tags == ["Drama", "枫花恋"]
+     assert TemplateContext.from_metadata(metadata).variables["actresses"] == "枫花恋"
+     assert metadata.raw["javdb"]["actors"][0]["name"] == "Actor A"
++    assert metadata.raw["javdb"]["tags"] == ["Drama"]
+     actors = await repo.get_actors_by_names(["枫花恋"])
+     assert len(actors) == 1 and actors[0].id is not None
+     assert "Actor A" in await repo.get_actor_aliases(actors[0].id)
+diff --git a/tests/handlers/test_scraper.py b/tests/handlers/test_scraper.py
+index 7aad813d9eee670df1ffe49ab8222f24715dee5d..7e9bfd8ddc6651cc7d2139e54796408cc9891dd5 100644
+--- a/tests/handlers/test_scraper.py
++++ b/tests/handlers/test_scraper.py
+@@ -137,7 +137,7 @@ class TestScrapeHandler:
+         updated = await repo.get_metadata_by_number("MIDV-123")
+         assert updated is not None
+         assert updated.title == "Manual"
+-        assert updated.tags == ["Drama"]
++        assert updated.tags == ["Drama", "Actor A"]
+         assert updated.field_sources["title"] == "manual-src"
+         assert updated.locked_fields == ["title"]
+ 
+diff --git a/tests/media/test_liu1443452494_nfo.py b/tests/media/test_liu1443452494_nfo.py
+index 4388787bd99447d3a3d4f02df0c9c62cb28e01af..fb5e8e239f9cd9318b7592b4d5f814636b44d0ef 100644
+--- a/tests/media/test_liu1443452494_nfo.py
++++ b/tests/media/test_liu1443452494_nfo.py
+@@ -6,6 +6,7 @@ from xml.etree import ElementTree
+ import pytest
+ 
+ from amane.db.models import MediaFile, Metadata
++from amane.db.repository import Repository
+ from amane.enums import MoveMode
+ from amane.handlers.file import execute_file_operations
+ from amane.media import ResourceStore, write_nfo
+@@ -46,7 +47,7 @@ async def test_nfo_labels(
+     file_info = parse_file_info(filename, has_external_subtitle=external_subtitle)
+     assert await write_nfo(metadata, target, file_info=file_info)
+     root = ElementTree.fromstring(target.read_text(encoding="utf-8"))
+-    expected = ["剧情", "明里䌷", "枫&花<恋", *extra_labels]
++    expected = ["剧情", "明里䌷", *extra_labels]
+     assert [element.text for element in root.findall("tag")] == expected
+     assert [element.text for element in root.findall("genre")] == expected
+     grouped = [element.tag for element in root if element.tag in ("tag", "genre")]
+@@ -84,3 +85,31 @@ async def test_organize_supplies_file_labels(tmp_path: Path, resource_store: Res
+     assert result.outcome is PlaceOutcome.PLACED
+     root = ElementTree.parse(paths.nfo).getroot()
+     assert [element.text for element in root.findall("tag")] == ["中文字幕", "破解"]
++
++
++@pytest.mark.asyncio
++async def test_shared_metadata_keeps_file_labels_in_each_nfo(tmp_path: Path, repo: Repository) -> None:
++    metadata = await repo.upsert_metadata(
++        number="IPSS-453",
++        content_type=ContentType.CENSORED,
++        actors=["明里䌷"],
++        tags=["單體作品"],
++        enrich_tags=True,
++    )
++    assert metadata.id is not None
++    for filename, file_labels in (
++        ("ipss-453.mp4", ["有码"]),
++        ("ipss-453-uc.mp4", ["中文字幕", "破解"]),
++    ):
++        media = await repo.create_media_file(library_id=1, path=str(tmp_path / filename), metadata_id=metadata.id)
++        target = tmp_path / f"{filename}.nfo"
++        file_info = parse_file_info(media.path, has_external_subtitle=media.has_external_subtitle)
++        assert await write_nfo(metadata, target, file_info=file_info)
++        root = ElementTree.parse(target).getroot()
++        expected = ["单体作品", "明里䌷", *file_labels]
++        assert [element.text for element in root.findall("tag")] == expected
++        assert [element.text for element in root.findall("genre")] == expected
++        grouped = [element.tag for element in root if element.tag in ("tag", "genre")]
++        assert grouped == ["tag"] * len(expected) + ["genre"] * len(expected)
++    stored = await repo.get_metadata(metadata.id)
++    assert stored is not None and stored.tags == ["单体作品", "明里䌷"]
