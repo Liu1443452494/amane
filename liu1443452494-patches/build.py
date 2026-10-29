@@ -60,6 +60,7 @@ def prepare(root: Path, directory: Path, version: str) -> None:
         "0003-actresses.patch",
         "0004-actor-mapping.patch",
         "0005-metadata-tags.patch",
+        "0006-actor-delete.patch",
     )
     actual = {path.name for path in directory.glob("*.patch")}
     if actual != set(patches):
@@ -112,7 +113,9 @@ def run_tests(root: Path) -> None:
         "tests/db/test_repository.py::TestMetadataRepo",
         "tests/db/test_facets.py::TestFacetSync",
         "tests/db/test_facets.py::TestFacetRenameMergeDelete",
+        "tests/db/test_facets.py::TestActorUserTags::test_delete_actor_clears_links",
         "tests/api/test_liu1443452494_metadata_tags.py",
+        "tests/api/test_facets_write.py::test_facet_http_actor_rename_merge_delete",
         "tests/api/test_tasks.py::TestSubmitTask::test_submit_payloads_and_rejects",
         "tests/handlers/test_file_ops.py",
         "tests/handlers/test_liu1443452494_library_images.py",
@@ -122,6 +125,7 @@ def run_tests(root: Path) -> None:
         "tests/organize/test_path_templates.py::test_from_metadata_actress_placeholders",
         "tests/organize/test_path_templates.py::test_actress_names",
         "tests/handlers/test_liu1443452494_actor_mapping.py",
+        "tests/handlers/test_liu1443452494_actor_delete.py",
         "tests/handlers/test_scraper.py",
         "tests/handlers/test_auto_organize.py",
         "tests/handlers/test_actor_scrape.py",
