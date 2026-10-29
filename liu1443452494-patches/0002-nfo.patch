@@ -1,0 +1,197 @@
+diff --git a/docs/dev/data-model.md b/docs/dev/data-model.md
+index c50fef893690c6f1bb3ab8e45b495141d3738a8d..096372468e8a8e35b766d369a43a5fe02f15882f 100644
+--- a/docs/dev/data-model.md
++++ b/docs/dev/data-model.md
+@@ -4,7 +4,7 @@
+ 
+ ## 数据所有权
+ 
+-**SQLite 是唯一数据源**, NFO / 海报 / fanart 等磁盘文件是从 DB 派生的副产物 (兼容 Emby / Jellyfin / Kodi). 重建顺序为 DB → 派生文件, 不反向; 不允许从 NFO 反推 Metadata.
++**SQLite 是唯一数据源**, NFO / 海报 / fanart 等磁盘文件是从 DB 派生的副产物 (兼容 Emby / Jellyfin / Kodi). 重建顺序为 DB → 派生文件, 不反向; 不允许从 NFO 反推 Metadata. `media/nfo.py::write_nfo` 接收整理阶段的 `FileInfo`, 仅在 NFO 中省略导演并追加演员、字幕与马赛克性质标签; 连续写入 tag 后写入同序 genre, 不回写 Metadata.
+ 
+ 实体边界:
+ 
+diff --git a/src/amane/handlers/file.py b/src/amane/handlers/file.py
+index 852b8976bb1d98faf4b65bc02205a0a9ae3cbf2e..366f35a3bb302c3154a72a810bad00b92aa230bc 100644
+--- a/src/amane/handlers/file.py
++++ b/src/amane/handlers/file.py
+@@ -160,7 +160,7 @@ async def execute_file_operations(
+ 
+     # 写入 NFO.
+     if org_result.outcome is PlaceOutcome.PLACED and org_result.dest and write_nfo:
+-        await write_nfo_file(metadata, paths.nfo)
++        await write_nfo_file(metadata, paths.nfo, file_info=file_info)
+ 
+     # 字幕按模板落到 video_dest 侧.
+     subtitle_conflicts: list[SubtitleConflict] = []
+diff --git a/src/amane/media/nfo.py b/src/amane/media/nfo.py
+index 08d19c4b067be72528508758c7c9725d244997d9..c87152488565ba1516f8b4cc3b5d1a02a5c96399 100644
+--- a/src/amane/media/nfo.py
++++ b/src/amane/media/nfo.py
+@@ -7,12 +7,14 @@ from typing import TYPE_CHECKING
+ import aiofiles
+ import structlog
+ 
++from ..parsing.file_info import MosaicNature, mosaic_nature
+ from ..utils.text import strip_illegal_xml_chars
+ 
+ if TYPE_CHECKING:
+     from pathlib import Path
+ 
+     from ..db.models import Metadata
++    from ..parsing import FileInfo
+ 
+ 
+ logger = structlog.get_logger()
+@@ -35,7 +37,7 @@ def _escape_xml(text: str) -> str:
+     return escaped
+ 
+ 
+-async def write_nfo(metadata: Metadata, nfo_path: Path) -> bool:
++async def write_nfo(metadata: Metadata, nfo_path: Path, *, file_info: FileInfo | None = None) -> bool:
+     try:
+         nfo_path.parent.mkdir(parents=True, exist_ok=True)
+ 
+@@ -95,11 +97,20 @@ async def write_nfo(metadata: Metadata, nfo_path: Path) -> bool:
+             code.write(f"  <publisher>{_escape_xml(metadata.publisher)}</publisher>\n")
+             code.write(f"  <label>{_escape_xml(metadata.publisher)}</label>\n")
+ 
+-        if metadata.tags:
+-            for tag in metadata.tags:
+-                if tag:
+-                    code.write(f"  <tag>{_escape_xml(tag)}</tag>\n")
+-                    code.write(f"  <genre>{_escape_xml(tag)}</genre>\n")
++        labels = [*metadata.tags, *metadata.actors]
++        if file_info is not None and file_info.has_subtitle:
++            labels.append("中文字幕")
++        nature = mosaic_nature(file_info.mosaic if file_info is not None else None, metadata.content_type)
++        if nature is MosaicNature.CENSORED:
++            labels.append("有码")
++        elif nature is MosaicNature.UNCENSORED:
++            labels.append("无码")
++        elif nature is MosaicNature.CRACKED:
++            labels.append("破解")
++        labels = list(dict.fromkeys(label for label in labels if label))
++        for element in ("tag", "genre"):
++            for label in labels:
++                code.write(f"  <{element}>{_escape_xml(label)}</{element}>\n")
+ 
+         if metadata.poster_url:
+             code.write(f"  <poster>{_escape_xml(metadata.poster_url)}</poster>\n")
+@@ -110,10 +121,6 @@ async def write_nfo(metadata: Metadata, nfo_path: Path) -> bool:
+         if metadata.trailer_url:
+             code.write(f"  <trailer>{_escape_xml(metadata.trailer_url)}</trailer>\n")
+ 
+-        if metadata.directors:
+-            for director in metadata.directors:
+-                code.write(f"  <director>{_escape_xml(director)}</director>\n")
+-
+         if metadata.external_ids:
+             for site, ext_id in metadata.external_ids.items():
+                 if ext_id:
+diff --git a/tests/media/test_liu1443452494_nfo.py b/tests/media/test_liu1443452494_nfo.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..4388787bd99447d3a3d4f02df0c9c62cb28e01af
+--- /dev/null
++++ b/tests/media/test_liu1443452494_nfo.py
+@@ -0,0 +1,86 @@
++"""自用 NFO 的文件标签与连续节点顺序。"""
++
++from pathlib import Path
++from xml.etree import ElementTree
++
++import pytest
++
++from amane.db.models import MediaFile, Metadata
++from amane.enums import MoveMode
++from amane.handlers.file import execute_file_operations
++from amane.media import ResourceStore, write_nfo
++from amane.organize import PlaceOutcome, ResolvedPaths
++from amane.parsing import ContentType, parse_file_info
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    ("filename", "content_type", "external_subtitle", "extra_labels"),
++    [
++        ("ipss-453-uc.mp4", ContentType.CENSORED, False, ["中文字幕", "破解"]),
++        ("IPSS-453-UC.mp4", ContentType.CENSORED, False, ["中文字幕", "破解"]),
++        ("ipss-453-u.mp4", ContentType.CENSORED, False, ["破解"]),
++        ("ipss-453-c.mp4", ContentType.CENSORED, False, ["中文字幕", "有码"]),
++        ("ipss-453.mp4", ContentType.CENSORED, False, ["有码"]),
++        ("ipss-453.mp4", ContentType.UNCENSORED, True, ["中文字幕", "无码"]),
++        ("ipss-453.mp4", ContentType.UNCENSORED, False, ["无码"]),
++        ("ipss-453.mp4", ContentType.WESTERN, False, []),
++    ],
++)
++async def test_nfo_labels(
++    tmp_path: Path,
++    filename: str,
++    content_type: ContentType,
++    external_subtitle: bool,
++    extra_labels: list[str],
++) -> None:
++    metadata = Metadata(
++        number="IPSS-453",
++        title="标题 & <内容>",
++        content_type=content_type,
++        actors=["明里䌷", "枫&花<恋"],
++        tags=["剧情", "明里䌷", "剧情", ""],
++        directors=["导演"],
++    )
++    target = tmp_path / "影片.nfo"
++    file_info = parse_file_info(filename, has_external_subtitle=external_subtitle)
++    assert await write_nfo(metadata, target, file_info=file_info)
++    root = ElementTree.fromstring(target.read_text(encoding="utf-8"))
++    expected = ["剧情", "明里䌷", "枫&花<恋", *extra_labels]
++    assert [element.text for element in root.findall("tag")] == expected
++    assert [element.text for element in root.findall("genre")] == expected
++    grouped = [element.tag for element in root if element.tag in ("tag", "genre")]
++    assert grouped == ["tag"] * len(expected) + ["genre"] * len(expected)
++    assert root.findall("director") == []
++    assert metadata.directors == ["导演"]
++    assert metadata.tags == ["剧情", "明里䌷", "剧情", ""]
++    assert [element.text for element in root.findall("actor/name")] == metadata.actors
++    assert root.findtext("title") == "IPSS-453 标题 & <内容>"
++
++
++@pytest.mark.asyncio
++async def test_organize_supplies_file_labels(tmp_path: Path, resource_store: ResourceStore) -> None:
++    source = tmp_path / "ipss-453-uc.mp4"
++    source.write_bytes(b"video")
++    output = tmp_path / "整理"
++    paths = ResolvedPaths(
++        video=output / source.name,
++        thumb=output / "thumb.jpg",
++        poster=output / "poster.jpg",
++        fanart=output / "fanart.jpg",
++        extrafanart_dir=output / "extrafanart",
++        nfo=output / "影片.nfo",
++        trailer=output / "trailer.mp4",
++    )
++    result = await execute_file_operations(
++        MediaFile(library_id=1, path=str(source)),
++        Metadata(number="IPSS-453", content_type=ContentType.CENSORED),
++        paths,
++        MoveMode.COPY,
++        resource_store,
++        parse_file_info(str(source)),
++        download_images=False,
++    )
++    assert result.outcome is PlaceOutcome.PLACED
++    root = ElementTree.parse(paths.nfo).getroot()
++    assert [element.text for element in root.findall("tag")] == ["中文字幕", "破解"]
+diff --git a/tests/media/test_nfo_write.py b/tests/media/test_nfo_write.py
+index d2d5364495da49bb52c1d9b9e26ef64e3068895d..434ee19e7cdd1f21d1b77ae2000a601847399fbb 100644
+--- a/tests/media/test_nfo_write.py
++++ b/tests/media/test_nfo_write.py
+@@ -41,7 +41,8 @@ async def test_write_nfo_has_required_fields(tmp_path: Path, metadata: Metadata)
+     assert "<name>Actor A</name>" in content
+     assert "<studio>Studio X</studio>" in content
+     assert "<genre>Drama</genre>" in content
+-    assert "<director>Director Z</director>" in content
++    assert "<director>" not in content
++    assert metadata.directors == ["Director Z"]
+     assert "<rating>85.0</rating>" in content
+     # 系列使用规范嵌套: <set><name>…</name></set>
+     assert "<series>Series Y</series>" in content
