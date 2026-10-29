@@ -1,0 +1,721 @@
+diff --git a/docs/dev/data-model.md b/docs/dev/data-model.md
+index 0008f5b5e800d8d2f1095e306f98968e7f9f35bd..c50fef893690c6f1bb3ab8e45b495141d3738a8d 100644
+--- a/docs/dev/data-model.md
++++ b/docs/dev/data-model.md
+@@ -104,7 +104,7 @@ PATCH 三态: **省略键** = 不更新 (`exclude_unset`); **显式值** = 写
+ 
+ ## Library 整理布局
+ 
+-每个 Library 持有 `move_mode` (move / copy / hardlink / symlink)、一组按资源类型独立的路径模板与整理默认 (`write_nfo` / `copy_resources`), 因此同一进程里各库可以不同. `copy_resources` 与刮削热配置 `scraping.download_resources` 共用 `DownloadableResource` 枚举但互不读写 — 前者控制复制到库路径, 后者控制写入 Resource 目录. ORGANIZE payload 上对应字段为 `None` 时沿用库设置, 非空则只覆盖该次任务.
++每个 Library 持有 `move_mode` (move / copy / hardlink / symlink)、一组按资源类型独立的路径模板与整理默认 (`write_nfo` / `copy_resources`), 因此同一进程里各库可以不同. `copy_resources` 使用 `LibraryResource`, 刮削下载仍使用 `DownloadableResource`; 两者互不读写. fanart 独立控制整理输出, 复用 Resource 封面原图; 海报备用裁切直接读取原图, 不依赖库路径的 thumb. 未选择 thumb 时不复制或叠加其水印. ORGANIZE payload 上对应字段为 `None` 时沿用库设置, 非空则只覆盖该次任务.
+ 
+ `trailer_pattern` 只在库上: 对**文件名 (含扩展名)** 做正则搜索, 命中则 REFRESH 扫描与 watcher 都不把该文件当正片入库; 空串关闭. `min_file_size` (字节, 默认 0 关闭) 只过滤**扫描视频**: 后缀须属于该次扫描的视频扩展名白名单; 图片 / NFO / 字幕不适用, `.strm` 是路径指针也不参与判定; 符号链接跟随目标比较真实大小, 否则已整理的入口会被当作广告. 低于阈值与文件黑名单同语义: REFRESH / watcher 不入库, 整库扫描列为清理候选; stat 失败 (含悬空链接) 视为不匹配.
+ 
+diff --git a/src/amane/api/models/libraries.py b/src/amane/api/models/libraries.py
+index 939f44661cff64f84d185d7cec826882f7316889..7b4c55a74e7b669223f3ee3d20895388037459fa 100644
+--- a/src/amane/api/models/libraries.py
++++ b/src/amane/api/models/libraries.py
+@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Self
+ from pydantic import BaseModel, Field, model_validator
+ 
+ from ...db import Library
+-from ...enums import DownloadableResource, LibraryAutomation, LibraryIngest, LinkMode, MoveMode
++from ...enums import LibraryAutomation, LibraryIngest, LibraryResource, LinkMode, MoveMode
+ from ...library import (
+     DEFAULT_SUBTITLE_EXTENSIONS,
+     DEFAULT_TRAILER_PATTERN,
+@@ -55,7 +55,7 @@ class LibraryCreateRequest(BaseModel):
+     subtitle_template: PathTemplate | None = None
+     subtitle_extensions: SubtitleExtensions = Field(default_factory=lambda: list(DEFAULT_SUBTITLE_EXTENSIONS))
+     write_nfo: bool = True
+-    copy_resources: list[DownloadableResource] = Field(default_factory=lambda: list(DownloadableResource))
++    copy_resources: list[LibraryResource] = Field(default_factory=lambda: list(LibraryResource))
+     trailer_pattern: TrailerPattern = DEFAULT_TRAILER_PATTERN
+     blacklist_patterns: list[BlacklistPattern] = []
+     """文件名正则列表; 命中任一则扫描/监控跳过, 并作为无效文件进入清理清单."""
+@@ -100,7 +100,7 @@ class LibraryResponse(BaseModel):
+     subtitle_template: str | None = None
+     subtitle_extensions: list[str]
+     write_nfo: bool
+-    copy_resources: list[DownloadableResource]
++    copy_resources: list[LibraryResource]
+     trailer_pattern: str
+     blacklist_patterns: list[str]
+     min_file_size: int
+diff --git a/src/amane/db/models.py b/src/amane/db/models.py
+index 02fdd44fd0e6a98c146666148e464b1e2792b788..d3c7cbc8d94dac39f0197bc3a60688d3bbd9af29 100644
+--- a/src/amane/db/models.py
++++ b/src/amane/db/models.py
+@@ -6,7 +6,7 @@ from sqlalchemy import Boolean, Column, Index, String, Text, UniqueConstraint, e
+ from sqlalchemy.sql.elements import ColumnElement
+ from sqlmodel import JSON, Field, SQLModel, col, select
+ 
+-from ..enums import ActorGender, DownloadableResource, LibraryAutomation, LibraryIngest, LinkMode, MoveMode
++from ..enums import ActorGender, LibraryAutomation, LibraryIngest, LibraryResource, LinkMode, MoveMode
+ from ..library import (
+     DEFAULT_SUBTITLE_EXTENSIONS,
+     DEFAULT_TRAILER_PATTERN,
+@@ -404,8 +404,8 @@ class Library(SQLModel, table=True):
+     )
+     """ORGANIZE 时在视频同目录发现字幕的扩展名列表; 空列表关闭."""
+     write_nfo: bool = Field(default=True)
+-    copy_resources: list[DownloadableResource] = Field(
+-        default_factory=lambda: [r for r in DownloadableResource if r != DownloadableResource.trailer],
++    copy_resources: list[LibraryResource] = Field(
++        default_factory=lambda: [r for r in LibraryResource if r != LibraryResource.trailer],
+         sa_column=Column(JSON, nullable=False),
+     )
+     trailer_pattern: TrailerPattern = Field(default=DEFAULT_TRAILER_PATTERN, sa_column=Column(String, nullable=False))
+diff --git a/src/amane/db/repo_types.py b/src/amane/db/repo_types.py
+index 3a70692d23a7b0fcf9ee3f8030fe26d5538c4d90..3ddf48b88d212d88114ec12501565eac94b5d355 100644
+--- a/src/amane/db/repo_types.py
++++ b/src/amane/db/repo_types.py
+@@ -8,7 +8,7 @@ from sqlalchemy.sql.elements import ColumnElement
+ from sqlmodel import col, select
+ from sqlmodel.sql.expression import SelectOfScalar
+ 
+-from ..enums import ActorGender, DownloadableResource, LibraryAutomation, LibraryIngest, LinkMode, MoveMode
++from ..enums import ActorGender, LibraryAutomation, LibraryIngest, LibraryResource, LinkMode, MoveMode
+ from ..parsing import ContentType, Mosaic
+ from ..utils.dates import normalize_calendar_date
+ from .models import (
+@@ -335,7 +335,7 @@ class LibraryUpdates(TypedDict, total=False):
+     subtitle_template: str | None
+     subtitle_extensions: list[str]
+     write_nfo: bool
+-    copy_resources: list[DownloadableResource]
++    copy_resources: list[LibraryResource]
+     trailer_pattern: str
+     blacklist_patterns: list[str]
+     min_file_size: int
+diff --git a/src/amane/db/repos/libraries.py b/src/amane/db/repos/libraries.py
+index fec3f11af652e2f36b11592f9b9ce9d1d8811f83..6f1d5cba94e83b5d78e3b4d0675851920a53ab10 100644
+--- a/src/amane/db/repos/libraries.py
++++ b/src/amane/db/repos/libraries.py
+@@ -4,7 +4,7 @@ from typing import Unpack
+ from sqlmodel import col, select
+ from sqlmodel.ext.asyncio.session import AsyncSession
+ 
+-from ...enums import DownloadableResource, LibraryAutomation, LibraryIngest, LinkMode, MoveMode
++from ...enums import LibraryAutomation, LibraryIngest, LibraryResource, LinkMode, MoveMode
+ from ...library import (
+     DEFAULT_SUBTITLE_EXTENSIONS,
+     DEFAULT_TRAILER_PATTERN,
+@@ -72,7 +72,7 @@ class LibrariesRepoMixin(RepositoryMixinBase):
+         subtitle_template: str | None = None,
+         subtitle_extensions: list[str] | None = None,
+         write_nfo: bool = True,
+-        copy_resources: list[DownloadableResource] | None = None,
++        copy_resources: list[LibraryResource] | None = None,
+         trailer_pattern: str | None = None,
+         blacklist_patterns: list[str] | None = None,
+         min_file_size: int = 0,
+@@ -117,7 +117,7 @@ class LibrariesRepoMixin(RepositoryMixinBase):
+                     list(subtitle_extensions) if subtitle_extensions is not None else list(DEFAULT_SUBTITLE_EXTENSIONS)
+                 ),
+                 write_nfo=write_nfo,
+-                copy_resources=list(copy_resources) if copy_resources is not None else list(DownloadableResource),
++                copy_resources=list(copy_resources) if copy_resources is not None else list(LibraryResource),
+                 trailer_pattern=validate_trailer_pattern(
+                     trailer_pattern if trailer_pattern is not None else DEFAULT_TRAILER_PATTERN
+                 ),
+diff --git a/src/amane/enums.py b/src/amane/enums.py
+index 4034b6ea2367f3029f2b4722287ac36442ea24e0..708e8b34f9e3e7ea96b2555a1cda1a28ecb6cd87 100644
+--- a/src/amane/enums.py
++++ b/src/amane/enums.py
+@@ -115,6 +115,16 @@ class DownloadableResource(StrEnum):
+     trailer = "trailer"
+ 
+ 
++class LibraryResource(StrEnum):
++    """整理时复制的资源；fanart 复用封面原图，不单独刮削。"""
++
++    thumb = "thumb"
++    poster = "poster"
++    fanart = "fanart"
++    extrafanart = "extrafanart"
++    trailer = "trailer"
++
++
+ class MetadataField(StrEnum):
+     TITLE = "title"
+     PLOT = "plot"
+diff --git a/src/amane/handlers/file.py b/src/amane/handlers/file.py
+index 9b25b63f9e219186d4801dd63f0974a6d75357d8..852b8976bb1d98faf4b65bc02205a0a9ae3cbf2e 100644
+--- a/src/amane/handlers/file.py
++++ b/src/amane/handlers/file.py
+@@ -9,7 +9,7 @@ import structlog
+ from ..config import HotSettings, WatermarkConfig
+ from ..db.models import Library, MediaFile
+ from ..db.repo_types import MediaFileUpdates
+-from ..enums import ActorGender, DownloadableResource, LinkMode
++from ..enums import ActorGender, LibraryResource, LinkMode
+ from ..library import MEDIA_EXTENSIONS, LibraryFileKind, LibraryScan, ancestor_dirs, prune_empty_dirs
+ from ..library.rules import is_in_trash
+ from ..media import ResourceStore, apply_cover_watermarks_from_info, crop_poster
+@@ -76,7 +76,7 @@ async def execute_file_operations(
+     file_info: FileInfo,
+     download_images: bool = True,
+     write_nfo: bool = True,
+-    copy_resources: Sequence[DownloadableResource] | None = None,
++    copy_resources: Sequence[LibraryResource] | None = None,
+     web_client: WebClient | None = None,
+     config: HotSettings | None = None,
+     library: Library | None = None,
+@@ -108,7 +108,7 @@ async def execute_file_operations(
+     # 下载图片; 水印打在库路径副本上, 不能修改 Resource 原图.
+     if web_client and download_images:
+         logger.debug("downloading images via store", number=metadata.number)
+-        kinds = set(copy_resources) if copy_resources is not None else set(DownloadableResource)
++        kinds = set(copy_resources) if copy_resources is not None else set(LibraryResource)
+         await _download_images_via_store(
+             metadata,
+             resource_store,
+@@ -196,7 +196,7 @@ async def apply_file_operations(
+     resource_store: ResourceStore,
+     *,
+     write_nfo: bool = True,
+-    copy_resources: Sequence[DownloadableResource] | None = None,
++    copy_resources: Sequence[LibraryResource] | None = None,
+     web_client: WebClient | None = None,
+     safe_dirs: Sequence[Path] | None = (),
+     watermark_dir: Path | None = None,
+@@ -325,38 +325,40 @@ def _place_library_images(
+     poster_local: Path | None,
+     trailer_local: Path | None,
+     extrafanart: Sequence[Path],
+-    kinds: set[DownloadableResource],
++    kinds: set[LibraryResource],
+     config: HotSettings | None,
+     file_info: FileInfo | None,
+     content_type: ContentType,
+     watermark_dir: Path | None,
+ ) -> None:
+     # 复制封面 / 海报 / 预告片 / extrafanart 到库路径, 不判断目标上是否已有产物.
+-    # fanart 没有刮削来源, 内容取 thumb, 随 thumb 一同重写.
+-    if thumb_local is not None and DownloadableResource.thumb in kinds:
+-        paths.thumb.parent.mkdir(parents=True, exist_ok=True)
+-        _copy_into_library(thumb_local, paths.thumb)
+-        paths.fanart.parent.mkdir(parents=True, exist_ok=True)
+-        _copy_into_library(thumb_local, paths.fanart)
+-
+-    if DownloadableResource.poster in kinds:
++    # fanart 与封面独立选择，共用资源目录中的封面原图。
++    if thumb_local is not None:
++        if LibraryResource.thumb in kinds:
++            paths.thumb.parent.mkdir(parents=True, exist_ok=True)
++            _copy_into_library(thumb_local, paths.thumb)
++        if LibraryResource.fanart in kinds:
++            paths.fanart.parent.mkdir(parents=True, exist_ok=True)
++            _copy_into_library(thumb_local, paths.fanart)
++
++    if LibraryResource.poster in kinds:
+         if poster_local is not None:
+             paths.poster.parent.mkdir(parents=True, exist_ok=True)
+             _copy_into_library(poster_local, paths.poster)
+         elif thumb_local is not None and config is not None and config.scraping.crop_poster:
+             paths.poster.parent.mkdir(parents=True, exist_ok=True)
+             crop_poster(
+-                paths.thumb,
++                thumb_local,
+                 paths.poster,
+                 poster_ratio=config.scraping.poster_ratio,
+                 jpeg_quality=config.scraping.jpeg_quality,
+             )
+ 
+-    if trailer_local is not None and DownloadableResource.trailer in kinds:
++    if trailer_local is not None and LibraryResource.trailer in kinds:
+         paths.trailer.parent.mkdir(parents=True, exist_ok=True)
+         _copy_into_library(trailer_local, paths.trailer)
+ 
+-    if extrafanart and DownloadableResource.extrafanart in kinds:
++    if extrafanart and LibraryResource.extrafanart in kinds:
+         paths.extrafanart_dir.mkdir(parents=True, exist_ok=True)
+         for i, p in enumerate(extrafanart):
+             _copy_into_library(p, paths.extrafanart_dir / f"{i + 1}.jpg")
+@@ -365,7 +367,7 @@ def _place_library_images(
+     wm = config.watermark if config is not None else WatermarkConfig()
+     if wm.enabled and file_info is not None:
+         jpeg_quality = config.scraping.jpeg_quality if config is not None else 95
+-        if paths.thumb.exists():
++        if LibraryResource.thumb in kinds and paths.thumb.exists():
+             apply_cover_watermarks_from_info(
+                 paths.thumb,
+                 file_info,
+@@ -393,29 +395,32 @@ async def _download_images_via_store(
+     client: WebClient,
+     paths: ResolvedPaths,
+     config: HotSettings | None,
+-    kinds: set[DownloadableResource],
++    kinds: set[LibraryResource],
+     file_info: FileInfo | None,
+     content_type: ContentType,
+     watermark_dir: Path | None = None,
+ ) -> None:
+     """优先用 Resource 已有文件; 缺失则现场 acquire."""
+-    thumb_local = None
+-    if DownloadableResource.thumb in kinds:
+-        thumb_urls = metadata.thumb_urls
+-        thumb_local = await _acquire_first_local(thumb_urls, store, client) if thumb_urls else None
+-
+     poster_local = None
+-    if DownloadableResource.poster in kinds:
++    if LibraryResource.poster in kinds:
+         poster_urls = metadata.poster_urls
+         poster_local = await _acquire_first_local(poster_urls, store, client) if poster_urls else None
+ 
++    needs_crop = (
++        LibraryResource.poster in kinds and poster_local is None and config is not None and config.scraping.crop_poster
++    )
++    thumb_local = None
++    if LibraryResource.thumb in kinds or LibraryResource.fanart in kinds or needs_crop:
++        thumb_urls = metadata.thumb_urls
++        thumb_local = await _acquire_first_local(thumb_urls, store, client) if thumb_urls else None
++
+     trailer_local = None
+-    if DownloadableResource.trailer in kinds:
++    if LibraryResource.trailer in kinds:
+         trailer_urls = metadata.trailer_urls
+         trailer_local = await _acquire_first_local(trailer_urls, store, client) if trailer_urls else None
+ 
+     extrafanart: list[Path] = []
+-    if DownloadableResource.extrafanart in kinds:
++    if LibraryResource.extrafanart in kinds:
+         extrafanart_by_site = metadata.extrafanart_urls
+         if extrafanart_by_site:
+             priority = list(extrafanart_by_site.keys())
+diff --git a/src/amane/handlers/models.py b/src/amane/handlers/models.py
+index f5690e242b8a79bfad33fb3f1dc548ead406218e..2cb84d2990aec9392f6a129024f6cded978ace1e 100644
+--- a/src/amane/handlers/models.py
++++ b/src/amane/handlers/models.py
+@@ -9,7 +9,7 @@ from starlette.status import HTTP_403_FORBIDDEN
+ 
+ from ..db import Library, MediaFileStatus, Repository
+ from ..db.models import TaskType
+-from ..enums import DownloadableResource
++from ..enums import LibraryResource
+ from ..observability.models import OrganizeConflict, SiteOutcomeRecord
+ from ..parsing import ContentType, infer_content_type
+ from ..utils.path import is_descendant, is_resolved_path, resolved_path
+@@ -146,7 +146,7 @@ class OrganizePayload(LibraryBase):
+     """
+ 
+     write_nfo: bool | None = Field(default=None, description="覆盖 Library.write_nfo; None 沿用库设置")
+-    copy_resources: list[DownloadableResource] | None = Field(
++    copy_resources: list[LibraryResource] | None = Field(
+         default=None, description="覆盖 Library.copy_resources; None 沿用库设置"
+     )
+     media_file_ids: list[int] | None = Field(
+@@ -172,7 +172,7 @@ class OrganizePayload(LibraryBase):
+             self.write_nfo = lib.write_nfo
+         if self.copy_resources is None:
+             # JSON 列读回是 str; Pydantic dump 要 enum, 否则 UnexpectedValue 警告.
+-            self.copy_resources = [DownloadableResource(r) for r in lib.copy_resources]
++            self.copy_resources = [LibraryResource(r) for r in lib.copy_resources]
+ 
+ 
+ ORGANIZE_CONFLICT_LIMIT = 200
+diff --git a/tests/handlers/test_liu1443452494_library_images.py b/tests/handlers/test_liu1443452494_library_images.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a0d31d29c1e5b18830bf3d114ad3b0242fcedd02
+--- /dev/null
++++ b/tests/handlers/test_liu1443452494_library_images.py
+@@ -0,0 +1,108 @@
++"""独立图片输出与备用海报裁切。"""
++
++from collections.abc import Sequence
++from pathlib import Path
++from unittest.mock import Mock
++
++import pytest
++from PIL import Image
++from pydantic import ValidationError
++
++from amane.api.models.libraries import LibraryCreateRequest
++from amane.config import HotSettings, ScrapingConfig, WatermarkConfig
++from amane.db.models import Metadata
++from amane.enums import LibraryResource
++from amane.handlers.file import _download_images_via_store
++from amane.media import ResourceStore
++from amane.net.http import WebClient
++from amane.organize import ResolvedPaths
++from amane.parsing import ContentType, parse_file_info
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    ("selected", "has_poster", "old_thumb", "cover_available"),
++    [
++        ([], False, False, True),
++        (["thumb"], False, False, True),
++        (["fanart"], False, False, True),
++        (["poster"], False, False, True),
++        (["poster", "fanart"], False, True, True),
++        (["thumb", "poster", "fanart"], True, False, True),
++        (["poster"], True, False, False),
++        (["poster", "fanart"], False, False, False),
++    ],
++)
++async def test_independent_images(
++    tmp_path: Path,
++    monkeypatch: pytest.MonkeyPatch,
++    resource_store: ResourceStore,
++    selected: list[str],
++    has_poster: bool,
++    old_thumb: bool,
++    cover_available: bool,
++) -> None:
++    cover = tmp_path / "原图.jpg"
++    Image.new("RGB", (300, 200), "red").save(cover)
++    original_cover = cover.read_bytes()
++    poster = tmp_path / "原海报.jpg"
++    Image.new("RGB", (90, 160), "blue").save(poster)
++    output = tmp_path / "整理"
++    output.mkdir()
++    paths = ResolvedPaths(
++        video=output / "影片.mp4",
++        thumb=output / "thumb.jpg",
++        poster=output / "poster.jpg",
++        fanart=output / "fanart.jpg",
++        extrafanart_dir=output / "extrafanart",
++        nfo=output / "影片.nfo",
++        trailer=output / "trailer.mp4",
++    )
++    if old_thumb:
++        paths.thumb.write_bytes(b"existing-thumb")
++    requested: list[str] = []
++
++    async def acquire(urls: Sequence[str], store: ResourceStore, client: WebClient) -> Path | None:
++        requested.extend(urls)
++        if urls == ["https://example.test/poster"]:
++            return poster if has_poster else None
++        return cover if cover_available else None
++
++    monkeypatch.setattr("amane.handlers.file._acquire_first_local", acquire)
++    await _download_images_via_store(
++        Metadata(
++            number="IPSS-453", thumb_urls=["https://example.test/cover"], poster_urls=["https://example.test/poster"]
++        ),
++        resource_store,
++        Mock(spec=WebClient),
++        paths,
++        HotSettings(watermark=WatermarkConfig(enabled=old_thumb)),
++        {LibraryResource(kind) for kind in selected},
++        parse_file_info("ipss-453-uc.mp4"),
++        ContentType.CENSORED,
++    )
++    assert cover.read_bytes() == original_cover
++    if old_thumb:
++        assert paths.thumb.read_bytes() == b"existing-thumb"
++    else:
++        assert paths.thumb.exists() is ("thumb" in selected and cover_available)
++    assert paths.fanart.exists() is ("fanart" in selected and cover_available)
++    if paths.fanart.exists():
++        assert paths.fanart.read_bytes() == original_cover
++    assert paths.poster.exists() is ("poster" in selected and (has_poster or cover_available))
++    if paths.poster.exists():
++        with Image.open(paths.poster) as generated:
++            assert generated.size == ((90, 160) if has_poster else (140, 200))
++    if selected == ["poster"] and has_poster:
++        assert requested == ["https://example.test/poster"]
++    if not selected:
++        assert requested == []
++
++
++def test_fanart_is_only_a_library_resource(tmp_path: Path) -> None:
++    request = LibraryCreateRequest(path=str(tmp_path), copy_resources=[LibraryResource.fanart])
++    assert request.model_dump(mode="json")["copy_resources"] == ["fanart"]
++    with pytest.raises(ValidationError, match="download_resources"):
++        ScrapingConfig.model_validate({"download_resources": ["fanart"]})
++    with pytest.raises(ValidationError, match="copy_resources"):
++        LibraryCreateRequest.model_validate({"path": str(tmp_path), "copy_resources": ["invalid"]})
+diff --git a/tests/handlers/test_organize.py b/tests/handlers/test_organize.py
+index a622ca4b664ec5659b69b23ddad859a3658ed11e..41e1e5446f3c552f54e82ed32d87f48823da6e39 100644
+--- a/tests/handlers/test_organize.py
++++ b/tests/handlers/test_organize.py
+@@ -13,7 +13,7 @@ from PIL import Image
+ 
+ from amane.config import HotSettings, WatermarkConfig
+ from amane.db.models import MediaFileStatus
+-from amane.enums import DownloadableResource, LinkMode, MoveMode
++from amane.enums import LibraryResource, LinkMode, MoveMode
+ from amane.handlers import DeleteHandler, DeletePayload, LibraryTaskLocks, OrganizeHandler, OrganizePayload
+ from amane.handlers.file import FileOperationsResult, _record_conflicts, commit_organized_media_file
+ from amane.handlers.models import ORGANIZE_CONFLICT_LIMIT
+@@ -31,14 +31,14 @@ if TYPE_CHECKING:
+ @pytest.mark.parametrize(
+     "stored",
+     [
+-        [DownloadableResource.thumb],
+-        [DownloadableResource.thumb, DownloadableResource.poster],
++        [LibraryResource.thumb],
++        [LibraryResource.thumb, LibraryResource.poster],
+         [],
+-        list(DownloadableResource),
++        list(LibraryResource),
+     ],
+ )
+ async def test_organize_resolve_coerces_json_copy_resources(
+-    repo: Repository, tmp_path: Path, stored: list[DownloadableResource]
++    repo: Repository, tmp_path: Path, stored: list[LibraryResource]
+ ) -> None:
+     """JSON 列读回是 str; resolve 必须做成 enum, 否则 model_dump 会 UnexpectedValue."""
+     lib_root = tmp_path / "lib"
+@@ -48,7 +48,7 @@ async def test_organize_resolve_coerces_json_copy_resources(
+     payload = OrganizePayload(library_id=lib.id)
+     await payload.resolve(repo)
+     assert payload.copy_resources == stored
+-    assert all(type(item) is DownloadableResource for item in payload.copy_resources or [])
++    assert all(type(item) is LibraryResource for item in payload.copy_resources or [])
+     with warnings.catch_warnings():
+         warnings.simplefilter("error", UserWarning)
+         dumped = payload.model_dump(mode="json")
+diff --git a/web/src/components/library/library-form.tsx b/web/src/components/library/library-form.tsx
+index 74fa55cfc05e1afb0dbfb3102023633913d260b4..4eef9a99f2610ba4dcb753344e72863341601378 100644
+--- a/web/src/components/library/library-form.tsx
++++ b/web/src/components/library/library-form.tsx
+@@ -22,7 +22,7 @@ import { useTranslation } from "react-i18next";
+ import { getPathTemplateSchemaOptions } from "@/client/@tanstack/react-query.gen";
+ import { LibraryCreateRequestSchema, LibraryResponseSchema } from "@/client/schemas.gen";
+ import type {
+-  DownloadableResource,
++  LibraryResource,
+   LibraryAutomation,
+   LibraryCreateRequest,
+   LibraryIngest,
+@@ -36,7 +36,7 @@ import { encodeFormBody } from "@/components/schema-form/encode";
+ import { EnumToggle } from "@/components/common/enum-toggle";
+ import { FieldChrome } from "@/components/schema-form/fields/field-chrome";
+ import {
+-  DOWNLOADABLE_RESOURCES,
++  LIBRARY_RESOURCES,
+   LIBRARY_AUTOMATIONS,
+   LIBRARY_INGESTS,
+   LINK_MODES,
+@@ -48,11 +48,11 @@ import { TemplateInput } from "./template-input";
+ /** 创建/编辑共用: 宽屏两列, 窄屏仍单列. */
+ export const LIBRARY_FORM_MODAL_SIZE = "min(64rem, 94vw)";
+ 
+-function isCopyResource(v: string): v is DownloadableResource {
+-  return DOWNLOADABLE_RESOURCES.some((item) => item === v);
++function isCopyResource(v: string): v is LibraryResource {
++  return LIBRARY_RESOURCES.some((item) => item === v);
+ }
+ 
+-function parseCopyResources(values: string[]): DownloadableResource[] {
++function parseCopyResources(values: string[]): LibraryResource[] {
+   return values.filter(isCopyResource);
+ }
+ 
+@@ -94,7 +94,7 @@ export interface LibraryFormState {
+   link_mode: LibraryResponse["link_mode"];
+   strm_content_template: string;
+   write_nfo: boolean;
+-  copy_resources: DownloadableResource[];
++  copy_resources: LibraryResource[];
+   trailer_pattern: string;
+   blacklist_patterns: string;
+   min_file_size: number;
+@@ -126,7 +126,7 @@ export function emptyLibraryForm(schema?: PathTemplateSchemaResponse | null): Li
+     link_mode: "strm",
+     strm_content_template: "",
+     write_nfo: true,
+-    copy_resources: DOWNLOADABLE_RESOURCES.filter((r) => r !== "trailer"),
++    copy_resources: LIBRARY_RESOURCES.filter((r) => r !== "trailer"),
+     trailer_pattern: "(?i)trailer",
+     blacklist_patterns: "",
+     min_file_size: 0,
+@@ -420,7 +420,7 @@ export function LibraryFormFields({ value, onChange, showCreateOnly }: LibraryFo
+         }
+       >
+         <Group mt="xs">
+-          {DOWNLOADABLE_RESOURCES.map((kind) => (
++          {LIBRARY_RESOURCES.map((kind) => (
+             <Checkbox key={kind} value={kind} label={t(`copyResource.${kind}`)} />
+           ))}
+         </Group>
+diff --git a/web/src/i18n/locales/en/library.json b/web/src/i18n/locales/en/library.json
+index 499d06495ae3dd7695a0822211ea58ba74fe30a3..dbeb8c321823c8f5cac871489325cbe1a201cfc3 100644
+--- a/web/src/i18n/locales/en/library.json
++++ b/web/src/i18n/locales/en/library.json
+@@ -121,6 +121,7 @@
+   "copyResource": {
+     "thumb": "Cover",
+     "poster": "Poster",
++    "fanart": "缩略图（fanart）",
+     "extrafanart": "Stills",
+     "trailer": "Trailer"
+   },
+diff --git a/web/src/i18n/locales/en/tasks.json b/web/src/i18n/locales/en/tasks.json
+index c291018a6c7df914d2fb6e9af3dc8e08b99afe3d..c980338a2df92ac25669b2f364d42f477a374f20 100644
+--- a/web/src/i18n/locales/en/tasks.json
++++ b/web/src/i18n/locales/en/tasks.json
+@@ -196,6 +196,7 @@
+         "options": {
+           "thumb": "Cover",
+           "poster": "Poster",
++          "fanart": "缩略图（fanart）",
+           "extrafanart": "Stills",
+           "trailer": "Trailer"
+         },
+@@ -203,6 +204,7 @@
+           "options": {
+             "thumb": "Cover",
+             "poster": "Poster",
++            "fanart": "缩略图（fanart）",
+             "extrafanart": "Stills",
+             "trailer": "Trailer"
+           }
+diff --git a/web/src/i18n/locales/zh-CN/library.json b/web/src/i18n/locales/zh-CN/library.json
+index 84e015a6839e4a0d068178cf74a8b5c0bc24acea..547d67e56918ae59d7ede730f4ea13631680fc66 100644
+--- a/web/src/i18n/locales/zh-CN/library.json
++++ b/web/src/i18n/locales/zh-CN/library.json
+@@ -117,8 +117,9 @@
+   "fieldCopyResources": "整理时复制",
+   "fieldCopyResourcesHint": "整理时把已下载的资源复制到库路径",
+   "copyResource": {
+-    "thumb": "封面",
+-    "poster": "海报",
++    "thumb": "封面（thumb）",
++    "poster": "海报（poster）",
++    "fanart": "缩略图（fanart）",
+     "extrafanart": "剧照",
+     "trailer": "预告片"
+   },
+diff --git a/web/src/i18n/locales/zh-CN/tasks.json b/web/src/i18n/locales/zh-CN/tasks.json
+index 35853b1d34090a33b783949d2f319dcea3775df0..c36726db71f7e4cab6bec65e45b694631289027f 100644
+--- a/web/src/i18n/locales/zh-CN/tasks.json
++++ b/web/src/i18n/locales/zh-CN/tasks.json
+@@ -170,15 +170,17 @@
+         "label": "整理时复制",
+         "description": "覆盖媒体库设置",
+         "options": {
+-          "thumb": "封面",
+-          "poster": "海报",
++          "thumb": "封面（thumb）",
++          "poster": "海报（poster）",
++          "fanart": "缩略图（fanart）",
+           "extrafanart": "剧照",
+           "trailer": "预告片"
+         },
+         "$": {
+           "options": {
+-            "thumb": "封面",
+-            "poster": "海报",
++            "thumb": "封面（thumb）",
++            "poster": "海报（poster）",
++            "fanart": "缩略图（fanart）",
+             "extrafanart": "剧照",
+             "trailer": "预告片"
+           }
+diff --git a/web/src/lib/exhaustive-maps.ts b/web/src/lib/exhaustive-maps.ts
+index 30d316c4d6f9dd8d116c2411138c13bfbacd6caa..c20bef5516578a5f6d4cb21ace78a5e31e96de02 100644
+--- a/web/src/lib/exhaustive-maps.ts
++++ b/web/src/lib/exhaustive-maps.ts
+@@ -17,6 +17,7 @@ import type {
+   FeedItemState,
+   LibraryAutomation,
+   LibraryIngest,
++  LibraryResource,
+   LinkMode,
+   LoggingConfig,
+   MediaFileStatus,
+@@ -102,6 +103,14 @@ export const DOWNLOADABLE_RESOURCES = exhaustiveTuple<DownloadableResource>()(
+   "trailer",
+ );
+ 
++export const LIBRARY_RESOURCES = exhaustiveTuple<LibraryResource>()(
++  "thumb",
++  "poster",
++  "fanart",
++  "extrafanart",
++  "trailer",
++);
++
+ export const LIBRARY_AUTOMATIONS = exhaustiveTuple<LibraryAutomation>()("none", "watch", "scrape");
+ 
+ export const LIBRARY_INGESTS = exhaustiveTuple<LibraryIngest>()("native", "clouddrive");
+diff --git a/tests/api/test_tasks.py b/tests/api/test_tasks.py
+index 24f42da65426dcedac73c3b79663b2d82c751446..97d3d7873f8ff71f4268d8e889da9fe58eff27e5 100644
+--- a/tests/api/test_tasks.py
++++ b/tests/api/test_tasks.py
+@@ -9,7 +9,7 @@ from pydantic import BaseModel
+ 
+ from amane.api.models.tasks import TaskResultPayload
+ from amane.db.models import TaskType
+-from amane.enums import DownloadableResource
++from amane.enums import LibraryResource
+ from amane.handlers import models as handler_models
+ 
+ if TYPE_CHECKING:
+@@ -55,7 +55,7 @@ class TestSubmitTask:
+         org = await client.post("tasks", json={"type": "organize", "library_id": lib.id})
+         assert org.status_code == 202
+         assert org.json()["payload"]["write_nfo"] is True
+-        assert set(org.json()["payload"]["copy_resources"]) == {"thumb", "poster", "extrafanart", "trailer"}
++        assert set(org.json()["payload"]["copy_resources"]) == {"thumb", "poster", "fanart", "extrafanart", "trailer"}
+         assert "recursive" not in org.json()["payload"]
+         assert "patterns" not in org.json()["payload"]
+ 
+@@ -72,7 +72,7 @@ class TestSubmitTask:
+             name="i",
+             path=str(safe_path / "i"),
+             write_nfo=False,
+-            copy_resources=[DownloadableResource.thumb],
++            copy_resources=[LibraryResource.thumb],
+         )
+         (safe_path / "i").mkdir()
+         inherited = await client.post("tasks", json={"type": "organize", "library_id": lib3.id})
+diff --git a/tests/handlers/test_file_ops.py b/tests/handlers/test_file_ops.py
+index 07de7ce51753334ea0f35fa26938c83e5c6a0c3d..3cd9bc3af49c8beb412960e0e3d3e1a9ba96884a 100644
+--- a/tests/handlers/test_file_ops.py
++++ b/tests/handlers/test_file_ops.py
+@@ -10,7 +10,7 @@ from PIL import Image
+ 
+ from amane.config import HotSettings, WatermarkConfig
+ from amane.db.models import MediaFile, Metadata
+-from amane.enums import DownloadableResource
++from amane.enums import LibraryResource
+ from amane.handlers.file import _copy_into_library, execute_file_operations
+ from amane.media import ResourceStore
+ from amane.organize import MoveMode, PlaceOutcome, ResolvedPaths
+@@ -199,7 +199,7 @@ async def test_copy_resources_skips_trailer(resource_store: ResourceStore, tmp_p
+         file_info=parse_file_info(src),
+         web_client=client,
+         config=HotSettings(),
+-        copy_resources=[DownloadableResource.thumb, DownloadableResource.poster],
++        copy_resources=[LibraryResource.thumb, LibraryResource.poster],
+     )
+     assert result.outcome is PlaceOutcome.PLACED
+     assert paths.thumb.exists()
+@@ -333,7 +333,7 @@ async def test_watermark_from_external_subtitle(resource_store: ResourceStore, t
+ async def test_in_place_rewrites_existing_artifacts(resource_store: ResourceStore, tmp_path: Path) -> None:
+     """源已在目标路径上时仍重写库路径上的旧产物: NFO 按本次元数据, 图片与预告片按本次资源.
+ 
+-    fanart 与 thumb 同源, 因此与 thumb 一同重写.
++    默认复制选项包含 fanart 与 thumb，两者使用同一份原图。
+     """
+     client = cast("WebClient", FakeClient())
+ 
+@@ -378,10 +378,10 @@ async def test_in_place_rewrites_existing_artifacts(resource_store: ResourceStor
+ 
+ @pytest.mark.parametrize("pre_existing", [True, False])
+ @pytest.mark.asyncio
+-async def test_fanart_follows_thumb_selection(
++async def test_unselected_fanart_is_preserved(
+     resource_store: ResourceStore, tmp_path: Path, pre_existing: bool
+ ) -> None:
+-    """thumb 不在 copy_resources 时 fanart 既不重写也不补建."""
++    """fanart 未被选择时，既不重写已有文件，也不创建新文件。"""
+     client = cast("WebClient", FakeClient())
+ 
+     paths = _paths(tmp_path / "out")
+@@ -403,7 +403,7 @@ async def test_fanart_follows_thumb_selection(
+         file_info=parse_file_info(paths.video),
+         web_client=client,
+         config=HotSettings(),
+-        copy_resources=[DownloadableResource.poster],
++        copy_resources=[LibraryResource.poster],
+     )
+ 
+     assert result.outcome is PlaceOutcome.PLACED
