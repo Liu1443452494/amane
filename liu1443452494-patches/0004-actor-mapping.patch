@@ -1,0 +1,201 @@
+diff --git a/docs/dev/data-model.md b/docs/dev/data-model.md
+index a43cf1391a7e379399fc5ad167cb12b18fbea46e..2a88e70c71880f71311cf53e43c849eeb280b6a0 100644
+--- a/docs/dev/data-model.md
++++ b/docs/dev/data-model.md
+@@ -136,6 +136,8 @@ PATCH 三态: **省略键** = 不更新 (`exclude_unset`); **显式值** = 写
+ 
+ `Metadata` 上的 `actors` / `tags` / `directors` (JSON list) 与 `studio` / `publisher` / `series` (标量) **仍是刮削聚合、NFO、路径模板的真值来源**. 分类实体表 + 关联表是**查询投影**: `upsert_metadata` / `update_metadata` 写入后重建 (按 name get-or-create; list 字段带 `position` 保序).
+ 
++影片刮削在写入前经 `src/amane/liu1443452494_actor_mapping.py::map_actor_names` 读取数据目录的 `mapping_actor.xml`; 唯一匹配转换为标准名, 原名交给现有别名解析. 歧义与未匹配保留原始输入, raw 快照不变; 每次读取支持用户更新文件.
++
+ 写入时先清洗 `Metadata.actors` 的 `name(alias1, alias2)` 形式: 展示名留真值, 别名并入对应演员的 `ActorAlias` 行. 每个名字经 `resolve_actor_by_name` 解析 (展示名精确命中 → 别名唯一命中 → 歧义 / 无命中以名字本身为展示名新建实体), 因此站点给的**裸别名**会折到已认定演员, 不再另建重复实体; block 判定在解析前后各执行一次. 影片名单顺序由第一成功源锁定, 其后已抓源按展示名填空性别. 写入时若带 `FilmActor.gender`, 只对 `Actor.gender == unknown` 且 gender 未锁的行填空, 不覆盖已有值, 不写入 `field_sources`. `Metadata.actors` 存库始终是展示名, 站点 `raw` 快照保留原始带括号形式.
+ 
+ 用户对爬取侧分类的改名 / 合并 / 删除意图落在 `FacetRule` (按 `(kind, source_name)` 唯一), **不**修改投影表本身:
+diff --git a/src/amane/handlers/scrape.py b/src/amane/handlers/scrape.py
+index 16f281b64b87371d8bc5231c66536cab014400c9..fe6e6eb5af71a0850269931a5cf676ba2732e560 100644
+--- a/src/amane/handlers/scrape.py
++++ b/src/amane/handlers/scrape.py
+@@ -8,6 +8,7 @@ from ..crawlers.models import SearchQuery
+ from ..crawlers.site_roles import builtin_descriptors
+ from ..db.models import TaskType
+ from ..enums import ActorGender, MetadataField
++from ..liu1443452494_actor_mapping import map_actor_names
+ from ..media import materialize_images
+ from ..observability import current
+ from ..observability.models import SiteOutcomeKind
+@@ -172,7 +173,7 @@ class ScrapeHandler(TaskHandler[ScrapePayload, ScrapeResult]):
+         await self.report_progress(len(SCALAR_FIELDS) + 1, progress_total, "materialize")
+ 
+         # 写库并关联 MediaFile. Metadata.actors 仍是展示名; 性别写入 Actor 空位.
+-        cast = result.metadata.actors
++        cast = map_actor_names(result.metadata.actors, self._resource_store.data_dir)
+         meta = await self._repo.upsert_metadata(
+             number=payload.number,
+             content_type=payload.content_type,
+diff --git a/src/amane/liu1443452494_actor_mapping.py b/src/amane/liu1443452494_actor_mapping.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..46b3b34ebc87a27a5ccfd71330959c64abcde342
+--- /dev/null
++++ b/src/amane/liu1443452494_actor_mapping.py
+@@ -0,0 +1,50 @@
++"""自用演员姓名映射，仅处理刮削结果，不维护演员数据库。"""
++
++from collections.abc import Sequence
++from pathlib import Path
++from xml.etree import ElementTree
++
++from .crawlers.models import FilmActor
++from .parsing import split_actor_aliases
++
++
++def map_actor_names(actors: Sequence[FilmActor], data_dir: Path) -> list[FilmActor]:
++    """每次读取映射文件；缺失文件、未匹配或歧义姓名沿用原始输入。"""
++    if not actors:
++        return []
++    path = data_dir / "mapping_actor.xml"
++    try:
++        root = ElementTree.fromstring(path.read_text(encoding="utf-8-sig"))
++    except FileNotFoundError:
++        return list(actors)
++    except (OSError, UnicodeError, ElementTree.ParseError) as exc:
++        raise ValueError(f"演员映射文件读取失败，请检查 UTF-8 编码和 XML 格式: {path}") from exc
++
++    names: dict[str, str | None] = {}
++    for entry in root.iter("a"):
++        standard = entry.get("zh_cn", "").strip()
++        if not standard:
++            continue
++        candidates = [entry.get(key, "") for key in ("zh_cn", "zh_tw", "jp")]
++        candidates.extend(entry.get("keyword", "").split(","))
++        for candidate in candidates:
++            name = candidate.strip()
++            if not name:
++                continue
++            if name not in names:
++                names[name] = standard
++            elif names[name] != standard:
++                names[name] = None
++
++    mapped: list[FilmActor] = []
++    for actor in actors:
++        name, aliases = split_actor_aliases(actor.name)
++        standard = names.get(name)
++        if standard is None:
++            mapped.append(actor)
++            continue
++        # 原始姓名交给现有括号别名解析，供后续演员资料查询使用。
++        aliases = list(dict.fromkeys(alias for alias in (name, *aliases) if alias != standard))
++        mapped_name = f"{standard}({','.join(aliases)})" if aliases else standard
++        mapped.append(FilmActor(name=mapped_name, gender=actor.gender))
++    return mapped
+diff --git a/tests/handlers/test_liu1443452494_actor_mapping.py b/tests/handlers/test_liu1443452494_actor_mapping.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..681f147ba5a5a9ed2631ffe95d612ee940dbb1c1
+--- /dev/null
++++ b/tests/handlers/test_liu1443452494_actor_mapping.py
+@@ -0,0 +1,105 @@
++"""XML 演员姓名匹配、歧义跳过和用户文件更新。"""
++
++from pathlib import Path
++
++import pytest
++
++from amane.config import HotSettings
++from amane.crawlers.models import FilmActor
++from amane.db.repository import Repository
++from amane.enums import ActorGender
++from amane.handlers import ScrapeHandler, ScrapePayload
++from amane.liu1443452494_actor_mapping import map_actor_names
++from amane.media import ResourceStore
++from amane.organize.template import TemplateContext
++from amane.parsing import ContentType, split_actor_aliases
++from tests.handlers.test_scraper import FakeFactory, MockCrawler
++
++
++@pytest.fixture
++def mapping_file(tmp_path: Path) -> Path:
++    path = tmp_path / "mapping_actor.xml"
++    path.write_text(
++        '<actors><a zh_cn="枫花恋" zh_tw="楓可憐" jp="楓カレン" '
++        'keyword="枫可怜,田中レモン,枫花恋" avatar="https://example.test/avatar.jpg"/></actors>',
++        encoding="utf-8",
++    )
++    return path
++
++
++@pytest.mark.parametrize(
++    ("name", "expected"),
++    [
++        ("枫花恋", "枫花恋"),
++        ("楓可憐", "枫花恋"),
++        ("楓カレン", "枫花恋"),
++        ("枫可怜", "枫花恋"),
++        (" 田中レモン ", "枫花恋"),
++        ("未知演员", "未知演员"),
++        ("前缀枫可怜", "前缀枫可怜"),
++        ("枫可怜（田中レモン）", "枫花恋"),
++    ],
++)
++def test_mapping_fields(mapping_file: Path, name: str, expected: str) -> None:
++    actor = FilmActor(name=name, gender=ActorGender.FEMALE)
++    mapped = map_actor_names([actor], mapping_file.parent)
++    primary, aliases = split_actor_aliases(mapped[0].name)
++    assert primary == expected
++    assert mapped[0].gender is ActorGender.FEMALE
++    assert actor.name == name
++    if name == "枫可怜（田中レモン）":
++        assert aliases == ["枫可怜", "田中レモン"]
++
++
++def test_ambiguous_name_uses_original_flow(mapping_file: Path) -> None:
++    mapping_file.write_text(
++        '<actors><a zh_cn="甲" keyword="重名,重名,甲的别名"/>'
++        '<a zh_cn="乙" keyword="重名"/><a zh_cn="甲" jp="甲的别名"/>'
++        '<a zh_cn="" keyword="空标准名"/></actors>',
++        encoding="utf-8",
++    )
++    actors = [FilmActor(name=name) for name in ("重名", "甲的别名", "空标准名")]
++    mapped = map_actor_names(actors, mapping_file.parent)
++    assert [split_actor_aliases(actor.name)[0] for actor in mapped] == ["重名", "甲", "空标准名"]
++
++
++def test_file_updates_and_missing_file(mapping_file: Path) -> None:
++    actor = FilmActor(name="枫可怜")
++    assert split_actor_aliases(map_actor_names([actor], mapping_file.parent)[0].name)[0] == "枫花恋"
++    mapping_file.write_text('<actors><a zh_cn="新标准名" keyword="枫可怜"/></actors>', encoding="utf-8-sig")
++    assert split_actor_aliases(map_actor_names([actor], mapping_file.parent)[0].name)[0] == "新标准名"
++    mapping_file.unlink()
++    assert map_actor_names([actor], mapping_file.parent) == [actor]
++    assert map_actor_names([], mapping_file.parent) == []
++
++
++@pytest.mark.parametrize("content", [b"<actors>", b"\xff\xfe"])
++def test_invalid_mapping_has_clear_error(mapping_file: Path, content: bytes) -> None:
++    mapping_file.write_bytes(content)
++    with pytest.raises(ValueError, match="演员映射文件读取失败"):
++        map_actor_names([FilmActor(name="枫可怜")], mapping_file.parent)
++
++
++@pytest.mark.asyncio
++async def test_scrape_uses_standard_name_before_saving(
++    mapping_file: Path,
++    repo: Repository,
++    resource_store: ResourceStore,
++) -> None:
++    mapping_file.write_text('<actors><a zh_cn="枫花恋" keyword="Actor A"/></actors>', encoding="utf-8")
++    handler = ScrapeHandler(
++        repo=repo,
++        factory=FakeFactory({"javdb": MockCrawler()}),
++        resource_store=resource_store,
++        pipeline_config=HotSettings(),
++    )
++    result = await handler.handle(ScrapePayload(number="MIDV-123", content_type=ContentType.CENSORED))
++    assert result.success
++    metadata = await repo.get_metadata_by_number("MIDV-123")
++    assert metadata is not None
++    assert metadata.actors == ["枫花恋"]
++    assert TemplateContext.from_metadata(metadata).variables["actresses"] == "枫花恋"
++    assert metadata.raw["javdb"]["actors"][0]["name"] == "Actor A"
++    actors = await repo.get_actors_by_names(["枫花恋"])
++    assert len(actors) == 1 and actors[0].id is not None
++    assert "Actor A" in await repo.get_actor_aliases(actors[0].id)
