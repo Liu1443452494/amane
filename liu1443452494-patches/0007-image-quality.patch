@@ -12,7 +12,7 @@ index 5d3c05d..3082157 100644
  | `scores` | `dict[site, score]` | 不同评分体系 (5 分 vs 100 分) 需保留来源供前端分列展示 |
  | `raw` | `{site: {field: value}}` 原始快照 | 支持离线重新聚合与站点级复用 (见 [task-system.md](task-system.md)) |
 diff --git a/docs/dev/task-system.md b/docs/dev/task-system.md
-index 7b91355..01e56a5 100644
+index 7b91355..8be9975 100644
 --- a/docs/dev/task-system.md
 +++ b/docs/dev/task-system.md
 @@ -121,8 +121,9 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
@@ -22,7 +22,7 @@ index 7b91355..01e56a5 100644
 -- **URL 重排契约**: 被下载类型的 URL 列表按本次下载成功 (含缓存命中) 稳定分区 — 成功者保序前置, 失败者保序沉底. 死 URL 不再占据首位, 但保留在尾部, 来源恢复后下次物化可重新尝试. 未选中下载的类型无成败信息, 保持聚合优先级原序; extrafanart 为站点分组 dict, 不重排. `raw` 快照保持站点原始数据.
 -- 裁剪海报 → 按 `scraping.poster_ratio` 从 thumb 右侧裁切; 超分就地覆盖. 失败不阻断刮削.
 +- **URL 重排契约**: 封面与海报由 `src/amane/media/liu1443452494_image_quality.py::ImagePool` 完整解码后按实际文件字节数降序排列; 海报等大小优先日亚, 其余沿用候选顺序. 预告片仍按成功者保序前置, 失败地址保留在尾部供后续重试. 未下载类型与剧照分组不重排; 新图均失败时保留旧图, 图片锁定字段不自动下载.
-+- **高清海报**: `ScrapeHandler` 从来源 `raw` 构造检索信息, DMM 原始日文优先, 禁止使用翻译标题或姓名映射结果. `src/amane/media/liu1443452494_posters.py::PosterResolver.resolve` 先按 Tenhow 同区块商品编号核实 ASIN 并收集图片, 再查询日亚; 未取得有效日亚图片时回退原始标题检索. 同一地址仅处理一次, 同 ASIN 的新图片仍参与比较; `raw` 快照不变.
++- **高清海报**: `ScrapeHandler` 从来源 `raw` 按 DMM、AVBase、JavBus 顺序选取日文, 再回退其他合格原文, 禁止使用翻译或姓名映射结果. `src/amane/media/liu1443452494_posters.py::PosterResolver.resolve` 经 Tenhow 商品号核实 ASIN 后查询日亚; 标题搜索清除当前番号与末尾演员名, 最多缩短重试一次, 光盘与数字视频均按完整原题和演员核对. 同一地址去重, 同 ASIN 新图片仍参与比较; `raw` 不变.
 +- **裁剪海报**: 保留原触发条件与右侧裁剪比例, 仅当裁剪结果宽高均不减小且至少一项增大时替换下载海报; 失败保留下载结果. 超分就地覆盖, 失败不阻断刮削.
  
  手动裁切复用同一派生通道 (`op=crop`, `args=box:…`), 见 [data-model.md](data-model.md).
@@ -198,10 +198,10 @@ index 0000000..c0b0149
 +        ]
 diff --git a/src/amane/media/liu1443452494_posters.py b/src/amane/media/liu1443452494_posters.py
 new file mode 100644
-index 0000000..d078e42
+index 0000000..2c5b1b5
 --- /dev/null
 +++ b/src/amane/media/liu1443452494_posters.py
-@@ -0,0 +1,432 @@
+@@ -0,0 +1,505 @@
 +"""Tenhow 作品核对、ASIN 日亚检索与原始日文标题回退。"""
 +
 +import re
@@ -226,6 +226,8 @@ index 0000000..d078e42
 +class PosterQuery(BaseModel):
 +    number: str
 +    title: str = ""
++    title_source: str = ""
++    actors_source: str = ""
 +    actors: list[str] = Field(default_factory=list)
 +    dmm_ids: list[str] = Field(default_factory=list)
 +
@@ -300,7 +302,10 @@ index 0000000..d078e42
 +    if _number_key(number) is None:
 +        return None
 +    query = PosterQuery(number=number)
-+    for key in sorted(raw, key=lambda key: (key.split(":")[0] != "dmm", key.split(":")[-1] not in {"jp", "ja"})):
++    priorities = {"dmm": 0, "avbase": 1, "javbus": 2}
++    for key in sorted(
++        raw, key=lambda key: (priorities.get(key.split(":")[0], 3), key.split(":")[-1] not in {"jp", "ja"})
++    ):
 +        site, _, language = key.partition(":")
 +        if language and language not in {"jp", "ja"}:
 +            continue
@@ -308,11 +313,12 @@ index 0000000..d078e42
 +            data = MediaMetadata.model_validate(raw[key])
 +        except ValidationError:
 +            continue
-+        if _number_key(data.number) != _number_key(number):
++        if _number_key(data.number) != _number_key(number) and not (site == "dmm" and _matches_cid(data.number, query)):
 +            continue
-+        japanese_source = site == "dmm" or language in {"jp", "ja"}
++        japanese_source = site in {"dmm", "avbase"} or language in {"jp", "ja"}
 +        if not query.title and data.title and (japanese_source or re.search(r"[\u3040-\u30ff]", data.title)):
 +            query.title = data.title
++            query.title_source = site
 +        if not query.actors:
 +            names: list[str] = []
 +            for actor in data.actors:
@@ -320,6 +326,8 @@ index 0000000..d078e42
 +                    primary, aliases = split_actor_aliases(actor.name)
 +                    names.extend([primary, *aliases])
 +            query.actors = list(dict.fromkeys(name.strip() for name in names if name.strip()))
++            if query.actors:
++                query.actors_source = site
 +        if site == "dmm" and data.source_url:
 +            cid = _dmm_id(data.source_url)
 +            if cid and cid not in query.dmm_ids:
@@ -333,6 +341,7 @@ index 0000000..d078e42
 +
 +
 +def _matches_cid(cid: str, query: PosterQuery) -> bool:
++    cid = re.sub(r"(?<=[a-z])[-_](?=\d+$)", "", unicodedata.normalize("NFKC", cid).lower())
 +    wanted = _number_key(query.number)
 +    if wanted is None:
 +        return False
@@ -476,15 +485,55 @@ index 0000000..d078e42
 +    return AmazonProduct(asin=asin, title=title.strip(), actor_text=actor_text, image_urls=list(dict.fromkeys(urls)))
 +
 +
-+def _title_matches(title: str, query: PosterQuery) -> bool:
-+    def clean(value: str) -> str:
-+        value = re.sub(r"[\[【(（]\s*(?:DVD|Blu-ray|ブルーレイ)\s*[\]】)）]", "", value, flags=re.IGNORECASE)
-+        normalized = _text_key(value)
-+        for actor in query.actors:
-+            normalized = normalized.replace(_text_key(actor), "")
-+        return normalized
++def _number_prefix(value: str) -> re.Match[str] | None:
++    return re.match(r"^[\[【(「『]?\s*(\d*[a-zA-Z]+[-_]?\d{2,7})(?![a-zA-Z0-9])", value)
 +
-+    wanted, actual = clean(query.title), clean(title)
++
++def _clean_title(value: str, query: PosterQuery) -> str:
++    value = unicodedata.normalize("NFKC", value).strip()
++    prefix = _number_prefix(value)
++    if prefix and _matches_cid(prefix[1], query):
++        value = value[prefix.end() :].lstrip(" \t\r\n]】)」』:：/_-・")
++    value = re.sub(
++        r"[\[【(]\s*(?:DVD|Blu-?ray|ブルーレイ|Prime Video|Amazonビデオ|デジタル(?:動画|ダウンロード)|ダウンロード(?:版)?|動画配信)\s*[\]】)]",
++        "",
++        value,
++        flags=re.IGNORECASE,
++    ).strip()
++    # 仅清除已知演员的独立后缀，标题正文中的姓名仍参与作品核对。
++    actors = sorted(
++        {unicodedata.normalize("NFKC", actor).strip() for actor in query.actors if actor.strip()},
++        key=len,
++        reverse=True,
++    )
++    while value:
++        previous = value
++        for actor in actors:
++            value = re.sub(rf"(?:^|[\s、/・]+){re.escape(actor)}\s*$", "", value).strip()
++        if value == previous:
++            break
++    return value
++
++
++def poster_search_titles(query: PosterQuery) -> list[str]:
++    """最多进行一次缩短标题重试；候选核对始终使用完整原题。"""
++    title = _clean_title(query.title, query)
++    if not _text_key(title):
++        return []
++    titles = [title]
++    shortened = re.split(r"[。！？!?]", title, maxsplit=1)[0].strip()
++    if shortened == title or len(_text_key(shortened)) < 12:
++        shortened = title[:32].rstrip() if len(_text_key(title)) >= 48 else title
++    if 12 <= len(_text_key(shortened)) <= len(_text_key(title)) * 0.8:
++        titles.append(shortened)
++    return titles
++
++
++def _title_matches(title: str, query: PosterQuery) -> bool:
++    prefix = _number_prefix(unicodedata.normalize("NFKC", title).strip())
++    if prefix and not _matches_cid(prefix[1], query):
++        return False
++    wanted, actual = _text_key(_clean_title(query.title, query)), _text_key(_clean_title(title, query))
 +    if not wanted or not actual:
 +        return False
 +    if wanted == actual:
@@ -495,6 +544,20 @@ index 0000000..d078e42
 +def _actors_match(text: str, query: PosterQuery) -> bool:
 +    key = _text_key(text)
 +    return any(_text_key(actor) in key for actor in query.actors if _text_key(actor))
++
++
++def _amazon_media(card: Selector, title: str) -> bool:
++    # 搜索覆盖光盘和数字视频；正文中的 DVD 字样不能证明商品属于影片。
++    text = " ".join(card.xpath(".//text()[not(ancestor::h2)]").getall())
++    text += " " + " ".join(re.findall(r"[\[【(（]([^\]】)）]+)[\]】)）]", title))
++    return (
++        re.search(
++            r"\bDVD\b|Blu-?ray|ブルーレイ|Prime Video|Amazonビデオ|デジタル動画|ダウンロード|動画配信",
++            text,
++            re.IGNORECASE,
++        )
++        is not None
++    )
 +
 +
 +class PosterResolver:
@@ -577,20 +640,21 @@ index 0000000..d078e42
 +        page = await self._amazon_page(f"https://www.amazon.co.jp/dp/{asin}")
 +        return amazon_product(page, asin) if page else None
 +
-+    async def _search(self, query: PosterQuery, trusted_asins: set[str]) -> bool:
-+        if not query.title:
-+            return False
-+        url = "https://www.amazon.co.jp/s?" + urlencode({"k": f"{query.title} [DVD]", "i": "dvd"})
++    async def _search_title(
++        self, query: PosterQuery, trusted_asins: set[str], title: str, matched_asins: set[str]
++    ) -> bool | None:
++        url = "https://www.amazon.co.jp/s?" + urlencode({"k": title})
 +        page = await self._amazon_page(url)
 +        if page is None or not _safe_url(page.url, {"www.amazon.co.jp", "amazon.co.jp"}):
-+            return False
++            return None
 +        success = False
-+        matched_asins: set[str] = set()
 +        for card in Selector(text=page.html).css('[data-component-type="s-search-result"][data-asin]'):
 +            asin = card.attrib.get("data-asin", "")
 +            if re.fullmatch(r"[A-Z0-9]{10}", asin) is None:
 +                continue
 +            title = card.css("h2").xpath("string(.)").get() or card.css("img.s-image::attr(alt)").get() or ""
++            if asin not in trusted_asins and not _amazon_media(card, title):
++                continue
 +            if asin not in trusted_asins and not _title_matches(title, query):
 +                continue
 +            # 搜索卡片的 ASIN 与商品链接必须一致；查询串不能用作演员匹配证据。
@@ -619,10 +683,19 @@ index 0000000..d078e42
 +            for src in card.css("img.s-image::attr(src)").getall():
 +                images.extend(amazon_image_urls(src))
 +            success = await self._images.acquire(images) or success
-+        if not success:
-+            # 标题路径核实的新 ASIN 仍可尝试 Tenhow 直链；候选池负责地址去重。
-+            await self._images.acquire([f"https://www.tenhow.net/images/{asin}.jpg" for asin in sorted(matched_asins)])
 +        return success
++
++    async def _search(self, query: PosterQuery, trusted_asins: set[str]) -> bool:
++        matched_asins: set[str] = set()
++        for title in poster_search_titles(query):
++            success = await self._search_title(query, trusted_asins, title, matched_asins)
++            if success:
++                return True
++            if success is None:
++                break
++        # 标题路径核实的新 ASIN 仍可尝试 Tenhow 直链；网络失败不触发缩短标题重试。
++        await self._images.acquire([f"https://www.tenhow.net/images/{asin}.jpg" for asin in sorted(matched_asins)])
++        return False
 +
 +    async def resolve(self, query: PosterQuery) -> None:
 +        matches = await self._tenhow(query)
@@ -815,10 +888,10 @@ index 0301d25..08552a2 100644
      logger.debug(
 diff --git a/tests/handlers/test_liu1443452494_image_quality.py b/tests/handlers/test_liu1443452494_image_quality.py
 new file mode 100644
-index 0000000..6aafd32
+index 0000000..b68c6d5
 --- /dev/null
 +++ b/tests/handlers/test_liu1443452494_image_quality.py
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,111 @@
 +"""刮削入口的图片原文、字段锁定及旧图回退。"""
 +
 +from pathlib import Path
@@ -833,7 +906,6 @@ index 0000000..6aafd32
 +from amane.handlers import ScrapeHandler, ScrapePayload
 +from amane.llm import Translator
 +from amane.media import ResourceStore
-+from amane.media.liu1443452494_posters import PosterQuery
 +from amane.net.http import WebClient
 +from amane.parsing import ContentType
 +from tests.handlers.test_scraper import FakeFactory, MockCrawler
@@ -862,9 +934,8 @@ index 0000000..6aafd32
 +) -> None:
 +    (tmp_path / "mapping_actor.xml").write_text('<actors><a zh_cn="枫花恋" jp="楓カレン"/></actors>', encoding="utf-8")
 +    original = MediaMetadata(number="IPZZ-396", title="原題の長い物語 楓カレン", actors=film_actors(["楓カレン"]))
-+    query = PosterQuery(number=original.number, title=original.title or "", actors=["楓カレン"])
 +    image = "https://m.media-amazon.com/images/I/81Found.jpg"
-+    client = PosterClient(pages={search_url(query): search_card(image)}, images={image: image_bytes()})
++    client = PosterClient(pages={search_url(): search_card(image)}, images={image: image_bytes()})
 +    config = HotSettings()
 +    config.scraping.content_routes[ContentType.CENSORED] = [SiteName.DMM]
 +    config.scraping.field_language[MetadataField.TITLE] = Language.ZH_CN
@@ -887,7 +958,7 @@ index 0000000..6aafd32
 +    assert saved.poster_urls == [image]
 +    assert saved.raw["dmm"]["title"] == original.title
 +    assert saved.raw["dmm"]["actors"][0]["name"] == "楓カレン"
-+    assert search_url(query) in client.page_requests
++    assert search_url() in client.page_requests
 +
 +
 +@pytest.mark.asyncio
@@ -934,10 +1005,10 @@ index 0000000..6aafd32
 +        assert client.downloaded == [new_thumb, new_poster]
 diff --git a/tests/media/test_liu1443452494_image_quality.py b/tests/media/test_liu1443452494_image_quality.py
 new file mode 100644
-index 0000000..fdc75d8
+index 0000000..a6f511c
 --- /dev/null
 +++ b/tests/media/test_liu1443452494_image_quality.py
-@@ -0,0 +1,491 @@
+@@ -0,0 +1,553 @@
 +"""图片文件大小择优、高清海报检索分支与裁剪覆盖保护。"""
 +
 +from collections.abc import Mapping
@@ -1037,8 +1108,8 @@ index 0000000..fdc75d8
 +    return PosterQuery(number="IPZZ-396", title="原題の長い物語 楓カレン", actors=["楓カレン"])
 +
 +
-+def search_url(query: PosterQuery) -> str:
-+    return "https://www.amazon.co.jp/s?" + urlencode({"k": f"{query.title} [DVD]", "i": "dvd"})
++def search_url(title: str = "原題の長い物語") -> str:
++    return "https://www.amazon.co.jp/s?" + urlencode({"k": title})
 +
 +
 +@pytest.mark.asyncio
@@ -1136,7 +1207,7 @@ index 0000000..fdc75d8
 +            "https://www.tenhow.net/mokuji.html": '<a href="kaede_karen.html">楓カレン</a>',
 +            "https://www.tenhow.net/kaede_karen.html": tenhow_block(),
 +            detail: product_html(old_image) if detail_available else None,
-+            search_url(query): search_card(scaled),
++            search_url(): search_card(scaled),
 +        },
 +        images={
 +            tenhow: image_bytes(minimum_bytes=4000),
@@ -1149,7 +1220,7 @@ index 0000000..fdc75d8
 +    )
 +    assert result.poster_urls[0] == new_image
 +    assert client.page_requests.count(detail) == 1
-+    assert client.page_requests[-1] == search_url(query)
++    assert client.page_requests[-1] == search_url()
 +    assert client.downloaded.count(tenhow) == 1
 +    assert client.downloaded.count(old_image) == int(detail_available)
 +    assert scaled in client.downloaded
@@ -1164,7 +1235,7 @@ index 0000000..fdc75d8
 +    amazon = "https://m.media-amazon.com/images/I/81FromSearch.jpg"
 +    tenhow = "https://www.tenhow.net/images/B000000002.jpg"
 +    client = PosterClient(
-+        pages={search_url(query): search_card(amazon, "B000000002")},
++        pages={search_url(): search_card(amazon, "B000000002")},
 +        images={amazon: image_bytes(minimum_bytes=5000) if amazon_available else None, tenhow: image_bytes()},
 +    )
 +    result = await materialize_images(
@@ -1181,7 +1252,7 @@ index 0000000..fdc75d8
 +    wrong = "https://m.media-amazon.com/images/I/81Wrong.jpg"
 +    client = PosterClient(
 +        pages={
-+            search_url(query): search_card(wrong, title="原題の別の物語 楓カレン")
++            search_url(): search_card(wrong, title="原題の別の物語 楓カレン")
 +            + search_card(wrong, "B000000002", title="原題の長い物語 別の出演者")
 +        },
 +        images={wrong: image_bytes(minimum_bytes=50000)},
@@ -1347,7 +1418,7 @@ index 0000000..fdc75d8
 +@pytest.mark.asyncio
 +async def test_amazon_age_page_continues_to_original_search(resource_store: ResourceStore, tmp_path: Path) -> None:
 +    query = poster_query()
-+    search = search_url(query)
++    search = search_url()
 +    eligibility = "https://www.amazon.co.jp/black-curtain/save-eligibility/black-curtain?" + urlencode(
 +        {"returnUrl": search.removeprefix("https://www.amazon.co.jp")}
 +    )
@@ -1403,7 +1474,7 @@ index 0000000..fdc75d8
 +    )
 +    query = poster_query()
 +    client = PosterClient(
-+        pages={search_url(query): search_card(first) + search_card(second, "B000000002")},
++        pages={search_url(): search_card(first) + search_card(second, "B000000002")},
 +        images={first: image_bytes(minimum_bytes=3000), second: image_bytes(minimum_bytes=5000)},
 +    )
 +    result = await materialize_images(
@@ -1419,7 +1490,7 @@ index 0000000..fdc75d8
 +    amazon = "https://m.media-amazon.com/images/I/81DetailActor.jpg"
 +    client = PosterClient(
 +        pages={
-+            search_url(query): search_card(amazon, title="原題の長い物語"),
++            search_url(): search_card(amazon, title="原題の長い物語"),
 +            "https://www.amazon.co.jp/dp/B000000001": product_html(amazon, title="原題の長い物語")
 +            + '<div id="bylineInfo">楓カレン (出演)</div>',
 +        },
@@ -1429,16 +1500,79 @@ index 0000000..fdc75d8
 +        [], [], [], resource_store, cast("WebClient", client), HotSettings(), tmp_path, poster_query=query
 +    )
 +    assert result.poster_urls == [amazon]
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    ("media", "accepted"),
++    [("DVD", True), ("Prime Video", True), ("ダウンロード", True), ("Kindle版", False), ("", False)],
++)
++async def test_search_accepts_disc_and_digital_video_only(
++    resource_store: ResourceStore, tmp_path: Path, media: str, accepted: bool
++) -> None:
++    amazon = "https://m.media-amazon.com/images/I/81Digital.jpg"
++    card = (
++        search_card(amazon)
++        .replace(" [DVD]", "")
++        .replace('<img class="s-image"', f'<span>{media}</span><img class="s-image"')
++    )
++    client = PosterClient(pages={search_url(): card}, images={amazon: image_bytes()})
++    result = await materialize_images(
++        [], [], [], resource_store, cast("WebClient", client), HotSettings(), tmp_path, poster_query=poster_query()
++    )
++    assert result.poster_urls == ([amazon] if accepted else [])
++    assert client.downloaded == ([amazon] if accepted else [])
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    "outcome", ["recovered", "different_title", "different_number", "network_failure", "first_success"]
++)
++async def test_shortened_search_keeps_full_identity_and_stops_on_network_failure(
++    resource_store: ResourceStore, tmp_path: Path, outcome: str
++) -> None:
++    title = "長い作品名の検索に必要な前半部分。元の作品だけに含まれる後半の内容"
++    shortened = "長い作品名の検索に必要な前半部分"
++    query = PosterQuery(number="IPZZ-396", title=f"IPZZ-396 {title} 楓カレン", actors=["楓カレン"])
++    amazon = "https://m.media-amazon.com/images/I/81Shortened.jpg"
++    returned = f"{title} 楓カレン"
++    if outcome == "different_title":
++        returned = f"{shortened}。別の作品の内容 楓カレン"
++    elif outcome == "different_number":
++        returned = f"IPZZ-397 {returned}"
++    first_page = search_card(amazon, title=returned) if outcome == "first_success" else "<html></html>"
++    client = PosterClient(
++        pages={
++            search_url(title): None if outcome == "network_failure" else first_page,
++            search_url(shortened): search_card(amazon, title=returned),
++        },
++        images={amazon: image_bytes()},
++    )
++    result = await materialize_images(
++        [], [], [], resource_store, cast("WebClient", client), HotSettings(), tmp_path, poster_query=query
++    )
++    accepted = outcome in {"recovered", "first_success"}
++    assert result.poster_urls == ([amazon] if accepted else [])
++    searches = [url for url in client.page_requests if url.startswith("https://www.amazon.co.jp/s?")]
++    assert searches == (
++        [search_url(title)]
++        if outcome in {"network_failure", "first_success"}
++        else [search_url(title), search_url(shortened)]
++    )
++    assert all("IPZZ" not in url and "dvd" not in url.lower() for url in searches)
++    if not accepted:
++        assert client.downloaded == []
 diff --git a/tests/media/test_liu1443452494_posters.py b/tests/media/test_liu1443452494_posters.py
 new file mode 100644
-index 0000000..bcee08c
+index 0000000..b9311a7
 --- /dev/null
 +++ b/tests/media/test_liu1443452494_posters.py
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,235 @@
 +"""检索原文、作品身份与主图解析的边界。"""
 +
 +import json
 +from html import escape
++from itertools import permutations
 +
 +import pytest
 +
@@ -1449,6 +1583,7 @@ index 0000000..bcee08c
 +    amazon_image_urls,
 +    amazon_product,
 +    make_poster_query,
++    poster_search_titles,
 +    tenhow_actor_pages,
 +    tenhow_index_pages,
 +    tenhow_matches,
@@ -1477,6 +1612,67 @@ index 0000000..bcee08c
 +    assert make_poster_query("IPZZ-396", {"dmm": {"number": "OTHER-396", "title": "別の作品"}}) is None
 +    assert make_poster_query("IPZZ-396", {"dmm": {"title": "番号欠損"}}) is None
 +    assert make_poster_query("任意の文字列", raw) is None
++
++
++@pytest.mark.parametrize(
++    ("number", "returned", "site", "matched"),
++    [
++        ("FSDSS-304", "1FSDSS-304", "dmm", True),
++        ("FSDSS-304", "1fsdss00304", "dmm", True),
++        ("ABP-123", "118ABP-123", "dmm", True),
++        ("FSDSS-304", "1FSDSS-305", "dmm", False),
++        ("FSDSS-304", "999FSDSS-304", "dmm", False),
++        ("ABC-123", "1ABC-123", "dmm", False),
++        ("FSDSS-304", "1FSDSS-304", "javbus:jp", False),
++    ],
++)
++def test_query_accepts_only_known_dmm_number_aliases(number: str, returned: str, site: str, matched: bool) -> None:
++    raw = {site: MediaMetadata(number=returned, title="日本語の原題", actors=film_actors(["楓カレン"])).model_dump()}
++    query = make_poster_query(number, raw)
++    assert (query is not None) is matched
++    if query is not None:
++        assert query.title == "日本語の原題" and query.actors == ["楓カレン"]
++        assert query.title_source == query.actors_source == "dmm"
++    assert raw[site]["number"] == returned
++
++
++@pytest.mark.parametrize("order", list(permutations(("dmm", "avbase", "javbus:jp"))))
++def test_query_fallback_order_does_not_depend_on_snapshot_order(order: tuple[str, str, str]) -> None:
++    raw = {
++        site: MediaMetadata(
++            number="FSDSS-304", title=f"{site} の原題", actors=film_actors([f"{site} の出演者"])
++        ).model_dump()
++        for site in order
++    }
++    for selected in ("dmm", "avbase", "javbus:jp"):
++        query = make_poster_query("FSDSS-304", raw)
++        assert query is not None
++        assert query.title == f"{selected} の原題" and query.actors == [f"{selected} の出演者"]
++        assert query.title_source == query.actors_source == selected.partition(":")[0]
++        del raw[selected]
++
++
++@pytest.mark.parametrize(
++    ("title", "expected"),
++    [
++        ("FSDSS-304 日本語の原題 楓カレン", ["日本語の原題"]),
++        ("【１ＦＳＤＳＳ－３０４】日本語の原題 楓カレン [DVD]", ["日本語の原題"]),
++        ("日本語の原題 楓カレン [ダウンロード]", ["日本語の原題"]),
++        ("FSDSS-305 日本語の原題 楓カレン", ["FSDSS-305 日本語の原題"]),
++        ("祭りで出会った楓カレンの物語", ["祭りで出会った楓カレンの物語"]),
++        ("FSDSS-304", []),
++        ("楓カレン [DVD]", []),
++        (" \n\t", []),
++        (
++            "長い作品名の検索に必要な前半部分。元の作品だけに含まれる後半の内容 楓カレン",
++            ["長い作品名の検索に必要な前半部分。元の作品だけに含まれる後半の内容", "長い作品名の検索に必要な前半部分"],
++        ),
++    ],
++)
++def test_search_title_cleaning_preserves_original_and_limits_retries(title: str, expected: list[str]) -> None:
++    query = PosterQuery(number="FSDSS-304", title=title, actors=["楓カレン"])
++    assert poster_search_titles(query) == expected
++    assert query.title == title and query.actors == ["楓カレン"]
 +
 +
 +def test_tenhow_actor_index_exact_names_and_ambiguity() -> None:

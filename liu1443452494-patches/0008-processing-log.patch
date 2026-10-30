@@ -358,10 +358,10 @@ index c0b0149..70a3df3 100644
              return list(dict.fromkeys([*previous, *self._attempts]))
          return [candidate.url for candidate in ranked] + [
 diff --git a/src/amane/media/liu1443452494_posters.py b/src/amane/media/liu1443452494_posters.py
-index d078e42..85c9260 100644
+index 2c5b1b5..9e6c2a2 100644
 --- a/src/amane/media/liu1443452494_posters.py
 +++ b/src/amane/media/liu1443452494_posters.py
-@@ -302,6 +302,7 @@ class PosterResolver:
+@@ -365,6 +365,7 @@ class PosterResolver:
      async def _html(self, url: str) -> PosterPage | None:
          if url not in self._pages:
              self._pages[url] = None
@@ -369,7 +369,7 @@ index d078e42..85c9260 100644
              try:
                  response = await self._client.request("GET", url, headers={"Accept-Language": "ja-JP,ja;q=0.9"})
                  response.encoding = "utf-8"
-@@ -316,6 +317,9 @@ class PosterResolver:
+@@ -379,6 +380,9 @@ class PosterResolver:
                      structlog.get_logger().warning("高清海报页面不可用", url=url, reason=reason or "验证码")
                  else:
                      self._pages[url] = PosterPage(url=str(response.url), html=html)
@@ -379,7 +379,7 @@ index d078e42..85c9260 100644
              except Exception as exc:
                  structlog.get_logger().warning("高清海报页面获取失败", url=url, error=str(exc))
          return self._pages[url]
-@@ -336,7 +340,9 @@ class PosterResolver:
+@@ -399,7 +403,9 @@ class PosterResolver:
          return page
  
      async def _tenhow(self, query: PosterQuery) -> list[TenhowMatch]:
@@ -389,7 +389,7 @@ index d078e42..85c9260 100644
              return []
          index = await self._html("https://www.tenhow.net/mokuji.html")
          if index is None or not _safe_url(index.url, {"www.tenhow.net", "tenhow.net"}):
-@@ -365,18 +371,36 @@ class PosterResolver:
+@@ -428,18 +434,37 @@ class PosterResolver:
                  for match in tenhow_matches(page.html, query):
                      matches[match.asin] = match
          if len(matches) > 1:
@@ -419,16 +419,17 @@ index d078e42..85c9260 100644
 +        )
 +        return product
  
-     async def _search(self, query: PosterQuery, trusted_asins: set[str]) -> bool:
-         if not query.title:
-+            structlog.get_logger().info("跳过日亚标题搜索", reason="没有可用的原始日文标题")
-             return False
-         url = "https://www.amazon.co.jp/s?" + urlencode({"k": f"{query.title} [DVD]", "i": "dvd"})
-+        structlog.get_logger().info("日亚原始标题搜索", title=query.title, actors=query.actors, url=url)
+     async def _search_title(
+         self, query: PosterQuery, trusted_asins: set[str], title: str, matched_asins: set[str]
+     ) -> bool | None:
+         url = "https://www.amazon.co.jp/s?" + urlencode({"k": title})
++        structlog.get_logger().info(
++            "日亚原始标题搜索", title=query.title, actors=query.actors, search_title=title, url=url
++        )
          page = await self._amazon_page(url)
          if page is None or not _safe_url(page.url, {"www.amazon.co.jp", "amazon.co.jp"}):
-             return False
-@@ -409,6 +433,7 @@ class PosterResolver:
+             return None
+@@ -473,6 +498,7 @@ class PosterResolver:
              if not card_matches and not detail_matches:
                  continue
              matched_asins.add(asin)
@@ -436,15 +437,25 @@ index d078e42..85c9260 100644
              images: list[str] = []
              if product is not None and detail_matches:
                  images.extend(product.image_urls)
-@@ -417,6 +442,7 @@ class PosterResolver:
-             success = await self._images.acquire(images) or success
-         if not success:
-             # 标题路径核实的新 ASIN 仍可尝试 Tenhow 直链；候选池负责地址去重。
-+            structlog.get_logger().info("日亚标题搜索未取得有效海报", asins=sorted(matched_asins))
-             await self._images.acquire([f"https://www.tenhow.net/images/{asin}.jpg" for asin in sorted(matched_asins)])
+@@ -482,6 +508,9 @@ class PosterResolver:
          return success
  
-@@ -429,4 +455,7 @@ class PosterResolver:
+     async def _search(self, query: PosterQuery, trusted_asins: set[str]) -> bool:
++        if not poster_search_titles(query):
++            structlog.get_logger().info("跳过日亚标题搜索", reason="没有可用的原始日文标题")
++            return False
+         matched_asins: set[str] = set()
+         for title in poster_search_titles(query):
+             success = await self._search_title(query, trusted_asins, title, matched_asins)
+@@ -490,6 +519,7 @@ class PosterResolver:
+             if success is None:
+                 break
+         # 标题路径核实的新 ASIN 仍可尝试 Tenhow 直链；网络失败不触发缩短标题重试。
++        structlog.get_logger().info("日亚标题搜索未取得有效海报", asins=sorted(matched_asins))
+         await self._images.acquire([f"https://www.tenhow.net/images/{asin}.jpg" for asin in sorted(matched_asins)])
+         return False
+ 
+@@ -502,4 +532,7 @@ class PosterResolver:
              if product is not None:
                  success = await self._images.acquire(product.image_urls) or success
          if not success:
