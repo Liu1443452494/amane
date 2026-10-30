@@ -1,0 +1,543 @@
+diff --git a/docs/dev/task-system.md b/docs/dev/task-system.md
+index c50ad84..be5d6e6 100644
+--- a/docs/dev/task-system.md
++++ b/docs/dev/task-system.md
+@@ -93,8 +93,8 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
+ 
+ `execute_file_operations` 是落盘执行单元, 仅 ORGANIZE 经 `apply_file_operations` 调用. 不变量:
+ 
+-- **整理 = 复制到库路径**: 优先用 Resource 已有文件, 缺失才现场 `acquire`; 复制哪些类型由 `Library.copy_resources` (或 payload 覆盖) 决定 (见 [data-model.md](data-model.md)). 目标路径上已有的产物一律按本次内容覆盖, NFO 同理, 不判断是否已存在; fanart 没有刮削来源, 内容取 thumb, 因此随 thumb 一同重写, 该路径上的自备背景图会被覆盖, 也没有单独的关闭途径.
+-- **封面角标**: `watermark.enabled` 时 poster / thumb 副本按源文件 FileInfo 与条目类型叠 PNG; Resource 原图与 fanart 不修改.
++- **整理图片**: 优先用 Resource 原图, 缺失才 `acquire`; `Library.copy_resources` 或 payload 决定写出类型, 选中产物按本次内容覆盖. fanart 独立选择并复用 thumb 原图. `src/amane/handlers/file.py::_copy_library_image` 按实际格式处理 JPG 输出: JPEG 直接复制, 其余仅转换库路径副本; 刮削缓存和候选排序不参与转换.
++- **封面角标**: `watermark.enabled` 时 poster / thumb 按 FileInfo 与条目类型叠 PNG; 非 JPEG 转换与角标合并编码, 保留颜色配置和显示方向. `src/amane/media/images.py::_save_jpeg` 的整理参数不影响裁剪等既有调用; Resource 原图与 fanart 不叠角标.
+ - **海报缺失**: 按 `scraping.crop_poster` 从已落盘 thumb 裁剪兜底.
+ - **目标占用**: 判定分为四态: 空闲 / 已就位 / 被占用 / 无法判定. 源与目标已是同一文件 (含硬链同一 inode) 时视为就位, 只跳过视频落盘, 附属文件照常重写; 被占用时跳过该文件, 不改名、不覆盖、不移动, 视频与字幕一视同仁, 由调用方按冲突记账, 冲突条目 (源路径 + 被占用的目标路径; 字幕冲突的 `path` 记字幕源路径, 不记视频源路径) 写进任务结果供界面显示, 且 `conflicts` 恒为 `conflicted` 条数的前缀 (差额只留在任务日志里), 冲突不自动解决, 未落盘的行留在源路径, 由用户自行处理. 无法判定 (stat 失败, 或两者在两次读取之间被替换) 按失败记账并带上 stat 的错误说明, 不得计入冲突或放宽为空闲. 存在性与占用判定都经 `existing_disk_path` (跟随符号链接; 读不出状态时按不存在处理, 不抛异常): 目标位置是断链符号链接时按空闲处理, MOVE 会替换它, SYMLINK 因 EEXIST 记失败. 判定与落盘之间还有窗口, MOVE / COPY 期间目标被外部写入仍会覆盖, 这条保证是尽力而为.
+ - **链接**: `link_template` 非空时视频就位后在库外写 STRM 或符号链接, 指向这次整理后的路径; `MediaFile.path` 仍是真实视频. 链接写入失败时, 目标路径仍在本库内则回写 path, 任务记失败以便重试补链接.
+diff --git a/src/amane/handlers/file.py b/src/amane/handlers/file.py
+index 3cc76ad..7738871 100644
+--- a/src/amane/handlers/file.py
++++ b/src/amane/handlers/file.py
+@@ -3,8 +3,10 @@ from collections.abc import Sequence
+ from dataclasses import dataclass, field
+ from pathlib import Path
+ from typing import TYPE_CHECKING
++from uuid import uuid4
+ 
+ import structlog
++from PIL import Image
+ 
+ from ..config import HotSettings, WatermarkConfig
+ from ..db.models import Library, MediaFile
+@@ -14,6 +16,7 @@ from ..library import MEDIA_EXTENSIONS, LibraryFileKind, LibraryScan, ancestor_d
+ from ..library.rules import is_in_trash
+ from ..media import ResourceStore, apply_cover_watermarks_from_info, crop_poster
+ from ..media import write_nfo as write_nfo_file
++from ..media.images import _save_jpeg
+ from ..media.resource_store import internal_url_hash
+ from ..net.http import WebClient
+ from ..observability.liu1443452494_process_events import file_processing, record_copied_file
+@@ -301,7 +304,7 @@ async def _acquire_first_local(urls: list[str], store: ResourceStore, client: We
+     return None
+ 
+ 
+-def _copy_into_library(src: Path, dst: Path) -> None:
++def _copy_into_library(src: Path, dst: Path, *, record: bool = True) -> None:
+     """复制到媒体库, 元数据复制失败不算失败.
+ 
+     成功路径保持 copy2 的全部行为 (Windows 的 CopyFile2 与其余平台的 copyfile + copystat).
+@@ -317,7 +320,65 @@ def _copy_into_library(src: Path, dst: Path) -> None:
+             shutil.copystat(src, dst)
+         except OSError as exc:
+             logger.debug("copy metadata skipped", src=str(src), dst=str(dst), error=str(exc))
++    if record:
++        record_copied_file(src, dst)
++
++
++def _copy_library_image(
++    src: Path,
++    dst: Path,
++    *,
++    config: HotSettings | None = None,
++    file_info: FileInfo | None = None,
++    content_type: ContentType | None = None,
++    watermark_dir: Path | None = None,
++) -> bool:
++    """非 JPEG 原图仅在整理输出 JPG 时转换；返回值表示已完成转换及所需角标。"""
++    if dst.suffix.lower() not in {".jpg", ".jpeg"}:
++        _copy_into_library(src, dst)
++        return False
++    if dst.exists() and src.samefile(dst):
++        raise OSError("整理图片的目标不能与缓存源图相同")
++    try:
++        with Image.open(src) as image:
++            image.load()
++            needs_conversion = image.format != "JPEG"
++    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
++        raise OSError(f"整理图片无法读取: {src}") from exc
++    if not needs_conversion:
++        _copy_into_library(src, dst)
++        return False
++
++    temporary = dst.with_name(f".{dst.stem}.{uuid4().hex}.jpg")
++    try:
++        marked = False
++        wm = config.watermark if config is not None else WatermarkConfig()
++        if wm.enabled and file_info is not None and content_type is not None:
++            # 先在原始格式的副本叠加角标，合并为一次 JPEG 编码。
++            shutil.copyfile(src, temporary)
++            marked = apply_cover_watermarks_from_info(
++                temporary,
++                file_info,
++                content_type,
++                jpeg_quality=100,
++                watermark_dir=watermark_dir,
++                scale=wm.scale,
++                corners=wm.corners,
++                preserve_details=True,
++            )
++        if not marked:
++            with Image.open(src) as image:
++                _save_jpeg(image, temporary, 100, preserve_details=True)
++        with Image.open(temporary) as image:
++            image.load()
++            if image.format != "JPEG":
++                raise OSError("整理图片转换后不是 JPEG 格式")
++        # 编码完成后沿用库路径复制，兼容拒绝写入文件元数据的网盘。
++        _copy_into_library(temporary, dst, record=False)
++    finally:
++        temporary.unlink(missing_ok=True)
+     record_copied_file(src, dst)
++    return True
+ 
+ 
+ @in_thread
+@@ -336,18 +397,34 @@ def _place_library_images(
+ ) -> None:
+     # 复制封面 / 海报 / 预告片 / extrafanart 到库路径, 不判断目标上是否已有产物.
+     # fanart 与封面独立选择，共用资源目录中的封面原图。
++    converted_thumb = False
++    converted_poster = False
+     if thumb_local is not None:
+         if LibraryResource.thumb in kinds:
+             paths.thumb.parent.mkdir(parents=True, exist_ok=True)
+-            _copy_into_library(thumb_local, paths.thumb)
++            converted_thumb = _copy_library_image(
++                thumb_local,
++                paths.thumb,
++                config=config,
++                file_info=file_info,
++                content_type=content_type,
++                watermark_dir=watermark_dir,
++            )
+         if LibraryResource.fanart in kinds:
+             paths.fanart.parent.mkdir(parents=True, exist_ok=True)
+-            _copy_into_library(thumb_local, paths.fanart)
++            _copy_library_image(thumb_local, paths.fanart)
+ 
+     if LibraryResource.poster in kinds:
+         if poster_local is not None:
+             paths.poster.parent.mkdir(parents=True, exist_ok=True)
+-            _copy_into_library(poster_local, paths.poster)
++            converted_poster = _copy_library_image(
++                poster_local,
++                paths.poster,
++                config=config,
++                file_info=file_info,
++                content_type=content_type,
++                watermark_dir=watermark_dir,
++            )
+         elif thumb_local is not None and config is not None and config.scraping.crop_poster:
+             paths.poster.parent.mkdir(parents=True, exist_ok=True)
+             crop_poster(
+@@ -364,13 +441,13 @@ def _place_library_images(
+     if extrafanart and LibraryResource.extrafanart in kinds:
+         paths.extrafanart_dir.mkdir(parents=True, exist_ok=True)
+         for i, p in enumerate(extrafanart):
+-            _copy_into_library(p, paths.extrafanart_dir / f"{i + 1}.jpg")
++            _copy_library_image(p, paths.extrafanart_dir / f"{i + 1}.jpg")
+ 
+     # 叠加水印 (thumb / poster).
+     wm = config.watermark if config is not None else WatermarkConfig()
+     if wm.enabled and file_info is not None:
+         jpeg_quality = config.scraping.jpeg_quality if config is not None else 95
+-        if LibraryResource.thumb in kinds and paths.thumb.exists():
++        if LibraryResource.thumb in kinds and paths.thumb.exists() and not converted_thumb:
+             apply_cover_watermarks_from_info(
+                 paths.thumb,
+                 file_info,
+@@ -380,7 +457,7 @@ def _place_library_images(
+                 scale=wm.scale,
+                 corners=wm.corners,
+             )
+-        if paths.poster.exists():
++        if paths.poster.exists() and not converted_poster:
+             apply_cover_watermarks_from_info(
+                 paths.poster,
+                 file_info,
+diff --git a/src/amane/media/images.py b/src/amane/media/images.py
+index 0eb7c4a..0630bc4 100644
+--- a/src/amane/media/images.py
++++ b/src/amane/media/images.py
+@@ -36,13 +36,28 @@ _TRANSPOSE_BY_ROTATION: dict[int, Image.Transpose] = {
+ CropRotation = Literal[0, 90, 180, 270]
+ 
+ 
+-def _save_jpeg(img: Image.Image, path: Path, quality: int) -> None:
++def _save_jpeg(img: Image.Image, path: Path, quality: int, *, preserve_details: bool = False) -> None:
+     """落盘为 JPEG, 格式由本函数决定而非路径后缀.
+ 
+     带 alpha 的源图不能直接存 JPEG: Pillow 按 ``.jpg`` 后缀选中 JPEG 编码器后拒绝
+     RGBA. 源图是下载来的, 调用方无法预判它是否为 RGBA, 故转码不交给调用方.
+     """
+-    img.convert("RGB").save(path, format="JPEG", quality=quality)
++    if preserve_details:
++        # 整理转换保留像素尺寸与色彩信息；JPEG 不支持的透明区域使用白底。
++        oriented = ImageOps.exif_transpose(img)
++        rgba = oriented.convert("RGBA")
++        rgb = Image.new("RGB", oriented.size, "white")
++        rgb.paste(rgba, mask=rgba.getchannel("A"))
++        rgb.save(
++            path,
++            format="JPEG",
++            quality=quality,
++            subsampling=0,
++            icc_profile=oriented.info.get("icc_profile"),
++            exif=oriented.getexif(),
++        )
++    else:
++        img.convert("RGB").save(path, format="JPEG", quality=quality)
+ 
+ 
+ def format_crop_box_args(left: int, top: int, right: int, bottom: int, *, rotation: CropRotation = 0) -> str:
+@@ -303,6 +318,7 @@ def apply_cover_watermarks(
+     watermark_dir: Path | None = None,
+     scale: float = _DEFAULT_SCALE,
+     corners: Mapping[WatermarkKind, WatermarkCorner] | None = None,
++    preserve_details: bool = False,
+ ) -> bool:
+     """叠到库路径封面/海报. 无标记或无图则不动. 不修改 Resource 原图."""
+     stems = _stamp_stems(has_subtitle=has_subtitle, uncensored=uncensored, mosaic=mosaic, definition=definition)
+@@ -310,7 +326,7 @@ def apply_cover_watermarks(
+         return False
+     try:
+         with Image.open(path) as src:
+-            img = src.convert("RGBA")
++            img = (ImageOps.exif_transpose(src) if preserve_details else src).convert("RGBA")
+         width, height = img.size
+         if width <= 0 or height <= 0:
+             return False
+@@ -330,7 +346,7 @@ def apply_cover_watermarks(
+         if not any(grouped.values()):
+             return False
+         _paste_stamps(img, grouped, pad=pad, gap=gap)
+-        _save_jpeg(img, path, jpeg_quality)
++        _save_jpeg(img, path, jpeg_quality, preserve_details=preserve_details)
+         return True
+     except Exception as e:
+         logger.warning("cover watermark failed", path=str(path), error=str(e))
+@@ -346,6 +362,7 @@ def apply_cover_watermarks_from_info(
+     watermark_dir: Path | None = None,
+     scale: float = _DEFAULT_SCALE,
+     corners: Mapping[WatermarkKind, WatermarkCorner] | None = None,
++    preserve_details: bool = False,
+ ) -> bool:
+     """``content_type`` 是条目类型: 无码章与列表角标同用 ``parsing/file_info.py::shows_uncensored`` 的口径."""
+     return apply_cover_watermarks(
+@@ -358,4 +375,5 @@ def apply_cover_watermarks_from_info(
+         watermark_dir=watermark_dir,
+         scale=scale,
+         corners=corners,
++        preserve_details=preserve_details,
+     )
+diff --git a/tests/handlers/test_liu1443452494_library_jpeg.py b/tests/handlers/test_liu1443452494_library_jpeg.py
+new file mode 100644
+index 0000000..3b0c052
+--- /dev/null
++++ b/tests/handlers/test_liu1443452494_library_jpeg.py
+@@ -0,0 +1,286 @@
++"""整理图片的真实格式、原图保留与单次 JPEG 编码。"""
++
++from pathlib import Path
++from typing import cast
++
++import pytest
++from PIL import Image, ImageCms, JpegImagePlugin
++
++from amane.config import HotSettings, ScrapingConfig, WatermarkConfig
++from amane.db.models import Metadata
++from amane.enums import DownloadableResource, LibraryResource
++from amane.handlers import file as file_module
++from amane.handlers.file import _place_library_images
++from amane.media import ResourceStore, materialize_images
++from amane.media import images as image_module
++from amane.net.http import WebClient
++from amane.parsing import ContentType, parse_file_info
++from tests.handlers.test_file_ops import _paths
++from tests.media.test_liu1443452494_image_quality import PosterClient
++
++
++@pytest.mark.parametrize(
++    ("image_format", "suffix", "mode"),
++    [
++        ("JPEG", ".jpg", "RGB"),
++        ("JPEG", ".webp", "RGB"),
++        ("WEBP", ".webp", "RGB"),
++        ("WEBP", ".jpg", "RGB"),
++        ("PNG", ".png", "RGBA"),
++        ("PNG", ".jpg", "P"),
++    ],
++)
++def test_jpeg_outputs_keep_sources_and_repeat_from_original(
++    tmp_path: Path, image_format: str, suffix: str, mode: str
++) -> None:
++    source = tmp_path / f"缓存原图{suffix}"
++    Image.new(mode, (300, 200), 0 if mode == "P" else "blue").save(source, format=image_format)
++    original = source.read_bytes()
++    trailer = tmp_path / "预告片.mp4"
++    trailer.write_bytes(b"unchanged-video")
++    paths = _paths(tmp_path / "整理")
++    outputs = [paths.thumb, paths.poster, paths.fanart, paths.extrafanart_dir / "1.jpg"]
++    first: list[bytes] = []
++    for turn in range(2):
++        if turn:
++            for output in outputs:
++                output.write_bytes(b"old-output-must-not-be-the-source")
++        _place_library_images.sync(
++            paths,
++            thumb_local=source,
++            poster_local=source,
++            trailer_local=trailer,
++            extrafanart=[source],
++            kinds=set(LibraryResource),
++            config=HotSettings(watermark=WatermarkConfig(enabled=False)),
++            file_info=parse_file_info("MIDV-123.mp4"),
++            content_type=ContentType.CENSORED,
++            watermark_dir=None,
++        )
++        for index, output in enumerate(outputs):
++            with Image.open(output) as image:
++                image.load()
++                assert image.format == "JPEG" and image.size == (300, 200)
++                if image_format != "JPEG":
++                    assert isinstance(image, JpegImagePlugin.JpegImageFile)
++                    assert JpegImagePlugin.get_sampling(image) == 0
++                    assert max(value for table in image.quantization.values() for value in table) == 1
++            data = output.read_bytes()
++            if image_format == "JPEG":
++                assert data == original
++            if turn:
++                assert data == first[index]
++            else:
++                first.append(data)
++        assert source.read_bytes() == original
++        assert paths.trailer.read_bytes() == trailer.read_bytes()
++
++
++def test_conversion_preserves_orientation_color_profile_and_transparency(tmp_path: Path) -> None:
++    source = tmp_path / "透明原图.png"
++    image = Image.new("RGBA", (90, 60), (255, 0, 0, 0))
++    image.paste((0, 0, 255, 255), (0, 0, 45, 60))
++    exif = Image.Exif()
++    exif[274] = 6
++    profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
++    image.save(source, exif=exif, icc_profile=profile)
++    original = source.read_bytes()
++    paths = _paths(tmp_path / "整理")
++    _place_library_images.sync(
++        paths,
++        thumb_local=source,
++        poster_local=None,
++        trailer_local=None,
++        extrafanart=[],
++        kinds={LibraryResource.fanart},
++        config=None,
++        file_info=None,
++        content_type=ContentType.CENSORED,
++        watermark_dir=None,
++    )
++    with Image.open(paths.fanart) as output:
++        output.load()
++        assert output.format == "JPEG" and output.size == (60, 90)
++        assert output.getexif().get(274, 1) == 1
++        assert output.info["icc_profile"] == profile
++        assert output.getpixel((30, 70)) == (255, 255, 255)
++        blue = output.getpixel((30, 20))
++        assert isinstance(blue, tuple) and blue[2] > 245 and blue[0] < 10
++    assert source.read_bytes() == original
++
++
++@pytest.mark.parametrize("kind", [LibraryResource.thumb, LibraryResource.poster])
++def test_webp_watermark_and_conversion_encode_once(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: LibraryResource
++) -> None:
++    source = tmp_path / "缓存原图.webp"
++    Image.new("RGB", (400, 240), "blue").save(source, format="WEBP")
++    original = source.read_bytes()
++    stamps = tmp_path / "角标"
++    stamps.mkdir()
++    Image.new("RGBA", (40, 20), (255, 0, 0, 255)).save(stamps / "subtitle.png")
++    saved: list[Path] = []
++    save_jpeg = image_module._save_jpeg
++
++    def record_save(image: Image.Image, path: Path, quality: int, *, preserve_details: bool = False) -> None:
++        saved.append(path)
++        save_jpeg(image, path, quality, preserve_details=preserve_details)
++
++    monkeypatch.setattr(image_module, "_save_jpeg", record_save)
++    monkeypatch.setattr(file_module, "_save_jpeg", record_save)
++    paths = _paths(tmp_path / "整理")
++    _place_library_images.sync(
++        paths,
++        thumb_local=source,
++        poster_local=source,
++        trailer_local=None,
++        extrafanart=[],
++        kinds={kind},
++        config=HotSettings(watermark=WatermarkConfig(enabled=True, scale=0.2)),
++        file_info=parse_file_info("MIDV-123-C.mp4"),
++        content_type=ContentType.CENSORED,
++        watermark_dir=stamps,
++    )
++    output_path = paths.thumb if kind == LibraryResource.thumb else paths.poster
++    with Image.open(output_path) as output:
++        output.load()
++        assert output.format == "JPEG" and output.size == (400, 240)
++        assert isinstance(output, JpegImagePlugin.JpegImageFile)
++        assert JpegImagePlugin.get_sampling(output) == 0
++        red = output.getpixel((20, 20))
++        assert isinstance(red, tuple) and red[0] > 230 and red[2] < 30
++    assert len(saved) == 1
++    assert source.read_bytes() == original
++
++
++@pytest.mark.parametrize("bad_data", [b"<html>blocked</html>", b"RIFFxxxxWEBPVP8 broken", b"\x89PNG\r\n\x1a\n"])
++def test_bad_source_does_not_replace_an_existing_jpeg(tmp_path: Path, bad_data: bytes) -> None:
++    source = tmp_path / "无法读取的原图.jpg"
++    source.write_bytes(bad_data)
++    paths = _paths(tmp_path / "整理")
++    paths.fanart.parent.mkdir(parents=True)
++    Image.new("RGB", (30, 20), "green").save(paths.fanart)
++    previous = paths.fanart.read_bytes()
++    with pytest.raises(OSError, match="整理图片无法读取"):
++        _place_library_images.sync(
++            paths,
++            thumb_local=source,
++            poster_local=None,
++            trailer_local=None,
++            extrafanart=[],
++            kinds={LibraryResource.fanart},
++            config=None,
++            file_info=None,
++            content_type=ContentType.CENSORED,
++            watermark_dir=None,
++        )
++    assert paths.fanart.read_bytes() == previous
++    assert source.read_bytes() == bad_data
++
++
++def test_failed_conversion_preserves_previous_file_and_removes_temporary(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    source = tmp_path / "缓存原图.webp"
++    Image.new("RGB", (60, 40), "blue").save(source, format="WEBP")
++    original = source.read_bytes()
++    target = tmp_path / "fanart.jpg"
++    Image.new("RGB", (60, 40), "red").save(target)
++    previous = target.read_bytes()
++
++    def reject(image: Image.Image, path: Path, quality: int, *, preserve_details: bool = False) -> None:
++        path.write_bytes(b"partial-jpeg")
++        raise OSError("模拟 JPEG 编码失败")
++
++    monkeypatch.setattr(file_module, "_save_jpeg", reject)
++    with pytest.raises(OSError, match="模拟 JPEG 编码失败"):
++        file_module._copy_library_image(source, target)
++    assert target.read_bytes() == previous
++    assert source.read_bytes() == original
++    assert set(tmp_path.iterdir()) == {source, target}
++
++
++def test_conversion_tolerates_denied_file_metadata_and_records_final_image(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    source = tmp_path / "缓存原图.webp"
++    Image.new("RGB", (60, 40), "blue").save(source, format="WEBP")
++    original = source.read_bytes()
++    target = tmp_path / "fanart.jpg"
++    recorded: list[tuple[Path, Path, int]] = []
++
++    def reject_metadata(*args: object, **kwargs: object) -> None:
++        raise PermissionError("模拟网盘拒绝写入文件时间")
++
++    def record(src: Path, dst: Path) -> None:
++        with Image.open(dst) as image:
++            image.load()
++            assert image.format == "JPEG"
++        recorded.append((src, dst, dst.stat().st_size))
++
++    monkeypatch.setattr(file_module.shutil, "copystat", reject_metadata)
++    monkeypatch.setattr(file_module, "record_copied_file", record)
++    file_module._copy_library_image(source, target)
++    assert recorded == [(source, target, target.stat().st_size)]
++    assert source.read_bytes() == original
++    assert set(tmp_path.iterdir()) == {source, target}
++
++
++@pytest.mark.parametrize("suffix", [".png", ".webp", ".JPG", ".jpeg"])
++def test_conversion_only_applies_to_jpeg_output_names(tmp_path: Path, suffix: str) -> None:
++    source = tmp_path / "缓存原图.webp"
++    Image.new("RGB", (60, 40), "blue").save(source, format="WEBP")
++    original = source.read_bytes()
++    target = tmp_path / f"fanart{suffix}"
++    file_module._copy_library_image(source, target)
++    with Image.open(target) as image:
++        assert image.format == ("JPEG" if suffix.lower() in {".jpg", ".jpeg"} else "WEBP")
++    if suffix in {".png", ".webp"}:
++        assert target.read_bytes() == original
++    assert source.read_bytes() == original
++
++
++def test_output_cannot_overwrite_its_cached_source(tmp_path: Path) -> None:
++    source = tmp_path / "后缀错误的缓存.jpg"
++    Image.new("RGB", (60, 40), "blue").save(source, format="WEBP")
++    original = source.read_bytes()
++    with pytest.raises(OSError, match="不能与缓存源图相同"):
++        file_module._copy_library_image(source, source)
++    assert source.read_bytes() == original
++
++
++@pytest.mark.asyncio
++async def test_scrape_caches_webp_and_organize_only_converts_the_library_copy(
++    tmp_path: Path, resource_store: ResourceStore
++) -> None:
++    original_path = tmp_path / "站点原图.webp"
++    Image.new("RGB", (300, 200), "blue").save(original_path, format="WEBP")
++    original = original_path.read_bytes()
++    url = "https://images.test/original.webp"
++    client = PosterClient(images={url: original})
++    web = cast("WebClient", client)
++    config = HotSettings(
++        scraping=ScrapingConfig(download_resources=[DownloadableResource.thumb], crop_poster=False),
++        watermark=WatermarkConfig(enabled=False),
++    )
++    materialized = await materialize_images([], [url], [], resource_store, web, config, tmp_path)
++    cached = await resource_store.resolve(url)
++    assert cached is not None and cached.read_bytes() == original
++    paths = _paths(tmp_path / "整理")
++    await file_module._download_images_via_store(
++        Metadata(number="MIDV-123", thumb_urls=materialized.thumb_urls),
++        resource_store,
++        web,
++        paths,
++        config,
++        {LibraryResource.fanart},
++        parse_file_info("MIDV-123.mp4"),
++        ContentType.CENSORED,
++    )
++    assert cached.read_bytes() == original
++    with Image.open(cached) as image:
++        assert image.format == "WEBP"
++    with Image.open(paths.fanart) as image:
++        image.load()
++        assert image.format == "JPEG" and image.size == (300, 200)
++    assert client.downloaded == [url]

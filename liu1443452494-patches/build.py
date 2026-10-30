@@ -64,6 +64,7 @@ def prepare(root: Path, directory: Path, version: str) -> None:
         "0007-image-quality.patch",
         "0008-processing-log.patch",
         "0009-matching.patch",
+        "0010-library-jpeg.patch",
     )
     actual = {path.name for path in directory.glob("*.patch")}
     if actual != set(patches):
@@ -122,6 +123,7 @@ def run_tests(root: Path) -> None:
         "tests/api/test_tasks.py::TestSubmitTask::test_submit_payloads_and_rejects",
         "tests/handlers/test_file_ops.py",
         "tests/handlers/test_liu1443452494_library_images.py",
+        "tests/handlers/test_liu1443452494_library_jpeg.py",
         "tests/handlers/test_organize.py",
         "tests/media/test_nfo_write.py",
         "tests/media/test_liu1443452494_nfo.py",
