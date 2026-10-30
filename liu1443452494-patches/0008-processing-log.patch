@@ -1,25 +1,25 @@
 diff --git a/docs/dev/frontend.md b/docs/dev/frontend.md
-index c5b8bec..2995b86 100644
+index c5b8bec..fbf4dc1 100644
 --- a/docs/dev/frontend.md
 +++ b/docs/dev/frontend.md
 @@ -75,6 +75,8 @@ Settings、任务提交、定时创建、metadata 编辑共用 `components/schem
  
  ## 实时与状态
  
-+影片详情的自用处理日志入口为 `web/src/components/media/liu1443452494-processing-log.tsx::ProcessingLogButton`；按需读取与番号关联规则见 [observability.md](observability.md)。
++影片详情的自用处理日志入口为 `web/src/components/media/liu1443452494-processing-log.tsx::ProcessingLogButton`，两类记录并存时显示切换标签，单类直接展示；按需读取与番号关联规则见 [observability.md](observability.md)。
 +
  `lib/connection.ts` 是模块级 WS 单例 (指数退避 + 断连轮询降级), 入站经 `parseWSEvent` 窄化. 任务查询的失效必须用同形对象前缀 (`[{ _id: "getTaskChildren" }]`), hey-api 生成的 query key 不是字符串前缀.
  
  | 数据 | 存储位置 |
 diff --git a/docs/dev/observability.md b/docs/dev/observability.md
-index dcc9bce..8816815 100644
+index dcc9bce..172cbc2 100644
 --- a/docs/dev/observability.md
 +++ b/docs/dev/observability.md
 @@ -84,6 +84,8 @@ ORGANIZE / REFRESH 全量回放、浏览器 HAR、回放写生产 DB / 移动用
  
  ## 排障速查
  
-+片库详情的自用「处理日志」经 `src/amane/api/routes/liu1443452494_processing_log.py::get_latest_processing_log` 按番号选取最近的 SCRAPE / ORGANIZE；批量整理按该番号实际日志时间比较，不使用整批结束时间替代。`src/amane/observability/liu1443452494_process_events.py::file_processing` 在文件操作范围绑定番号与历史路径，线程复制上下文；读取与中文说明见 `src/amane/observability/liu1443452494_processing_log.py`。任务编号复用以开始时间隔离，旧整理无明确归属时不关联，历史图片缺项不查询当前资源补值。读取只在详情弹窗打开时触发，长记录的省略范围必须显示。
++片库详情的自用「处理日志」经 `src/amane/api/routes/liu1443452494_processing_log.py::get_latest_processing_log` 按番号分别选取最近的 SCRAPE 与 ORGANIZE，并按此顺序返回；批量整理按该番号实际日志时间比较，不使用整批结束时间替代。`src/amane/observability/liu1443452494_process_events.py::file_processing` 在文件操作范围绑定番号与历史路径，线程复制上下文；读取与中文说明见 `src/amane/observability/liu1443452494_processing_log.py`。任务编号复用以开始时间隔离，旧整理无明确归属时不关联，历史图片缺项不查询当前资源补值。读取只在详情弹窗打开时触发，长记录的省略范围必须显示。
 +
  | 症状 | 排查 |
  |------|------|
@@ -46,11 +46,11 @@ index 42ba215..4c4a50a 100644
  router.include_router(plugins_router)
 diff --git a/src/amane/api/routes/liu1443452494_processing_log.py b/src/amane/api/routes/liu1443452494_processing_log.py
 new file mode 100644
-index 0000000..7e8cb0f
+index 0000000..04ad496
 --- /dev/null
 +++ b/src/amane/api/routes/liu1443452494_processing_log.py
-@@ -0,0 +1,85 @@
-+"""片库详情按番号读取最近可关联的刮削或整理记录，不新增任务关联表。"""
+@@ -0,0 +1,89 @@
++"""片库详情按番号分别读取最近的刮削与整理记录，不新增任务关联表。"""
 +
 +from typing import Annotated
 +
@@ -58,6 +58,7 @@ index 0000000..7e8cb0f
 +
 +from ...db.models import SortOrder, TaskSortField, TaskStatus, TaskType
 +from ...observability.liu1443452494_processing_log import (
++    ProcessingLogReport,
 +    ProcessingLogResponse,
 +    build_report,
 +    read_log,
@@ -80,6 +81,7 @@ index 0000000..7e8cb0f
 +    if metadata is None:
 +        raise HTTPException(status_code=404, detail="影片不存在")
 +    response = ProcessingLogResponse(number=metadata.number)
++    latest: dict[TaskType, ProcessingLogReport] = {}
 +    # 先检查活跃任务；终态按结束时间倒序，以该时间作为批量任务中单片记录的上界。
 +    for statuses, sort_by in (
 +        ([TaskStatus.RUNNING, TaskStatus.QUEUED], TaskSortField.CREATED_AT),
@@ -101,14 +103,15 @@ index 0000000..7e8cb0f
 +            for task in tasks:
 +                if task.id is None:
 +                    continue
-+                if (
-+                    sort_by is TaskSortField.FINISHED_AT
-+                    and task.finished_at is not None
-+                    and response.record is not None
-+                    and utc_time(task.finished_at) < response.record.last_activity_at
-+                ):
-+                    finished = True
-+                    break
++                previous = latest.get(task.type)
++                if sort_by is TaskSortField.FINISHED_AT and task.finished_at is not None:
++                    finished_at = utc_time(task.finished_at)
++                    # 必须找到两类记录才能整体停止，较新的整理不能遮蔽较早的刮削。
++                    if len(latest) == 2 and all(finished_at < record.last_activity_at for record in latest.values()):
++                        finished = True
++                        break
++                    if previous is not None and finished_at < previous.last_activity_at:
++                        continue
 +                if task.type is TaskType.SCRAPE and not same_number(task_number(task), metadata.number):
 +                    continue
 +                if task.type is TaskType.ORGANIZE and task.started_at is None:
@@ -121,18 +124,19 @@ index 0000000..7e8cb0f
 +                    continue
 +                if task.finished_at is not None:
 +                    candidate.last_activity_at = min(candidate.last_activity_at, utc_time(task.finished_at))
-+                if response.record is None or (candidate.last_activity_at, candidate.task_id) > (
-+                    response.record.last_activity_at,
-+                    response.record.task_id,
++                if previous is None or (candidate.last_activity_at, candidate.task_id) > (
++                    previous.last_activity_at,
++                    previous.task_id,
 +                ):
 +                    # 删除任务与读取日志可以并发；任务编号复用时不能返回上一条任务的记录。
 +                    current = await repo.get_task(task.id)
 +                    if current is not None and current.created_at == task.created_at:
-+                        response.record = candidate
++                        latest[task.type] = candidate
 +            offset += len(tasks)
 +            finished = finished or len(tasks) < 50
 +    response.notices = list(dict.fromkeys(response.notices))
-+    if response.record is None:
++    response.records = [latest[kind] for kind in (TaskType.SCRAPE, TaskType.ORGANIZE) if kind in latest]
++    if not response.records:
 +        response.notices.append("暂无可关联的处理记录；旧整理日志未记录番号时无法确认归属。")
 +    return response
 diff --git a/src/amane/handlers/file.py b/src/amane/handlers/file.py
@@ -585,7 +589,7 @@ index 0000000..6c95739
 +        current().warning("资源已复制但大小读取失败", source_path=str(source), target_path=str(target), error=str(exc))
 diff --git a/src/amane/observability/liu1443452494_processing_log.py b/src/amane/observability/liu1443452494_processing_log.py
 new file mode 100644
-index 0000000..164794a
+index 0000000..b4abbf2
 --- /dev/null
 +++ b/src/amane/observability/liu1443452494_processing_log.py
 @@ -0,0 +1,554 @@
@@ -632,7 +636,7 @@ index 0000000..164794a
 +
 +class ProcessingLogResponse(BaseModel):
 +    number: str
-+    record: ProcessingLogReport | None = None
++    records: list[ProcessingLogReport] = Field(default_factory=list)
 +    notices: list[str] = Field(default_factory=list)
 +
 +
@@ -1145,11 +1149,11 @@ index 0000000..164794a
 +    return report
 diff --git a/tests/api/test_liu1443452494_processing_log.py b/tests/api/test_liu1443452494_processing_log.py
 new file mode 100644
-index 0000000..8098e44
+index 0000000..c1b2e22
 --- /dev/null
 +++ b/tests/api/test_liu1443452494_processing_log.py
-@@ -0,0 +1,159 @@
-+"""详情日志按实际单片处理时间选取，包含子任务、失败与历史缺失情况。"""
+@@ -0,0 +1,187 @@
++"""两类详情日志独立选取，覆盖自动整理、分页、子任务、失败与单类缺失。"""
 +
 +from datetime import UTC, datetime, timedelta
 +from pathlib import Path
@@ -1198,15 +1202,12 @@ index 0000000..8098e44
 +    for path, status in (("metadata/0/processing-log", 422), ("metadata/99999/processing-log", 404), (endpoint, 200)):
 +        response = await client.get(path)
 +        assert response.status_code == status
-+    assert ProcessingLogResponse.model_validate(response.json()).record is None
++    assert ProcessingLogResponse.model_validate(response.json()).records == []
 +
 +    logs = tmp_path / "logs"
 +    base = datetime.now(UTC)
 +    batch = await recorded_task(repo, TaskType.ORGANIZE, base, base + timedelta(seconds=10))
-+    scrape = await recorded_task(
-+        repo, TaskType.SCRAPE, base + timedelta(seconds=3), base + timedelta(seconds=4), "abp-901"
-+    )
-+    assert batch.id is not None and scrape.id is not None
++    assert batch.id is not None
 +    events = [
 +        LogEvent.model_validate(
 +            {
@@ -1233,7 +1234,14 @@ index 0000000..8098e44
 +    ]
 +    write_events(logs, batch.id, events)
 +    result = ProcessingLogResponse.model_validate((await client.get(endpoint)).json())
-+    assert result.record is not None and result.record.task_id == scrape.id
++    assert [record.task_id for record in result.records] == [batch.id]
++
++    scrape = await recorded_task(
++        repo, TaskType.SCRAPE, base + timedelta(seconds=3), base + timedelta(seconds=4), "abp-901"
++    )
++    assert scrape.id is not None
++    result = ProcessingLogResponse.model_validate((await client.get(endpoint)).json())
++    assert [record.task_id for record in result.records] == [scrape.id, batch.id]
 +
 +    events.append(
 +        LogEvent.model_validate(
@@ -1250,9 +1258,9 @@ index 0000000..8098e44
 +    )
 +    write_events(logs, batch.id, events)
 +    result = ProcessingLogResponse.model_validate((await client.get(endpoint)).json())
-+    assert result.record is not None and result.record.task_id == batch.id
-+    assert result.record.media_path == "/库/本片另一份.mp4"
-+    assert result.record.file_outcome == "目标冲突"
++    assert [record.task_id for record in result.records] == [scrape.id, batch.id]
++    assert result.records[1].media_path == "/库/本片另一份.mp4"
++    assert result.records[1].file_outcome == "目标冲突"
 +    assert "其他片" not in result.model_dump_json()
 +
 +    # 超过一页的无关任务不能让真正相关的记录消失。
@@ -1262,7 +1270,25 @@ index 0000000..8098e44
 +            assert task.id is not None
 +            await repo.complete_task(task.id)
 +    result = ProcessingLogResponse.model_validate((await client.get(endpoint)).json())
-+    assert result.record is not None and result.record.task_id == batch.id
++    assert [record.task_id for record in result.records] == [scrape.id, batch.id]
++
++    # 较晚结束的批量任务若更早处理本片，不能替换本片较新的整理记录。
++    earlier = await recorded_task(repo, TaskType.ORGANIZE, base + timedelta(seconds=1), base + timedelta(seconds=21))
++    assert earlier.id is not None
++    write_events(
++        logs,
++        earlier.id,
++        [
++            LogEvent(
++                event="文件整理开始",
++                timestamp=base + timedelta(seconds=6),
++                number="ABP-901",
++                media_path="/库/较早文件.mp4",
++            )
++        ],
++    )
++    result = ProcessingLogResponse.model_validate((await client.get(endpoint)).json())
++    assert [record.task_id for record in result.records] == [scrape.id, batch.id]
 +
 +    failed = await recorded_task(
 +        repo, TaskType.SCRAPE, base + timedelta(seconds=22), base + timedelta(seconds=23), "ABP-901"
@@ -1271,12 +1297,12 @@ index 0000000..8098e44
 +    with patch("amane.db.repos.tasks._utcnow", return_value=base + timedelta(seconds=24)):
 +        await repo.fail_task(failed.id, "站点请求失败")
 +    result = ProcessingLogResponse.model_validate((await client.get(endpoint)).json())
-+    assert result.record is not None and result.record.task_id == failed.id
-+    assert result.record.status is TaskStatus.FAILED
++    assert [record.task_id for record in result.records] == [failed.id, batch.id]
++    assert result.records[0].status is TaskStatus.FAILED
 +    assert "站点请求失败" in result.model_dump_json()
 +    await repo.delete_task(failed.id)
 +    result = ProcessingLogResponse.model_validate((await client.get(endpoint)).json())
-+    assert result.record is not None and result.record.task_id == batch.id
++    assert [record.task_id for record in result.records] == [scrape.id, batch.id]
 +
 +    parent = await repo.create_task(TaskType.REFRESH, {"library_id": 1})
 +    assert parent.id is not None
@@ -1293,7 +1319,7 @@ index 0000000..8098e44
 +    with patch("amane.db.repos.tasks._utcnow", return_value=base + timedelta(seconds=32)):
 +        await repo.complete_task(children[0].id)
 +    result = ProcessingLogResponse.model_validate((await client.get(endpoint)).json())
-+    assert result.record is not None and result.record.task_id == children[0].id
++    assert [record.task_id for record in result.records] == [children[0].id, batch.id]
 +
 +    active = await repo.create_task(TaskType.SCRAPE, {"number": "ABP-901", "media_file_id": 5})
 +    assert active.id is not None
@@ -1305,9 +1331,15 @@ index 0000000..8098e44
 +        [LogEvent(event="刮削对象", timestamp=base + timedelta(seconds=34), media_path="/库/当前文件.mp4")],
 +    )
 +    result = ProcessingLogResponse.model_validate((await client.get(endpoint)).json())
-+    assert result.record is not None and result.record.task_id == active.id
-+    assert result.record.status is TaskStatus.RUNNING
-+    assert result.record.media_path == "/库/当前文件.mp4"
++    assert [record.task_id for record in result.records] == [active.id, batch.id]
++    assert result.records[0].status is TaskStatus.RUNNING
++    assert result.records[0].media_path == "/库/当前文件.mp4"
++
++    await repo.delete_task(batch.id)
++    await repo.delete_task(earlier.id)
++    result = ProcessingLogResponse.model_validate((await client.get(endpoint)).json())
++    assert [record.task_id for record in result.records] == [active.id]
++    assert result.records[0].task_type == "scrape"
 diff --git a/tests/handlers/test_liu1443452494_processing_events.py b/tests/handlers/test_liu1443452494_processing_events.py
 new file mode 100644
 index 0000000..6300f54
@@ -1689,22 +1721,23 @@ index 0000000..282fb0e
 +    assert report.file_outcome == "完成"
 diff --git a/web/src/components/media/liu1443452494-processing-log.tsx b/web/src/components/media/liu1443452494-processing-log.tsx
 new file mode 100644
-index 0000000..9c30ad7
+index 0000000..d83a404
 --- /dev/null
 +++ b/web/src/components/media/liu1443452494-processing-log.tsx
-@@ -0,0 +1,167 @@
-+import { Alert, Badge, Button, Group, Modal, Paper, Stack, Text } from "@mantine/core";
+@@ -0,0 +1,196 @@
++import { Alert, Badge, Button, Group, Modal, Paper, Stack, Tabs, Text } from "@mantine/core";
 +import { IconFileText, IconRefresh } from "@tabler/icons-react";
 +import { useQuery } from "@tanstack/react-query";
 +import { useState } from "react";
 +import { Virtuoso } from "react-virtuoso";
 +import { getLatestProcessingLogOptions } from "@/client/@tanstack/react-query.gen";
-+import type { ProcessingLogEntry } from "@/client/types.gen";
++import type { ProcessingLogEntry, ProcessingLogReport } from "@/client/types.gen";
 +import { extractErrorMessage } from "@/lib/api-error";
 +
 +/** 报告始终属于当前番号；重新打开时查询最新记录，关闭后停止轮询。 */
 +export function ProcessingLogButton({ metadataId }: { metadataId: number }) {
 +  const [opened, setOpened] = useState(false);
++  const [selectedType, setSelectedType] = useState<string | null>(null);
 +  const query = useQuery({
 +    ...getLatestProcessingLogOptions({ path: { metadata_id: metadataId } }),
 +    enabled: opened,
@@ -1712,13 +1745,14 @@ index 0000000..9c30ad7
 +    refetchOnWindowFocus: false,
 +    refetchInterval: (state) =>
 +      opened &&
-+      (state.state.data?.record?.status === "running" ||
-+        state.state.data?.record?.status === "queued")
++      state.state.data?.records?.some(
++        (record) => record.status === "running" || record.status === "queued",
++      )
 +        ? 3000
 +        : false,
 +  });
-+  const record = query.data?.record;
-+  const statuses = { queued: "排队中", running: "进行中", done: "已完成", failed: "失败" };
++  const records = query.data?.records ?? [];
++  const selectedRecord = records.find((record) => record.task_type === selectedType) ?? records[0];
 +
 +  return (
 +    <>
@@ -1726,7 +1760,10 @@ index 0000000..9c30ad7
 +        size="xs"
 +        variant="light"
 +        leftSection={<IconFileText size={14} />}
-+        onClick={() => setOpened(true)}
++        onClick={() => {
++          setSelectedType(null);
++          setOpened(true);
++        }}
 +      >
 +        处理日志
 +      </Button>
@@ -1761,64 +1798,88 @@ index 0000000..9c30ad7
 +              {notice}
 +            </Alert>
 +          ))}
-+          {record && (
-+            <>
-+              <Group gap="xs">
-+                <Badge>{record.task_type === "scrape" ? "刮削" : "整理"}</Badge>
-+                <Badge
-+                  color={
-+                    record.status === "failed" ? "red" : record.status === "done" ? "teal" : "blue"
-+                  }
-+                >
-+                  任务{statuses[record.status]}
-+                </Badge>
-+                <Text size="sm">任务 #{record.task_id}</Text>
-+                <Text size="sm" c="dimmed">
-+                  {new Date(record.last_activity_at).toLocaleString("zh-CN")}
-+                </Text>
-+              </Group>
-+              <Paper withBorder p="sm" radius="sm">
-+                <Text size="sm" fw={700}>
-+                  最近处理的文件
-+                </Text>
-+                <Text size="sm" style={{ overflowWrap: "anywhere" }}>
-+                  {record.media_path ?? "本次记录未提供文件路径"}
-+                </Text>
-+                {record.target_path && (
-+                  <>
-+                    <Text size="sm" fw={700} mt="xs">
-+                      目标路径
-+                    </Text>
-+                    <Text size="sm" style={{ overflowWrap: "anywhere" }}>
-+                      {record.target_path}
-+                    </Text>
-+                  </>
-+                )}
-+                {record.file_outcome && (
-+                  <Text size="sm" mt="xs">
-+                    此文件处理结果：{record.file_outcome}
-+                  </Text>
-+                )}
-+              </Paper>
-+              {record.notices?.map((notice) => (
-+                <Text key={notice} size="sm" c="dimmed">
-+                  {notice}
-+                </Text>
++          {records.length > 1 ? (
++            <Tabs
++              value={selectedRecord?.task_type ?? null}
++              onChange={setSelectedType}
++              keepMounted={false}
++            >
++              <Tabs.List mb="sm">
++                {records.map((record) => (
++                  <Tabs.Tab key={record.task_type} value={record.task_type}>
++                    {record.task_type === "scrape" ? "刮削" : "整理"}
++                  </Tabs.Tab>
++                ))}
++              </Tabs.List>
++              {records.map((record) => (
++                <Tabs.Panel key={record.task_type} value={record.task_type}>
++                  <ProcessingRecord key={record.task_id} record={record} />
++                </Tabs.Panel>
 +              ))}
-+              {!record.entries?.length ? (
-+                <Text c="dimmed">该任务暂无可显示的过程日志。</Text>
-+              ) : (
-+                <Virtuoso
-+                  style={{ height: "min(52vh, 620px)", minHeight: 240 }}
-+                  data={record.entries}
-+                  itemContent={renderProcessingEntry}
-+                />
-+              )}
-+            </>
-+          )}
++            </Tabs>
++          ) : selectedRecord ? (
++            <ProcessingRecord key={selectedRecord.task_id} record={selectedRecord} />
++          ) : null}
 +        </Stack>
 +      </Modal>
 +    </>
++  );
++}
++
++function ProcessingRecord({ record }: { record: ProcessingLogReport }) {
++  const statuses = { queued: "排队中", running: "进行中", done: "已完成", failed: "失败" };
++  return (
++    <Stack gap="sm">
++      <Group gap="xs">
++        <Badge>{record.task_type === "scrape" ? "刮削" : "整理"}</Badge>
++        <Badge
++          color={record.status === "failed" ? "red" : record.status === "done" ? "teal" : "blue"}
++        >
++          任务{statuses[record.status]}
++        </Badge>
++        <Text size="sm">任务 #{record.task_id}</Text>
++        <Text size="sm" c="dimmed">
++          {new Date(record.last_activity_at).toLocaleString("zh-CN")}
++        </Text>
++      </Group>
++      <Paper withBorder p="sm" radius="sm">
++        <Text size="sm" fw={700}>
++          最近处理的文件
++        </Text>
++        <Text size="sm" style={{ overflowWrap: "anywhere" }}>
++          {record.media_path ?? "本次记录未提供文件路径"}
++        </Text>
++        {record.target_path && (
++          <>
++            <Text size="sm" fw={700} mt="xs">
++              目标路径
++            </Text>
++            <Text size="sm" style={{ overflowWrap: "anywhere" }}>
++              {record.target_path}
++            </Text>
++          </>
++        )}
++        {record.file_outcome && (
++          <Text size="sm" mt="xs">
++            此文件处理结果：{record.file_outcome}
++          </Text>
++        )}
++      </Paper>
++      {record.notices?.map((notice) => (
++        <Text key={notice} size="sm" c="dimmed">
++          {notice}
++        </Text>
++      ))}
++      {!record.entries?.length ? (
++        <Text c="dimmed">该任务暂无可显示的过程日志。</Text>
++      ) : (
++        <Virtuoso
++          style={{ height: "min(52vh, 620px)", minHeight: 240 }}
++          data={record.entries}
++          itemContent={renderProcessingEntry}
++        />
++      )}
++    </Stack>
 +  );
 +}
 +
