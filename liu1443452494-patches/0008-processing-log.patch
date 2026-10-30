@@ -1,12 +1,12 @@
 diff --git a/docs/dev/frontend.md b/docs/dev/frontend.md
-index c5b8bec..fbf4dc1 100644
+index c5b8bec..2af867d 100644
 --- a/docs/dev/frontend.md
 +++ b/docs/dev/frontend.md
 @@ -75,6 +75,8 @@ Settings、任务提交、定时创建、metadata 编辑共用 `components/schem
  
  ## 实时与状态
  
-+影片详情的自用处理日志入口为 `web/src/components/media/liu1443452494-processing-log.tsx::ProcessingLogButton`，两类记录并存时显示切换标签，单类直接展示；按需读取与番号关联规则见 [observability.md](observability.md)。
++影片详情处理日志见 `web/src/components/media/liu1443452494-processing-log.tsx::ProcessingLogButton`；任务信息、提示与日志共用滚动区。读取与番号关联规则见 [observability.md](observability.md)。
 +
  `lib/connection.ts` 是模块级 WS 单例 (指数退避 + 断连轮询降级), 入站经 `parseWSEvent` 窄化. 任务查询的失效必须用同形对象前缀 (`[{ _id: "getTaskChildren" }]`), hey-api 生成的 query key 不是字符串前缀.
  
@@ -1719,20 +1719,180 @@ index 0000000..282fb0e
 +    assert report.target_path == "/输出/本片.mp4"
 +    assert report.media_path is None
 +    assert report.file_outcome == "完成"
+diff --git a/web/src/components/media/liu1443452494-processing-log.module.css b/web/src/components/media/liu1443452494-processing-log.module.css
+new file mode 100644
+index 0000000..e1e48fb
+--- /dev/null
++++ b/web/src/components/media/liu1443452494-processing-log.module.css
+@@ -0,0 +1,146 @@
++/* 仅虚拟列表建立滚动区域，外层与标签面板传递可用高度。 */
++.modalContent,
++.modalBody,
++.tabs,
++.tabPanel {
++  display: flex;
++  flex-direction: column;
++  min-width: 0;
++  min-height: 0;
++  overflow: hidden;
++}
++
++.modalBody,
++.tabs,
++.tabPanel,
++.viewport {
++  flex: 1;
++  min-height: 0;
++}
++
++.modalHeader,
++.tabList,
++.refreshButton {
++  flex-shrink: 0;
++}
++
++.modalHeader {
++  min-height: 48px;
++  padding-block: 8px;
++}
++
++.modalTitle {
++  flex: 1;
++  min-width: 0;
++  margin-inline-end: 8px;
++}
++
++.titleText {
++  min-width: 0;
++}
++
++.tabList {
++  margin-bottom: 4px;
++}
++
++.viewport {
++  overscroll-behavior: contain;
++  scrollbar-gutter: stable;
++}
++
++.summary {
++  padding: 8px;
++}
++
++.paths {
++  display: grid;
++  grid-template-columns: max-content minmax(0, 1fr);
++  gap: 4px 12px;
++  align-items: baseline;
++}
++
++.fileOutcome {
++  grid-column: 1 / -1;
++}
++
++.wrapText {
++  min-width: 0;
++  white-space: pre-wrap;
++  overflow-wrap: anywhere;
++  line-height: 1.5;
++}
++
++.entry {
++  display: grid;
++  grid-template-columns: 5rem 6rem minmax(0, 1fr);
++  align-items: start;
++  gap: 4px 10px;
++  padding: 7px 8px;
++  border-bottom: 1px solid var(--mantine-color-default-border);
++  border-inline-start: 3px solid transparent;
++}
++
++.entry[data-striped] {
++  background: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-6));
++}
++
++.entry[data-level="warning"] {
++  border-inline-start-color: var(--mantine-color-orange-6);
++  background: var(--mantine-color-orange-light);
++}
++
++.entry[data-level="error"] {
++  border-inline-start-color: var(--mantine-color-red-6);
++  background: var(--mantine-color-red-light);
++}
++
++.time {
++  padding-top: 2px;
++  font-variant-numeric: tabular-nums;
++  white-space: nowrap;
++}
++
++.stage {
++  height: auto;
++  max-width: 100%;
++  padding-block: 3px;
++  line-height: 1.3;
++  white-space: normal;
++  overflow-wrap: anywhere;
++}
++
++.entryContent {
++  min-width: 0;
++}
++
++.details {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 2px 20px;
++}
++
++.detail {
++  max-width: 100%;
++}
++
++.detail[data-wide] {
++  flex-basis: 100%;
++}
++
++@media (max-width: $mantine-breakpoint-sm) {
++  .entry {
++    grid-template-columns: max-content minmax(0, 1fr);
++  }
++
++  .stage {
++    justify-self: start;
++  }
++
++  .entryContent {
++    grid-column: 1 / -1;
++  }
++
++  .paths {
++    grid-template-columns: minmax(0, 1fr);
++  }
++}
 diff --git a/web/src/components/media/liu1443452494-processing-log.tsx b/web/src/components/media/liu1443452494-processing-log.tsx
 new file mode 100644
-index 0000000..d83a404
+index 0000000..927be97
 --- /dev/null
 +++ b/web/src/components/media/liu1443452494-processing-log.tsx
-@@ -0,0 +1,196 @@
+@@ -0,0 +1,273 @@
 +import { Alert, Badge, Button, Group, Modal, Paper, Stack, Tabs, Text } from "@mantine/core";
 +import { IconFileText, IconRefresh } from "@tabler/icons-react";
 +import { useQuery } from "@tanstack/react-query";
 +import { useState } from "react";
-+import { Virtuoso } from "react-virtuoso";
++import { type ContextProp, Virtuoso } from "react-virtuoso";
 +import { getLatestProcessingLogOptions } from "@/client/@tanstack/react-query.gen";
 +import type { ProcessingLogEntry, ProcessingLogReport } from "@/client/types.gen";
 +import { extractErrorMessage } from "@/lib/api-error";
++import classes from "./liu1443452494-processing-log.module.css";
++
++interface ProcessingLogContext {
++  record: ProcessingLogReport | undefined;
++  pending: boolean;
++  error: string | null;
++  notices: string[];
++}
 +
 +/** 报告始终属于当前番号；重新打开时查询最新记录，关闭后停止轮询。 */
 +export function ProcessingLogButton({ metadataId }: { metadataId: number }) {
@@ -1753,6 +1913,21 @@ index 0000000..d83a404
 +  });
 +  const records = query.data?.records ?? [];
 +  const selectedRecord = records.find((record) => record.task_type === selectedType) ?? records[0];
++  const logView = (
++    <Virtuoso<ProcessingLogEntry, ProcessingLogContext>
++      key={selectedRecord?.task_id}
++      className={classes.viewport}
++      data={selectedRecord?.entries ?? []}
++      context={{
++        record: selectedRecord,
++        pending: query.isPending,
++        error: query.isError ? extractErrorMessage(query.error, "无法读取处理日志") : null,
++        notices: query.data?.notices ?? [],
++      }}
++      components={{ Header: ProcessingLogHeader, EmptyPlaceholder: EmptyProcessingLog }}
++      itemContent={renderProcessingEntry}
++    />
++  );
 +
 +  return (
 +    <>
@@ -1770,16 +1945,20 @@ index 0000000..d83a404
 +      <Modal
 +        opened={opened}
 +        onClose={() => setOpened(false)}
-+        title="最近处理记录"
-+        size="xl"
-+        centered
-+      >
-+        <Stack gap="sm">
-+          <Group justify="space-between">
-+            <Text fw={600}>{query.data?.number ?? "正在读取记录"}</Text>
++        title={
++          <Group component="span" justify="space-between" gap="xs" wrap="nowrap">
++            <Group component="span" gap="sm" className={classes.titleText}>
++              <Text component="span" fw={600}>
++                最近处理记录
++              </Text>
++              <Text component="span" size="sm" c="dimmed" className={classes.wrapText}>
++                {query.data?.number ?? "正在读取记录"}
++              </Text>
++            </Group>
 +            <Button
 +              size="xs"
 +              variant="subtle"
++              className={classes.refreshButton}
 +              leftSection={<IconRefresh size={14} />}
 +              loading={query.isFetching}
 +              onClick={() => void query.refetch()}
@@ -1787,49 +1966,78 @@ index 0000000..d83a404
 +              刷新
 +            </Button>
 +          </Group>
-+          {query.isPending && <Text c="dimmed">正在读取本地任务日志……</Text>}
-+          {query.isError && (
-+            <Alert color="red" title="日志读取失败">
-+              {extractErrorMessage(query.error, "无法读取处理日志")}
-+            </Alert>
-+          )}
-+          {query.data?.notices?.map((notice) => (
-+            <Alert key={notice} color="yellow">
-+              {notice}
-+            </Alert>
-+          ))}
-+          {records.length > 1 ? (
-+            <Tabs
-+              value={selectedRecord?.task_type ?? null}
-+              onChange={setSelectedType}
-+              keepMounted={false}
-+            >
-+              <Tabs.List mb="sm">
-+                {records.map((record) => (
-+                  <Tabs.Tab key={record.task_type} value={record.task_type}>
-+                    {record.task_type === "scrape" ? "刮削" : "整理"}
-+                  </Tabs.Tab>
-+                ))}
-+              </Tabs.List>
++        }
++        size="100%"
++        xOffset={12}
++        yOffset={12}
++        padding="sm"
++        classNames={{
++          content: classes.modalContent,
++          header: classes.modalHeader,
++          title: classes.modalTitle,
++          body: classes.modalBody,
++        }}
++        styles={{ content: { height: "calc(var(--amane-vh) - var(--modal-y-offset) * 2)" } }}
++        centered
++      >
++        {records.length > 1 && selectedRecord ? (
++          <Tabs
++            value={selectedRecord.task_type}
++            onChange={setSelectedType}
++            keepMounted={false}
++            className={classes.tabs}
++          >
++            <Tabs.List className={classes.tabList}>
 +              {records.map((record) => (
-+                <Tabs.Panel key={record.task_type} value={record.task_type}>
-+                  <ProcessingRecord key={record.task_id} record={record} />
-+                </Tabs.Panel>
++                <Tabs.Tab key={record.task_type} value={record.task_type}>
++                  {record.task_type === "scrape" ? "刮削" : "整理"}
++                </Tabs.Tab>
 +              ))}
-+            </Tabs>
-+          ) : selectedRecord ? (
-+            <ProcessingRecord key={selectedRecord.task_id} record={selectedRecord} />
-+          ) : null}
-+        </Stack>
++            </Tabs.List>
++            <Tabs.Panel value={selectedRecord.task_type} className={classes.tabPanel}>
++              {logView}
++            </Tabs.Panel>
++          </Tabs>
++        ) : (
++          logView
++        )}
 +      </Modal>
 +    </>
 +  );
 +}
 +
++/** 提示与任务信息置于虚拟列表头部，长路径和空记录也使用同一滚动区域。 */
++function ProcessingLogHeader({ context }: ContextProp<ProcessingLogContext>) {
++  return (
++    <Stack gap="xs" className={classes.summary}>
++      {context.pending && <Text c="dimmed">正在读取本地任务日志……</Text>}
++      {context.error && (
++        <Alert color="red" title="日志读取失败" className={classes.wrapText}>
++          {context.error}
++        </Alert>
++      )}
++      {context.notices.map((notice) => (
++        <Alert key={notice} color="yellow" className={classes.wrapText}>
++          {notice}
++        </Alert>
++      ))}
++      {context.record && <ProcessingRecord record={context.record} />}
++    </Stack>
++  );
++}
++
++function EmptyProcessingLog({ context }: ContextProp<ProcessingLogContext>) {
++  return context.record ? (
++    <Text c="dimmed" p="xs">
++      该任务暂无可显示的过程日志。
++    </Text>
++  ) : null;
++}
++
 +function ProcessingRecord({ record }: { record: ProcessingLogReport }) {
 +  const statuses = { queued: "排队中", running: "进行中", done: "已完成", failed: "失败" };
 +  return (
-+    <Stack gap="sm">
++    <Stack gap="xs">
 +      <Group gap="xs">
 +        <Badge>{record.task_type === "scrape" ? "刮削" : "整理"}</Badge>
 +        <Badge
@@ -1842,83 +2050,104 @@ index 0000000..d83a404
 +          {new Date(record.last_activity_at).toLocaleString("zh-CN")}
 +        </Text>
 +      </Group>
-+      <Paper withBorder p="sm" radius="sm">
++      <Paper withBorder p="xs" radius="sm" className={classes.paths}>
 +        <Text size="sm" fw={700}>
 +          最近处理的文件
 +        </Text>
-+        <Text size="sm" style={{ overflowWrap: "anywhere" }}>
++        <Text size="sm" className={classes.wrapText}>
 +          {record.media_path ?? "本次记录未提供文件路径"}
 +        </Text>
 +        {record.target_path && (
 +          <>
-+            <Text size="sm" fw={700} mt="xs">
++            <Text size="sm" fw={700}>
 +              目标路径
 +            </Text>
-+            <Text size="sm" style={{ overflowWrap: "anywhere" }}>
++            <Text size="sm" className={classes.wrapText}>
 +              {record.target_path}
 +            </Text>
 +          </>
 +        )}
 +        {record.file_outcome && (
-+          <Text size="sm" mt="xs">
++          <Text size="sm" className={`${classes.fileOutcome} ${classes.wrapText}`}>
 +            此文件处理结果：{record.file_outcome}
 +          </Text>
 +        )}
 +      </Paper>
 +      {record.notices?.map((notice) => (
-+        <Text key={notice} size="sm" c="dimmed">
++        <Text key={notice} size="sm" c="dimmed" className={classes.wrapText}>
 +          {notice}
 +        </Text>
 +      ))}
-+      {!record.entries?.length ? (
-+        <Text c="dimmed">该任务暂无可显示的过程日志。</Text>
-+      ) : (
-+        <Virtuoso
-+          style={{ height: "min(52vh, 620px)", minHeight: 240 }}
-+          data={record.entries}
-+          itemContent={renderProcessingEntry}
-+        />
-+      )}
 +    </Stack>
 +  );
 +}
 +
-+function renderProcessingEntry(_index: number, entry: ProcessingLogEntry) {
-+  return <ProcessingEntry entry={entry} />;
++function renderProcessingEntry(index: number, entry: ProcessingLogEntry) {
++  return <ProcessingEntry entry={entry} striped={index % 2 === 1} />;
 +}
 +
-+function ProcessingEntry({ entry }: { entry: ProcessingLogEntry }) {
++function ProcessingEntry({ entry, striped }: { entry: ProcessingLogEntry; striped: boolean }) {
 +  const colors = { info: "blue", warning: "orange", error: "red", debug: "gray" };
 +  return (
-+    <Paper withBorder p="sm" radius="sm" mb="xs">
-+      <Group gap="xs" mb={4}>
-+        <Badge size="xs" color={colors[entry.level ?? "info"]}>
-+          {entry.stage}
-+        </Badge>
-+        {entry.timestamp && (
-+          <Text size="xs" c="dimmed">
-+            {new Date(entry.timestamp).toLocaleTimeString("zh-CN")}
-+          </Text>
-+        )}
-+        <Text size="sm" fw={600}>
++    <div className={classes.entry} data-striped={striped || undefined} data-level={entry.level}>
++      <Text
++        component="time"
++        dateTime={entry.timestamp ?? undefined}
++        size="xs"
++        c="dimmed"
++        className={classes.time}
++      >
++        {entry.timestamp && new Date(entry.timestamp).toLocaleTimeString("zh-CN")}
++      </Text>
++      <Badge
++        size="xs"
++        color={colors[entry.level ?? "info"]}
++        className={classes.stage}
++        styles={{ label: { whiteSpace: "normal", overflow: "visible" } }}
++      >
++        {entry.stage}
++      </Badge>
++      <div className={classes.entryContent}>
++        <Text size="sm" fw={600} className={classes.wrapText}>
 +          {entry.message}
 +        </Text>
-+      </Group>
-+      {entry.media_path && (
-+        <Text size="xs" c="dimmed" style={{ overflowWrap: "anywhere" }}>
-+          处理文件：{entry.media_path}
-+        </Text>
++        {entry.media_path && (
++          <Text size="xs" c="dimmed" className={classes.wrapText}>
++            处理文件：{entry.media_path}
++          </Text>
++        )}
++        <div className={classes.details}>
++          {entry.details?.map((detail, index) => (
++            <ProcessingDetail key={`${index}:${detail}`} detail={detail} />
++          ))}
++        </div>
++      </div>
++    </div>
++  );
++}
++
++function ProcessingDetail({ detail }: { detail: string }) {
++  const separator = detail.indexOf("：");
++  // 仅区分排版宽度，字段内容及顺序始终保留。
++  const wide =
++    detail.length > 64 || /[\r\n/\\]|(?:地址|路径|标题|详情|错误|异常|原因)[：:]/u.test(detail);
++  return (
++    <Text
++      size="sm"
++      className={`${classes.detail} ${classes.wrapText}`}
++      data-wide={wide || undefined}
++    >
++      {separator < 0 ? (
++        detail
++      ) : (
++        <>
++          <Text component="span" inherit c="dimmed">
++            {detail.slice(0, separator + 1)}
++          </Text>
++          {detail.slice(separator + 1)}
++        </>
 +      )}
-+      {entry.details?.map((detail, index) => (
-+        <Text
-+          key={`${index}:${detail}`}
-+          size="sm"
-+          style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
-+        >
-+          {detail}
-+        </Text>
-+      ))}
-+    </Paper>
++    </Text>
 +  );
 +}
 diff --git a/web/src/routes/meta.$metadataId.tsx b/web/src/routes/meta.$metadataId.tsx
