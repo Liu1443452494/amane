@@ -1,0 +1,1609 @@
+diff --git a/docs/dev/data-model.md b/docs/dev/data-model.md
+index 5d3c05d..3082157 100644
+--- a/docs/dev/data-model.md
++++ b/docs/dev/data-model.md
+@@ -46,7 +46,7 @@ Metadata 列表与 `/media` 文件行的角标与筛选: 有码 / 无码取条
+ | 字段类型 | 存储方式 | 取舍 |
+ |----------|---------|----------|
+ | 单源字段 (`title`, `studio`, `plot`, ...) | 沿链取首个非空值; 列表型 (演员 / 标签 / 导演) 整份列表取首个非空 | 覆盖大多数场景 | 覆盖大多数场景 |
+-| 聚合类 URL (`poster_urls`, `thumb_urls`, ...) | list, 按字段站点顺序拼接各站非空值 (相同 URL 保留首次), 物化后按下载成功重排 (见 [task-system.md](task-system.md)) | 下载时顺序尝试, 某站失效不需重新刮削 |
++| 聚合类 URL (`poster_urls`, `thumb_urls`, ...) | list, 按字段站点顺序拼接各站非空值 (相同 URL 保留首次), 物化后按可用性与图片质量重排 (见 [task-system.md](task-system.md)) | 保留回退地址, 某站失效不需重新刮削 |
+ | `extrafanart_urls` | `dict[site, list[url]]` 按站点分组 | 剧照集合是站点特异的, 扁平合并会丢失站点上下文 |
+ | `scores` | `dict[site, score]` | 不同评分体系 (5 分 vs 100 分) 需保留来源供前端分列展示 |
+ | `raw` | `{site: {field: value}}` 原始快照 | 支持离线重新聚合与站点级复用 (见 [task-system.md](task-system.md)) |
+diff --git a/docs/dev/task-system.md b/docs/dev/task-system.md
+index 7b91355..01e56a5 100644
+--- a/docs/dev/task-system.md
++++ b/docs/dev/task-system.md
+@@ -121,8 +121,9 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
+ `ScrapeHandler` 在聚合后、`upsert_metadata` 前调用 `materialize_images` (`src/amane/media/pipeline.py`) — 二进制写入 Resource 目录的主路径, 与是否整理无关:
+ 
+ - **`scraping.download_resources`** 控制本步下载哪些类型 (thumb / poster / extrafanart / trailer).
+-- **URL 重排契约**: 被下载类型的 URL 列表按本次下载成功 (含缓存命中) 稳定分区 — 成功者保序前置, 失败者保序沉底. 死 URL 不再占据首位, 但保留在尾部, 来源恢复后下次物化可重新尝试. 未选中下载的类型无成败信息, 保持聚合优先级原序; extrafanart 为站点分组 dict, 不重排. `raw` 快照保持站点原始数据.
+-- 裁剪海报 → 按 `scraping.poster_ratio` 从 thumb 右侧裁切; 超分就地覆盖. 失败不阻断刮削.
++- **URL 重排契约**: 封面与海报由 `src/amane/media/liu1443452494_image_quality.py::ImagePool` 完整解码后按实际文件字节数降序排列; 海报等大小优先日亚, 其余沿用候选顺序. 预告片仍按成功者保序前置, 失败地址保留在尾部供后续重试. 未下载类型与剧照分组不重排; 新图均失败时保留旧图, 图片锁定字段不自动下载.
++- **高清海报**: `ScrapeHandler` 从来源 `raw` 构造检索信息, DMM 原始日文优先, 禁止使用翻译标题或姓名映射结果. `src/amane/media/liu1443452494_posters.py::PosterResolver.resolve` 先按 Tenhow 同区块商品编号核实 ASIN 并收集图片, 再查询日亚; 未取得有效日亚图片时回退原始标题检索. 同一地址仅处理一次, 同 ASIN 的新图片仍参与比较; `raw` 快照不变.
++- **裁剪海报**: 保留原触发条件与右侧裁剪比例, 仅当裁剪结果宽高均不减小且至少一项增大时替换下载海报; 失败保留下载结果. 超分就地覆盖, 失败不阻断刮削.
+ 
+ 手动裁切复用同一派生通道 (`op=crop`, `args=box:…`), 见 [data-model.md](data-model.md).
+ 
+diff --git a/src/amane/handlers/scrape.py b/src/amane/handlers/scrape.py
+index c2e2b07..ae3cdc0 100644
+--- a/src/amane/handlers/scrape.py
++++ b/src/amane/handlers/scrape.py
+@@ -10,6 +10,7 @@ from ..db.models import TaskType
+ from ..enums import ActorGender, MetadataField
+ from ..liu1443452494_actor_mapping import map_actor_names
+ from ..media import materialize_images
++from ..media.liu1443452494_posters import make_poster_query
+ from ..observability import current
+ from ..observability.models import SiteOutcomeKind
+ from ..plugins.models import SourceDescriptor, SourceTrait
+@@ -68,7 +69,8 @@ class ScrapeHandler(TaskHandler[ScrapePayload, ScrapeResult]):
+ 
+         # 启用 metadata 缓存时读取 raw 快照.
+         use_metadata_cache = CacheKind.metadata in payload.use_cache
+-        db_data = await self._repo.get_metadata_by_number(payload.number) if use_metadata_cache else None
++        existing = await self._repo.get_metadata_by_number(payload.number)
++        db_data = existing if use_metadata_cache else None
+         if db_data is not None and db_data.raw:
+             rec.write_raw_cache(db_data.raw)
+ 
+@@ -163,11 +165,18 @@ class ScrapeHandler(TaskHandler[ScrapePayload, ScrapeResult]):
+                     self._config,
+                     self._resource_store.data_dir,
+                     extrafanart_urls=result.metadata.extrafanart_urls,
++                    poster_query=make_poster_query(payload.number, result.raw),
++                    previous_poster_urls=existing.poster_urls if existing else None,
++                    previous_thumb_urls=existing.thumb_urls if existing else None,
++                    locked_fields=existing.locked_fields if existing else (),
+                 )
+                 poster_out = materialized.poster_urls
+                 thumb_out = materialized.thumb_urls
+                 trailer_out = materialized.trailer_urls
+             except Exception:
++                if existing is not None:
++                    poster_out = existing.poster_urls or poster_out
++                    thumb_out = existing.thumb_urls or thumb_out
+                 current().warning("image materialization failed, keeping raw urls", number=payload.number)
+ 
+         await self.report_progress(len(SCALAR_FIELDS) + 1, progress_total, "materialize")
+diff --git a/src/amane/media/liu1443452494_image_quality.py b/src/amane/media/liu1443452494_image_quality.py
+new file mode 100644
+index 0000000..c0b0149
+--- /dev/null
++++ b/src/amane/media/liu1443452494_image_quality.py
+@@ -0,0 +1,122 @@
++"""封面与海报的完整解码、文件大小排序及失败回退。"""
++
++from pathlib import Path
++from typing import TYPE_CHECKING
++from urllib.parse import urlsplit
++
++import structlog
++from PIL import Image
++from pydantic import BaseModel
++
++from .resource_store import internal_url_hash
++
++if TYPE_CHECKING:
++    from collections.abc import Sequence
++
++    from ..net.http import WebClient
++    from .resource_store import ResourceStore
++
++
++class ImageCandidate(BaseModel):
++    url: str
++    locator: str
++    path: Path
++    file_bytes: int
++    dimensions: tuple[int, int]
++
++
++def inspect_image(url: str, locator: str, path: Path) -> ImageCandidate | None:
++    """完整解码后量取文件；HTML、截断图片与无法读取的文件不能参与排序。"""
++    try:
++        with Image.open(path) as image:
++            image.load()
++            dimensions = image.size
++        size = path.stat().st_size
++        if size <= 0 or min(dimensions) <= 0:
++            return None
++        return ImageCandidate(url=url, locator=locator, path=path, file_bytes=size, dimensions=dimensions)
++    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
++        structlog.get_logger().warning("图片校验失败", url=url, error=str(exc))
++        return None
++
++
++def dimensions_improve(candidate: tuple[int, int], current: tuple[int, int] | None) -> bool:
++    """宽高均不减小且至少一项增大时允许裁剪替换。"""
++    return min(candidate) > 0 and (
++        current is None or (candidate[0] >= current[0] and candidate[1] >= current[1] and candidate != current)
++    )
++
++
++class ImagePool:
++    def __init__(self, store: ResourceStore, client: WebClient, *, prefer_amazon: bool = False) -> None:
++        self._store = store
++        self._client = client
++        self._prefer_amazon = prefer_amazon
++        self._attempts: dict[str, ImageCandidate | None] = {}
++
++    async def acquire(self, urls: Sequence[str]) -> bool:
++        """每个地址仅处理一次；返回本组地址是否存在有效图片。"""
++        success = False
++        for url in urls:
++            if url not in self._attempts:
++                self._attempts[url] = None
++                try:
++                    source = await self._store.resolve_source(url, self._client)
++                    if source is not None:
++                        candidate = inspect_image(url, source.locator, source.path)
++                        self._attempts[url] = candidate
++                        if candidate is None:
++                            # 无效响应不能作为永久缓存阻止后续任务重试。
++                            await self._store.invalidate(source.locator)
++                except Exception as exc:
++                    structlog.get_logger().warning("图片候选获取失败", url=url, error=str(exc))
++            success = self._attempts[url] is not None or success
++        return success
++
++    async def restore_cached(self, urls: Sequence[str]) -> None:
++        """本次没有有效图片时读取旧资源，不重新请求旧地址。"""
++        if self.best is not None:
++            return
++        for url in urls:
++            try:
++                token = internal_url_hash(url)
++                if token is not None:
++                    found = await self._store.get_by_url_hash(token)
++                    path = found[1] if found else None
++                    locator = found[0].url if found else url
++                else:
++                    path = await self._store.resolve(url)
++                    locator = url
++                if path is not None:
++                    candidate = inspect_image(url, locator, path)
++                    if candidate is not None:
++                        self._attempts[url] = candidate
++            except Exception as exc:
++                structlog.get_logger().warning("旧图片读取失败", url=url, error=str(exc))
++
++    def _ranked(self) -> list[ImageCandidate]:
++        candidates = [candidate for candidate in self._attempts.values() if candidate is not None]
++        return sorted(
++            candidates,
++            key=lambda candidate: (
++                -candidate.file_bytes,
++                -int(
++                    self._prefer_amazon
++                    and urlsplit(candidate.url).hostname
++                    in {"m.media-amazon.com", "images-na.ssl-images-amazon.com", "images-fe.ssl-images-amazon.com"}
++                ),
++            ),
++        )
++
++    @property
++    def best(self) -> ImageCandidate | None:
++        ranked = self._ranked()
++        return ranked[0] if ranked else None
++
++    def ordered_urls(self, previous: Sequence[str] = ()) -> list[str]:
++        ranked = self._ranked()
++        if not ranked and previous:
++            return list(dict.fromkeys([*previous, *self._attempts]))
++        return [candidate.url for candidate in ranked] + [
++            url for url, candidate in self._attempts.items() if candidate is None
++        ]
+diff --git a/src/amane/media/liu1443452494_posters.py b/src/amane/media/liu1443452494_posters.py
+new file mode 100644
+index 0000000..d078e42
+--- /dev/null
++++ b/src/amane/media/liu1443452494_posters.py
+@@ -0,0 +1,432 @@
++"""Tenhow 作品核对、ASIN 日亚检索与原始日文标题回退。"""
++
++import re
++import unicodedata
++from collections.abc import Mapping
++from typing import TYPE_CHECKING
++from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, urlunsplit
++
++import structlog
++from parsel import Selector
++from pydantic import BaseModel, Field, TypeAdapter, ValidationError
++
++from ..crawlers.models import MediaMetadata
++from ..net.errors import FailureReason, classify_block
++from ..parsing import split_actor_aliases
++
++if TYPE_CHECKING:
++    from ..net.http import WebClient
++    from .liu1443452494_image_quality import ImagePool
++
++
++class PosterQuery(BaseModel):
++    number: str
++    title: str = ""
++    actors: list[str] = Field(default_factory=list)
++    dmm_ids: list[str] = Field(default_factory=list)
++
++
++class TenhowMatch(BaseModel):
++    asin: str
++    image_url: str
++
++
++class PosterPage(BaseModel):
++    url: str
++    html: str
++
++
++class AmazonProduct(BaseModel):
++    asin: str
++    title: str
++    actor_text: str
++    image_urls: list[str]
++
++
++def _text_key(value: str) -> str:
++    return "".join(char for char in unicodedata.normalize("NFKC", value).casefold() if char.isalnum())
++
++
++def _number_key(value: str) -> str | None:
++    match = re.fullmatch(r"(\d*[a-z]+)[-_]?(\d{2,7})", value.strip().lower())
++    if match is None or int(match[2]) == 0:
++        return None
++    return f"{match[1]}-{int(match[2])}"
++
++
++def _safe_url(value: str, hosts: set[str]) -> bool:
++    try:
++        parsed = urlsplit(value)
++        return (
++            parsed.scheme in {"http", "https"}
++            and parsed.hostname in hosts
++            and parsed.username is None
++            and parsed.password is None
++            and parsed.port in {None, 80, 443}
++        )
++    except ValueError:
++        return False
++
++
++def _absolute_url(base: str, href: str) -> str:
++    try:
++        return urljoin(base, href)
++    except ValueError:
++        return ""
++
++
++def _dmm_id(href: str) -> str | None:
++    if _safe_url(href, {"al.fanza.co.jp", "al.dmm.co.jp"}):
++        targets = parse_qs(urlsplit(href).query).get("lurl", [])
++        if len(targets) != 1:
++            return None
++        href = targets[0]
++    if not _safe_url(href, {"www.dmm.co.jp", "video.dmm.co.jp", "www.dmm.com"}):
++        return None
++    parsed = urlsplit(href)
++    match = re.search(r"/cid=([a-z0-9_]+)/?", parsed.path, re.IGNORECASE)
++    if match:
++        return match[1].lower()
++    ids = parse_qs(parsed.query).get("id", [])
++    return ids[0].lower() if len(ids) == 1 and re.fullmatch(r"[a-zA-Z0-9_]+", ids[0]) else None
++
++
++def make_poster_query(number: str, raw: Mapping[str, object]) -> PosterQuery | None:
++    """仅从来源快照读取检索信息；不接受聚合后的翻译标题与姓名映射结果。"""
++    if _number_key(number) is None:
++        return None
++    query = PosterQuery(number=number)
++    for key in sorted(raw, key=lambda key: (key.split(":")[0] != "dmm", key.split(":")[-1] not in {"jp", "ja"})):
++        site, _, language = key.partition(":")
++        if language and language not in {"jp", "ja"}:
++            continue
++        try:
++            data = MediaMetadata.model_validate(raw[key])
++        except ValidationError:
++            continue
++        if _number_key(data.number) != _number_key(number):
++            continue
++        japanese_source = site == "dmm" or language in {"jp", "ja"}
++        if not query.title and data.title and (japanese_source or re.search(r"[\u3040-\u30ff]", data.title)):
++            query.title = data.title
++        if not query.actors:
++            names: list[str] = []
++            for actor in data.actors:
++                if japanese_source or re.search(r"[\u3040-\u30ff]", actor.name):
++                    primary, aliases = split_actor_aliases(actor.name)
++                    names.extend([primary, *aliases])
++            query.actors = list(dict.fromkeys(name.strip() for name in names if name.strip()))
++        if site == "dmm" and data.source_url:
++            cid = _dmm_id(data.source_url)
++            if cid and cid not in query.dmm_ids:
++                query.dmm_ids.append(cid)
++    return query if query.title or query.actors else None
++
++
++def _cid_key(value: str) -> str:
++    match = re.fullmatch(r"([a-z0-9_]*[a-z])(\d+)", value.lower())
++    return f"{match[1]}-{int(match[2])}" if match else value.lower()
++
++
++def _matches_cid(cid: str, query: PosterQuery) -> bool:
++    wanted = _number_key(query.number)
++    if wanted is None:
++        return False
++    if _cid_key(cid) in {_cid_key(value) for value in query.dmm_ids}:
++        return True
++    if _number_key(cid) == wanted:
++        return True
++    # 未经来源确认的厂商前缀只接受已知对应关系，禁止任意删除前导数字。
++    match = re.fullmatch(r"(h_\d+|\d+)([a-z]+)(\d+)", cid)
++    if match is None:
++        return False
++    prefixes = {
++        "stars": "1",
++        "star": "1",
++        "start": "1",
++        "sods": "1",
++        "fsdss": "1",
++        "fcdss": "1",
++        "fns": "1",
++        "abp": "118",
++        "abf": "118",
++        "chn": "118",
++        "rebd": "h_346",
++        "rebdb": "h_346",
++        "ovg": "13",
++    }
++    return prefixes.get(match[2]) == match[1] and _number_key(match[2] + match[3]) == wanted
++
++
++def _tenhow_page_url(href: str) -> str | None:
++    url = _absolute_url("https://www.tenhow.net/", href)
++    if not _safe_url(url, {"www.tenhow.net", "tenhow.net"}):
++        return None
++    parsed = urlsplit(url)
++    if parsed.query or not re.fullmatch(r"/[a-z][a-z0-9_]*\.html", parsed.path):
++        return None
++    return f"https://www.tenhow.net{parsed.path}"
++
++
++def tenhow_index_pages(html: str) -> list[str]:
++    pages: list[str] = []
++    for link in Selector(text=html).css("a[href]"):
++        if re.fullmatch(r"[あかさたなはまやらわ]行", (link.xpath("string(.)").get() or "").strip()):
++            url = _tenhow_page_url(link.attrib["href"])
++            if url:
++                pages.append(url)
++    return list(dict.fromkeys(pages))
++
++
++def tenhow_actor_pages(html: str | list[str], actors: list[str]) -> list[str]:
++    wanted = {_text_key(name) for name in actors if _text_key(name)}
++    links: dict[str, set[str]] = {}
++    for document in [html] if isinstance(html, str) else html:
++        for link in Selector(text=document).css("a[href]"):
++            name = _text_key(link.xpath("string(.)").get() or "")
++            if name not in wanted:
++                continue
++            url = _tenhow_page_url(link.attrib["href"])
++            if url:
++                links.setdefault(name, set()).add(url)
++    return list(
++        dict.fromkeys(next(iter(links[name])) for name in map(_text_key, actors) if len(links.get(name, ())) == 1)
++    )
++
++
++def tenhow_matches(html: str, query: PosterQuery) -> list[TenhowMatch]:
++    matches: dict[str, TenhowMatch] = {}
++    for block in Selector(text=html).css("div.um_image_a.um_popup"):
++        if block.xpath(
++            './/div[contains(concat(" ", normalize-space(@class), " "), " um_image_a ") and contains(concat(" ", normalize-space(@class), " "), " um_popup ")]'
++        ):
++            continue
++        ids = [cid for href in block.css("a::attr(href)").getall() if (cid := _dmm_id(href))]
++        if not ids or not all(_matches_cid(cid, query) for cid in ids):
++            continue
++        images: dict[str, str] = {}
++        for href in block.css('a[title="拡大表示"]::attr(href)').getall():
++            url = _absolute_url("https://www.tenhow.net/", href)
++            if not _safe_url(url, {"www.tenhow.net", "tenhow.net"}):
++                continue
++            parsed = urlsplit(url)
++            match = re.fullmatch(r"/images/([A-Z0-9]{10})\.jpg", parsed.path)
++            if match and not parsed.query and not parsed.fragment:
++                images[match[1]] = f"https://www.tenhow.net{parsed.path}"
++        if len(images) > 1:
++            return []
++        for asin, url in images.items():
++            matches[asin] = TenhowMatch(asin=asin, image_url=url)
++    return list(matches.values())
++
++
++def amazon_image_urls(value: str) -> list[str]:
++    """保留主图原始地址及页面提供的缩放地址，逐一验证后参与比较。"""
++    if not _safe_url(
++        value, {"m.media-amazon.com", "images-na.ssl-images-amazon.com", "images-fe.ssl-images-amazon.com"}
++    ):
++        return []
++    parsed = urlsplit(value)
++    if not re.fullmatch(r"/images/I/[A-Za-z0-9+_.%-]+\.(?:jpg|jpeg|png|webp)", parsed.path):
++        return []
++    original_path = re.sub(r"\._[^/]+_(?=\.(?:jpg|jpeg|png|webp)$)", "", parsed.path)
++    return list(
++        dict.fromkeys(urlunsplit(("https", parsed.netloc, path, "", "")) for path in (original_path, parsed.path))
++    )
++
++
++def _asin_from_url(url: str) -> str | None:
++    if not _safe_url(url, {"www.amazon.co.jp", "amazon.co.jp"}):
++        return None
++    match = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})(?:/|$)", urlsplit(url).path)
++    return match[1] if match else None
++
++
++def amazon_product(page: PosterPage, asin: str) -> AmazonProduct | None:
++    tree = Selector(text=page.html)
++    ids = tree.css('input#ASIN::attr(value), input[name="ASIN"]::attr(value)').getall()
++    canonical = tree.css('link[rel="canonical"]::attr(href)').getall()
++    ids.extend(_asin_from_url(url) or "" for url in canonical)
++    if not ids or set(ids) != {asin} or _asin_from_url(page.url) != asin:
++        return None
++    urls: list[str] = []
++    for main in tree.css("img#landingImage, img#imgBlkFront"):
++        urls.extend(amazon_image_urls(main.attrib.get("data-old-hires", "")))
++        dynamic = main.attrib.get("data-a-dynamic-image", "")
++        if dynamic:
++            try:
++                for url in TypeAdapter(dict[str, object]).validate_json(dynamic):
++                    urls.extend(amazon_image_urls(url))
++            except ValidationError:
++                pass
++        urls.extend(amazon_image_urls(main.attrib.get("src", "")))
++    title = tree.css("#productTitle").xpath("string(.)").get() or ""
++    actor_text = " ".join(
++        tree.css(
++            "#bylineInfo, #detailBullets_feature_div, #detailBulletsWrapper_feature_div, "
++            "#productDetails_detailBullets_sections1, #productDetailsTable"
++        )
++        .xpath("string(.)")
++        .getall()
++    )
++    return AmazonProduct(asin=asin, title=title.strip(), actor_text=actor_text, image_urls=list(dict.fromkeys(urls)))
++
++
++def _title_matches(title: str, query: PosterQuery) -> bool:
++    def clean(value: str) -> str:
++        value = re.sub(r"[\[【(（]\s*(?:DVD|Blu-ray|ブルーレイ)\s*[\]】)）]", "", value, flags=re.IGNORECASE)
++        normalized = _text_key(value)
++        for actor in query.actors:
++            normalized = normalized.replace(_text_key(actor), "")
++        return normalized
++
++    wanted, actual = clean(query.title), clean(title)
++    if not wanted or not actual:
++        return False
++    if wanted == actual:
++        return True
++    return len(wanted) >= 10 and wanted in actual and len(wanted) / len(actual) >= 0.75
++
++
++def _actors_match(text: str, query: PosterQuery) -> bool:
++    key = _text_key(text)
++    return any(_text_key(actor) in key for actor in query.actors if _text_key(actor))
++
++
++class PosterResolver:
++    def __init__(self, client: WebClient, images: ImagePool) -> None:
++        self._client = client
++        self._images = images
++        self._pages: dict[str, PosterPage | None] = {}
++
++    async def _html(self, url: str) -> PosterPage | None:
++        if url not in self._pages:
++            self._pages[url] = None
++            try:
++                response = await self._client.request("GET", url, headers={"Accept-Language": "ja-JP,ja;q=0.9"})
++                response.encoding = "utf-8"
++                html = response.text
++                reason = classify_block(html)
++                eligibility = (
++                    reason is FailureReason.AGE_VERIFICATION
++                    and "black-curtain" in html
++                    and _safe_url(str(response.url), {"www.amazon.co.jp", "amazon.co.jp"})
++                )
++                if (reason is not None and not eligibility) or "validateCaptcha" in html:
++                    structlog.get_logger().warning("高清海报页面不可用", url=url, reason=reason or "验证码")
++                else:
++                    self._pages[url] = PosterPage(url=str(response.url), html=html)
++            except Exception as exc:
++                structlog.get_logger().warning("高清海报页面获取失败", url=url, error=str(exc))
++        return self._pages[url]
++
++    async def _amazon_page(self, url: str) -> PosterPage | None:
++        page = await self._html(url)
++        if (
++            page
++            and "black-curtain" in page.html
++            and not Selector(text=page.html).css('#landingImage, #imgBlkFront, [data-component-type="s-search-result"]')
++        ):
++            parsed = urlsplit(url)
++            target = urlunsplit(("", "", parsed.path, parsed.query, ""))
++            eligibility = "https://www.amazon.co.jp/black-curtain/save-eligibility/black-curtain?" + urlencode(
++                {"returnUrl": target}
++            )
++            page = await self._html(eligibility)
++        return page
++
++    async def _tenhow(self, query: PosterQuery) -> list[TenhowMatch]:
++        if not query.actors:
++            return []
++        index = await self._html("https://www.tenhow.net/mokuji.html")
++        if index is None or not _safe_url(index.url, {"www.tenhow.net", "tenhow.net"}):
++            return []
++        actor_pages = tenhow_actor_pages(index.html, query.actors)
++        if not actor_pages:
++            # 首页只列出部分近期演员；完整目录由实际导航中的五十音子目录提供。
++            indexes = [index.html]
++            for url in tenhow_index_pages(index.html):
++                group = await self._html(url)
++                if (
++                    group
++                    and _safe_url(group.url, {"www.tenhow.net", "tenhow.net"})
++                    and urlsplit(group.url).path == urlsplit(url).path
++                ):
++                    indexes.append(group.html)
++            actor_pages = tenhow_actor_pages(indexes, query.actors)
++        matches: dict[str, TenhowMatch] = {}
++        for url in actor_pages:
++            page = await self._html(url)
++            if (
++                page
++                and _safe_url(page.url, {"www.tenhow.net", "tenhow.net"})
++                and urlsplit(page.url).path == urlsplit(url).path
++            ):
++                for match in tenhow_matches(page.html, query):
++                    matches[match.asin] = match
++        if len(matches) > 1:
++            structlog.get_logger().warning("Tenhow 作品对应多个 ASIN，回退标题检索", number=query.number)
++            return []
++        return list(matches.values())
++
++    async def _amazon_asin(self, asin: str) -> AmazonProduct | None:
++        page = await self._amazon_page(f"https://www.amazon.co.jp/dp/{asin}")
++        return amazon_product(page, asin) if page else None
++
++    async def _search(self, query: PosterQuery, trusted_asins: set[str]) -> bool:
++        if not query.title:
++            return False
++        url = "https://www.amazon.co.jp/s?" + urlencode({"k": f"{query.title} [DVD]", "i": "dvd"})
++        page = await self._amazon_page(url)
++        if page is None or not _safe_url(page.url, {"www.amazon.co.jp", "amazon.co.jp"}):
++            return False
++        success = False
++        matched_asins: set[str] = set()
++        for card in Selector(text=page.html).css('[data-component-type="s-search-result"][data-asin]'):
++            asin = card.attrib.get("data-asin", "")
++            if re.fullmatch(r"[A-Z0-9]{10}", asin) is None:
++                continue
++            title = card.css("h2").xpath("string(.)").get() or card.css("img.s-image::attr(alt)").get() or ""
++            if asin not in trusted_asins and not _title_matches(title, query):
++                continue
++            # 搜索卡片的 ASIN 与商品链接必须一致；查询串不能用作演员匹配证据。
++            linked = {
++                _asin_from_url(_absolute_url("https://www.amazon.co.jp/", href))
++                for href in card.css("a::attr(href)").getall()
++            }
++            linked.discard(None)
++            if linked != {asin}:
++                continue
++            card_matches = asin in trusted_asins or _actors_match(card.xpath("string(.)").get() or "", query)
++            product = await self._amazon_asin(asin)
++            detail_matches = product is not None and (
++                asin in trusted_asins
++                or (
++                    _title_matches(product.title, query)
++                    and _actors_match(product.title + " " + product.actor_text, query)
++                )
++            )
++            if not card_matches and not detail_matches:
++                continue
++            matched_asins.add(asin)
++            images: list[str] = []
++            if product is not None and detail_matches:
++                images.extend(product.image_urls)
++            for src in card.css("img.s-image::attr(src)").getall():
++                images.extend(amazon_image_urls(src))
++            success = await self._images.acquire(images) or success
++        if not success:
++            # 标题路径核实的新 ASIN 仍可尝试 Tenhow 直链；候选池负责地址去重。
++            await self._images.acquire([f"https://www.tenhow.net/images/{asin}.jpg" for asin in sorted(matched_asins)])
++        return success
++
++    async def resolve(self, query: PosterQuery) -> None:
++        matches = await self._tenhow(query)
++        await self._images.acquire([match.image_url for match in matches])
++        success = False
++        for match in matches:
++            product = await self._amazon_asin(match.asin)
++            if product is not None:
++                success = await self._images.acquire(product.image_urls) or success
++        if not success:
++            await self._search(query, {match.asin for match in matches})
+diff --git a/src/amane/media/pipeline.py b/src/amane/media/pipeline.py
+index 0301d25..08552a2 100644
+--- a/src/amane/media/pipeline.py
++++ b/src/amane/media/pipeline.py
+@@ -23,12 +23,17 @@ from .images import (
+     should_crop_poster,
+     validate_crop_box,
+ )
++from .liu1443452494_image_quality import ImagePool, dimensions_improve, inspect_image
++from .liu1443452494_posters import PosterResolver
+ from .resource_store import RESOURCE_URL_PREFIX
+ 
+ if TYPE_CHECKING:
++    from collections.abc import Collection
++
+     from ..config import HotSettings, SrConfig
+     from ..db.models import Resource
+     from ..net.http import WebClient
++    from .liu1443452494_posters import PosterQuery
+     from .resource_store import ResourceStore
+ 
+ logger = structlog.get_logger()
+@@ -93,78 +98,87 @@ async def materialize_images(
+     data_dir: Path,
+     *,
+     extrafanart_urls: dict[str, list[str]] | None = None,
++    poster_query: PosterQuery | None = None,
++    previous_poster_urls: list[str] | None = None,
++    previous_thumb_urls: list[str] | None = None,
++    locked_fields: Collection[str] = (),
+ ) -> MaterializedImages:
+     """仅下载集合内的类型; 未选中的保留聚合 URL.
+ 
+-    死 URL 保序置于尾部, 供来源恢复后重试.
++    封面与海报按有效文件大小排序；失败地址保序置于尾部，供后续重试。
+     extrafanart 仅下载到 Resource, 站点分组结构不重排.
+     """
+     kinds = set(config.scraping.download_resources)
+-
+-    # 下载 thumb.
+-    thumb_ok: set[str] = set()
+-    thumb_local: Path | None = None
+-    thumb_src: str | None = None
+-    if DownloadableResource.thumb in kinds:
+-        for url in thumb_urls:
+-            local = await store.acquire(url, client)
+-            if local:
+-                thumb_ok.add(url)
+-                if thumb_local is None:
+-                    thumb_local, thumb_src = local, url
+-                    res = await store.get_by_url(url)
+-                    if res:
+-                        await _maybe_upscale(store, res, config, data_dir)
+-
+-    # 下载 poster; 候选偏矮则从 thumb 裁剪.
+-    poster_ok: set[str] = set()
+-    poster_candidate_local: Path | None = None
+-    result_poster_urls = list(poster_urls)
++    if "thumb_urls" in locked_fields:
++        kinds.discard(DownloadableResource.thumb)
++    if "poster_urls" in locked_fields:
++        kinds.discard(DownloadableResource.poster)
++
++    # 裁剪使用同一份按文件大小选定的封面，包括未选择输出封面的情况。
++    thumbs = ImagePool(store, client)
++    need_thumb = DownloadableResource.thumb in kinds or (
++        DownloadableResource.poster in kinds and config.scraping.crop_poster
++    )
++    if need_thumb:
++        if "thumb_urls" in locked_fields:
++            await thumbs.restore_cached(previous_thumb_urls or thumb_urls)
++        else:
++            await thumbs.acquire(thumb_urls)
++            await thumbs.restore_cached(previous_thumb_urls or [])
++    thumb = thumbs.best
++    if thumb is not None and DownloadableResource.thumb in kinds:
++        res = await store.get_by_url(thumb.locator)
++        if res:
++            await _maybe_upscale(store, res, config, data_dir)
++
++    result_poster_urls = (
++        list(previous_poster_urls or poster_urls) if "poster_urls" in locked_fields else list(poster_urls)
++    )
+     if DownloadableResource.poster in kinds:
+-        for url in poster_urls:
+-            local = await store.acquire(url, client)
+-            if local:
+-                poster_ok.add(url)
+-                if poster_candidate_local is None:
+-                    poster_candidate_local = local
+-
+-        # 裁剪需要 thumb 本地文件; 若未选 thumb 下载, 为裁剪临时 acquire 首个 thumb.
+-        if thumb_local is None and thumb_urls and config.scraping.crop_poster:
+-            for url in thumb_urls:
+-                local = await store.acquire(url, client)
+-                if local:
+-                    thumb_local, thumb_src = local, url
+-                    break
+-
+-        thumb_size = probe_size(thumb_local) if thumb_local else None
+-        cand_size = probe_size(poster_candidate_local) if poster_candidate_local else None
++        posters = ImagePool(store, client, prefer_amazon=True)
++        await posters.acquire(poster_urls)
++        if poster_query is not None:
++            try:
++                await PosterResolver(client, posters).resolve(poster_query)
++            except Exception as exc:
++                logger.warning("高清海报检索失败，保留已取得的图片", number=poster_query.number, error=str(exc))
++        await posters.restore_cached(previous_poster_urls or [])
++        poster = posters.best
++        result_poster_urls = posters.ordered_urls(previous_poster_urls or [])
++
++        thumb_size = probe_size(thumb.path) if thumb else None
++        cand_size = poster.dimensions if poster else None
++        ratio = config.scraping.poster_ratio
++        crop_size = (min(thumb_size[0], int(thumb_size[1] * ratio)), thumb_size[1]) if thumb_size else (0, 0)
++        cropped = False
+ 
+         if (
+             config.scraping.crop_poster
+             and should_crop_poster(thumb_size, cand_size, skip_ratio=config.scraping.poster_crop_skip_ratio)
+-            and thumb_local
++            and thumb is not None
++            and dimensions_improve(crop_size, cand_size)
+         ):
+-            ratio = config.scraping.poster_ratio
+             args = f"{ratio:.4f}"
+-            local_thumb = thumb_local
++            local_thumb = thumb.path
+ 
+             async def crop_producer(dest: Path) -> bool:
+                 return crop_poster(local_thumb, dest, poster_ratio=ratio, jpeg_quality=config.scraping.jpeg_quality)
+ 
+-            crop_res = await store.acquire_derived(thumb_src or "", "crop", args, crop_producer)
++            try:
++                crop_res = await store.acquire_derived(thumb.locator, "crop", args, crop_producer)
++            except Exception as exc:
++                logger.warning("海报裁剪失败，保留下载海报", error=str(exc))
++                crop_res = None
+             if crop_res:
+-                await _maybe_upscale(store, crop_res, config, data_dir)
+-                result_poster_urls = [_internal_url(store, crop_res.url)]
+-            else:
+-                result_poster_urls = _success_first(poster_urls, poster_ok)
+-        else:
+-            result_poster_urls = _success_first(poster_urls, poster_ok)
+-            if poster_candidate_local:
+-                for url in poster_urls:
+-                    res = await store.get_by_url(url)
+-                    if res:
+-                        await _maybe_upscale(store, res, config, data_dir)
+-                        break
++                candidate = inspect_image(crop_res.url, crop_res.url, store.full_path(crop_res))
++                if candidate is not None and dimensions_improve(candidate.dimensions, cand_size):
++                    await _maybe_upscale(store, crop_res, config, data_dir)
++                    result_poster_urls = [_internal_url(store, crop_res.url)]
++                    cropped = True
++        if not cropped and poster is not None:
++            res = await store.get_by_url(poster.locator)
++            if res:
++                await _maybe_upscale(store, res, config, data_dir)
+ 
+     # 下载预告片.
+     trailer_ok: set[str] = set()
+@@ -181,7 +195,13 @@ async def materialize_images(
+ 
+     out = MaterializedImages(
+         poster_urls=result_poster_urls,
+-        thumb_urls=_success_first(thumb_urls, thumb_ok),
++        thumb_urls=(
++            thumbs.ordered_urls(previous_thumb_urls or [])
++            if DownloadableResource.thumb in kinds
++            else list(previous_thumb_urls or thumb_urls)
++            if "thumb_urls" in locked_fields
++            else list(thumb_urls)
++        ),
+         trailer_urls=_success_first(trailer_urls, trailer_ok),
+     )
+     logger.debug(
+diff --git a/tests/handlers/test_liu1443452494_image_quality.py b/tests/handlers/test_liu1443452494_image_quality.py
+new file mode 100644
+index 0000000..6aafd32
+--- /dev/null
++++ b/tests/handlers/test_liu1443452494_image_quality.py
+@@ -0,0 +1,113 @@
++"""刮削入口的图片原文、字段锁定及旧图回退。"""
++
++from pathlib import Path
++from typing import cast
++
++import pytest
++
++from amane.config import HotSettings
++from amane.crawlers.models import FetchOptions, MediaMetadata, SearchQuery, film_actors
++from amane.db.repository import Repository
++from amane.enums import Language, MetadataField, SiteName
++from amane.handlers import ScrapeHandler, ScrapePayload
++from amane.llm import Translator
++from amane.media import ResourceStore
++from amane.media.liu1443452494_posters import PosterQuery
++from amane.net.http import WebClient
++from amane.parsing import ContentType
++from tests.handlers.test_scraper import FakeFactory, MockCrawler
++from tests.media.test_liu1443452494_image_quality import PosterClient, image_bytes, search_card, search_url
++
++
++class OriginalCrawler(MockCrawler):
++    name = SiteName.DMM
++
++    def __init__(self, metadata: MediaMetadata) -> None:
++        super().__init__()
++        self.metadata = metadata
++
++    async def fetch(self, query: SearchQuery, options: FetchOptions | None = None) -> MediaMetadata | None:
++        return self.metadata.model_copy(deep=True)
++
++
++class ChineseTranslator:
++    async def translate(self, text: str, language: Language, field: MetadataField, use_cache: bool) -> str:
++        return "已经翻译的中文标题"
++
++
++@pytest.mark.asyncio
++async def test_scrape_searches_original_japanese_before_xml_mapping(
++    repo: Repository, resource_store: ResourceStore, tmp_path: Path
++) -> None:
++    (tmp_path / "mapping_actor.xml").write_text('<actors><a zh_cn="枫花恋" jp="楓カレン"/></actors>', encoding="utf-8")
++    original = MediaMetadata(number="IPZZ-396", title="原題の長い物語 楓カレン", actors=film_actors(["楓カレン"]))
++    query = PosterQuery(number=original.number, title=original.title or "", actors=["楓カレン"])
++    image = "https://m.media-amazon.com/images/I/81Found.jpg"
++    client = PosterClient(pages={search_url(query): search_card(image)}, images={image: image_bytes()})
++    config = HotSettings()
++    config.scraping.content_routes[ContentType.CENSORED] = [SiteName.DMM]
++    config.scraping.field_language[MetadataField.TITLE] = Language.ZH_CN
++    handler = ScrapeHandler(
++        repo,
++        FakeFactory({"dmm": OriginalCrawler(original)}),
++        resource_store,
++        config,
++        web_client=cast("WebClient", client),
++        translator=cast("Translator", ChineseTranslator()),
++    )
++    result = await handler.handle(
++        ScrapePayload(number=original.number, content_type=ContentType.CENSORED, use_cache=set())
++    )
++    assert result.success
++    saved = await repo.get_metadata_by_number(original.number)
++    assert saved is not None
++    assert saved.title == "已经翻译的中文标题"
++    assert saved.actors == ["枫花恋"]
++    assert saved.poster_urls == [image]
++    assert saved.raw["dmm"]["title"] == original.title
++    assert saved.raw["dmm"]["actors"][0]["name"] == "楓カレン"
++    assert search_url(query) in client.page_requests
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("locked", [True, False])
++async def test_scrape_retains_existing_images_without_metadata_cache(
++    repo: Repository, resource_store: ResourceStore, locked: bool
++) -> None:
++    old_poster = "https://images.test/old-poster.jpg"
++    old_thumb = "https://images.test/old-thumb.jpg"
++    new_poster = "https://images.test/new-poster.jpg"
++    new_thumb = "https://images.test/new-thumb.jpg"
++    saved = await repo.upsert_metadata(
++        number="IPZZ-396", content_type=ContentType.CENSORED, poster_urls=[old_poster], thumb_urls=[old_thumb]
++    )
++    assert saved.id is not None
++    if locked:
++        await repo.set_metadata_locks(saved.id, [MetadataField.POSTER_URLS, MetadataField.THUMB_URLS])
++    seed = PosterClient(images={old_poster: image_bytes((700, 1000)), old_thumb: image_bytes((800, 538))})
++    await resource_store.acquire(old_poster, cast("WebClient", seed))
++    await resource_store.acquire(old_thumb, cast("WebClient", seed))
++    original = MediaMetadata(
++        number="IPZZ-396", title="日本語の新規取得", poster_urls=[new_poster], thumb_urls=[new_thumb]
++    )
++    client = PosterClient(images={new_poster: image_bytes(), new_thumb: image_bytes()} if locked else {})
++    config = HotSettings()
++    config.scraping.content_routes[ContentType.CENSORED] = [SiteName.DMM]
++    handler = ScrapeHandler(
++        repo,
++        FakeFactory({"dmm": OriginalCrawler(original)}),
++        resource_store,
++        config,
++        web_client=cast("WebClient", client),
++    )
++    result = await handler.handle(ScrapePayload(number="IPZZ-396", content_type=ContentType.CENSORED, use_cache=set()))
++    assert result.success
++    current = await repo.get_metadata_by_number("IPZZ-396")
++    assert current is not None and current.title == original.title
++    assert current.poster_urls[0] == old_poster
++    assert current.thumb_urls[0] == old_thumb
++    assert current.raw["dmm"]["poster_urls"] == [new_poster]
++    if locked:
++        assert client.downloaded == client.page_requests == []
++    else:
++        assert client.downloaded == [new_thumb, new_poster]
+diff --git a/tests/media/test_liu1443452494_image_quality.py b/tests/media/test_liu1443452494_image_quality.py
+new file mode 100644
+index 0000000..fdc75d8
+--- /dev/null
++++ b/tests/media/test_liu1443452494_image_quality.py
+@@ -0,0 +1,491 @@
++"""图片文件大小择优、高清海报检索分支与裁剪覆盖保护。"""
++
++from collections.abc import Mapping
++from io import BytesIO
++from pathlib import Path
++from typing import cast
++from urllib.parse import urlencode
++
++import pytest
++from curl_cffi.requests import Response
++from curl_cffi.requests.session import HttpMethod
++from PIL import Image
++
++from amane.config import HotSettings
++from amane.enums import DownloadableResource
++from amane.media import ResourceStore, materialize_images
++from amane.media import pipeline as pipeline_module
++from amane.media.liu1443452494_image_quality import ImagePool
++from amane.media.liu1443452494_posters import PosterQuery
++from amane.net.errors import FailureKind, RequestError, RequestFailure
++from amane.net.http import RateLimiters, WebClient
++from tests.media.test_pipeline import FakeClient
++
++
++def image_bytes(size: tuple[int, int] = (100, 150), minimum_bytes: int = 0) -> bytes:
++    stream = BytesIO()
++    Image.new("RGB", size, "blue").save(stream, format="JPEG")
++    data = stream.getvalue()
++    return data + b"\0" * max(0, minimum_bytes - len(data))
++
++
++class PosterClient(FakeClient):
++    def __init__(
++        self,
++        *,
++        pages: Mapping[str, str | None] | None = None,
++        images: Mapping[str, bytes | None] | None = None,
++        redirects: Mapping[str, str] | None = None,
++    ) -> None:
++        super().__init__({})
++        self.pages = dict(pages or {})
++        self.images = dict(images or {})
++        self.redirects = dict(redirects or {})
++        self.page_requests: list[str] = []
++        self.events: list[str] = []
++
++    async def request(self, method: HttpMethod, url: str, **kwargs: object) -> Response:
++        assert method == "GET"
++        self.page_requests.append(url)
++        self.events.append(url)
++        html = self.pages.get(url)
++        if html is None:
++            raise OSError("测试页面无法访问")
++        response = Response()
++        response.status_code = 200
++        response.url = self.redirects.get(url, url)
++        response.content = html.encode("utf-8")
++        return response
++
++    async def download(self, url: str, dest: Path, **kwargs: object) -> bool:
++        self.downloaded.append(url)
++        self.events.append(url)
++        data = self.images.get(url)
++        if data is None:
++            return False
++        dest.parent.mkdir(parents=True, exist_ok=True)
++        dest.write_bytes(data)
++        return True
++
++
++def tenhow_block(cid: str = "ipzz00396", asin: str = "B000000001") -> str:
++    link = "https://al.fanza.co.jp/?" + urlencode({"lurl": f"https://video.dmm.co.jp/av/content/?id={cid}"})
++    return (
++        '<div class="um_image_a um_popup">'
++        f'<a title="拡大表示" href="images/{asin}.jpg"><img src="images/icon_{asin}.jpg"></a>'
++        f'<div class="buythis"><a href="{link}">商品</a></div></div>'
++    )
++
++
++def product_html(image_url: str, asin: str = "B000000001", *, title: str = "原題の長い物語 楓カレン") -> str:
++    return (
++        f'<link rel="canonical" href="https://www.amazon.co.jp/dp/{asin}">'
++        f'<input id="ASIN" value="{asin}"><span id="productTitle">{title}</span>'
++        f'<img id="landingImage" data-old-hires="{image_url}">'
++    )
++
++
++def search_card(image_url: str, asin: str = "B000000001", *, title: str = "原題の長い物語 楓カレン") -> str:
++    return (
++        f'<div data-component-type="s-search-result" data-asin="{asin}">'
++        f'<a href="/dp/{asin}"><h2>{title} [DVD]</h2></a>'
++        f'<img class="s-image" src="{image_url}"></div>'
++    )
++
++
++def poster_query() -> PosterQuery:
++    return PosterQuery(number="IPZZ-396", title="原題の長い物語 楓カレン", actors=["楓カレン"])
++
++
++def search_url(query: PosterQuery) -> str:
++    return "https://www.amazon.co.jp/s?" + urlencode({"k": f"{query.title} [DVD]", "i": "dvd"})
++
++
++@pytest.mark.asyncio
++async def test_image_bytes_override_resolution_and_preserve_ties(resource_store: ResourceStore, tmp_path: Path) -> None:
++    urls = [f"https://images.test/{name}.jpg" for name in ("high", "large", "tie", "invalid", "missing")]
++    client = PosterClient(
++        images={
++            urls[0]: image_bytes((800, 1200)),
++            urls[1]: image_bytes(minimum_bytes=40000),
++            urls[2]: image_bytes(minimum_bytes=40000),
++            urls[3]: b"<html>" + b"error" * 20000,
++        }
++    )
++    config = HotSettings()
++    config.scraping.crop_poster = False
++    result = await materialize_images(
++        urls, [*urls, urls[1]], [], resource_store, cast("WebClient", client), config, tmp_path
++    )
++    expected = [urls[1], urls[2], urls[0], urls[3], urls[4]]
++    assert result.poster_urls == result.thumb_urls == expected
++    assert set(client.downloaded) == set(urls)
++    assert client.downloaded.count(urls[1]) == 1
++    assert await resource_store.get_by_url(urls[3]) is None
++    path = await resource_store.resolve(urls[1])
++    assert path is not None and path.stat().st_size == 40000
++
++
++@pytest.mark.asyncio
++async def test_invalid_cache_can_recover(resource_store: ResourceStore) -> None:
++    url = "https://images.test/poster.jpg"
++    client = PosterClient(images={url: "<html>暂时不可用</html>".encode()})
++    assert not await ImagePool(resource_store, cast("WebClient", client)).acquire([url])
++    client.images[url] = image_bytes()
++    assert await ImagePool(resource_store, cast("WebClient", client)).acquire([url])
++    assert client.downloaded == [url, url]
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    ("tenhow_bytes", "amazon_bytes", "winner"),
++    [
++        (6000, 8000, "amazon"),
++        (6000, 4000, "tenhow"),
++        (4000, 3000, "ordinary"),
++        (4000, 4000, "amazon"),
++        (None, 8000, "amazon"),
++    ],
++)
++async def test_tenhow_asin_and_amazon_selection(
++    resource_store: ResourceStore,
++    tmp_path: Path,
++    tenhow_bytes: int | None,
++    amazon_bytes: int,
++    winner: str,
++) -> None:
++    ordinary = "https://images.test/ordinary.jpg"
++    tenhow = "https://www.tenhow.net/images/B000000001.jpg"
++    amazon = "https://m.media-amazon.com/images/I/81Example.jpg"
++    index = "https://www.tenhow.net/mokuji.html"
++    actor = "https://www.tenhow.net/kaede_karen.html"
++    detail = "https://www.amazon.co.jp/dp/B000000001"
++    client = PosterClient(
++        pages={index: '<a href="kaede_karen.html">楓カレン</a>', actor: tenhow_block(), detail: product_html(amazon)},
++        images={
++            ordinary: image_bytes(minimum_bytes=4000),
++            tenhow: image_bytes(minimum_bytes=tenhow_bytes) if tenhow_bytes else None,
++            amazon: image_bytes(minimum_bytes=amazon_bytes),
++        },
++    )
++    config = HotSettings()
++    config.scraping.crop_poster = False
++    result = await materialize_images(
++        [ordinary], [], [], resource_store, cast("WebClient", client), config, tmp_path, poster_query=poster_query()
++    )
++    assert result.poster_urls[0] == {"ordinary": ordinary, "tenhow": tenhow, "amazon": amazon}[winner]
++    assert client.page_requests == [index, actor, detail]
++    assert client.events.index(ordinary) < client.events.index(index)
++    assert client.events.index(tenhow) < client.events.index(detail)
++    assert client.downloaded == [ordinary, tenhow, amazon]
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("detail_available", [True, False])
++async def test_asin_failure_searches_title_and_accepts_new_url_for_same_asin(
++    resource_store: ResourceStore, tmp_path: Path, detail_available: bool
++) -> None:
++    old_image = "https://m.media-amazon.com/images/I/81Failed.jpg"
++    new_image = "https://m.media-amazon.com/images/I/81Recovered.jpg"
++    scaled = "https://m.media-amazon.com/images/I/81Recovered._AC_SY879_.jpg"
++    tenhow = "https://www.tenhow.net/images/B000000001.jpg"
++    detail = "https://www.amazon.co.jp/dp/B000000001"
++    query = poster_query()
++    client = PosterClient(
++        pages={
++            "https://www.tenhow.net/mokuji.html": '<a href="kaede_karen.html">楓カレン</a>',
++            "https://www.tenhow.net/kaede_karen.html": tenhow_block(),
++            detail: product_html(old_image) if detail_available else None,
++            search_url(query): search_card(scaled),
++        },
++        images={
++            tenhow: image_bytes(minimum_bytes=4000),
++            new_image: image_bytes(minimum_bytes=8000),
++            scaled: image_bytes(),
++        },
++    )
++    result = await materialize_images(
++        [], [], [], resource_store, cast("WebClient", client), HotSettings(), tmp_path, poster_query=query
++    )
++    assert result.poster_urls[0] == new_image
++    assert client.page_requests.count(detail) == 1
++    assert client.page_requests[-1] == search_url(query)
++    assert client.downloaded.count(tenhow) == 1
++    assert client.downloaded.count(old_image) == int(detail_available)
++    assert scaled in client.downloaded
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("amazon_available", [True, False])
++async def test_title_search_uses_confirmed_asin_for_tenhow_fallback(
++    resource_store: ResourceStore, tmp_path: Path, amazon_available: bool
++) -> None:
++    query = poster_query()
++    amazon = "https://m.media-amazon.com/images/I/81FromSearch.jpg"
++    tenhow = "https://www.tenhow.net/images/B000000002.jpg"
++    client = PosterClient(
++        pages={search_url(query): search_card(amazon, "B000000002")},
++        images={amazon: image_bytes(minimum_bytes=5000) if amazon_available else None, tenhow: image_bytes()},
++    )
++    result = await materialize_images(
++        [], [], [], resource_store, cast("WebClient", client), HotSettings(), tmp_path, poster_query=query
++    )
++    assert result.poster_urls[0] == (amazon if amazon_available else tenhow)
++    assert (tenhow in client.downloaded) is not amazon_available
++    assert len(client.page_requests) == 3
++
++
++@pytest.mark.asyncio
++async def test_search_rejects_similar_titles_and_other_actors(resource_store: ResourceStore, tmp_path: Path) -> None:
++    query = poster_query()
++    wrong = "https://m.media-amazon.com/images/I/81Wrong.jpg"
++    client = PosterClient(
++        pages={
++            search_url(query): search_card(wrong, title="原題の別の物語 楓カレン")
++            + search_card(wrong, "B000000002", title="原題の長い物語 別の出演者")
++        },
++        images={wrong: image_bytes(minimum_bytes=50000)},
++    )
++    result = await materialize_images(
++        [], [], [], resource_store, cast("WebClient", client), HotSettings(), tmp_path, poster_query=query
++    )
++    assert result.poster_urls == []
++    assert client.downloaded == []
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    ("thumb_size", "poster_size", "crop_enabled", "expected"),
++    [
++        ((800, 538), (300, 420), True, (376, 538)),
++        ((800, 538), (700, 1000), True, (700, 1000)),
++        ((800, 538), (500, 420), True, (500, 420)),
++        ((800, 538), (376, 538), True, (376, 538)),
++        ((1600, 1076), (400, 600), True, (753, 1076)),
++        ((1600, 1076), (400, 600), False, (400, 600)),
++        ((800, 538), None, True, (376, 538)),
++    ],
++)
++async def test_crop_replaces_only_when_both_dimensions_improve(
++    resource_store: ResourceStore,
++    tmp_path: Path,
++    thumb_size: tuple[int, int],
++    poster_size: tuple[int, int] | None,
++    crop_enabled: bool,
++    expected: tuple[int, int],
++) -> None:
++    thumb = "https://images.test/thumb.jpg"
++    poster = "https://m.media-amazon.com/images/I/81Poster.jpg"
++    original = image_bytes(poster_size, 50000) if poster_size else None
++    client = PosterClient(images={thumb: image_bytes(thumb_size), poster: original})
++    config = HotSettings()
++    config.scraping.crop_poster = crop_enabled
++    result = await materialize_images(
++        [poster], [thumb], [], resource_store, cast("WebClient", client), config, tmp_path
++    )
++    source = await resource_store.resolve_source(result.poster_urls[0], cast("WebClient", client))
++    assert source is not None
++    with Image.open(source.path) as image:
++        assert image.size == expected
++    if expected == poster_size:
++        assert result.poster_urls == [poster]
++        assert source.path.read_bytes() == original
++    else:
++        assert result.poster_urls[0].startswith("/api/resources/")
++        assert source.path.stat().st_size < 50000
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("raises", [False, True])
++async def test_crop_failure_keeps_downloaded_poster(
++    resource_store: ResourceStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raises: bool
++) -> None:
++    def failed_crop(*args: object, **kwargs: object) -> bool:
++        if raises:
++            raise OSError("测试裁剪文件写入失败")
++        return False
++
++    monkeypatch.setattr(pipeline_module, "crop_poster", failed_crop)
++    poster, thumb = "https://images.test/poster.jpg", "https://images.test/thumb.jpg"
++    client = PosterClient(images={poster: image_bytes((300, 420)), thumb: image_bytes((800, 538))})
++    result = await materialize_images(
++        [poster], [thumb], [], resource_store, cast("WebClient", client), HotSettings(), tmp_path
++    )
++    assert result.poster_urls == [poster]
++
++
++@pytest.mark.asyncio
++async def test_crop_without_thumb_output_uses_largest_file(resource_store: ResourceStore, tmp_path: Path) -> None:
++    thumbs = ["https://images.test/small.jpg", "https://images.test/large.jpg"]
++    client = PosterClient(images={thumbs[0]: image_bytes((800, 538)), thumbs[1]: image_bytes((1600, 1076))})
++    config = HotSettings()
++    config.scraping.download_resources = [DownloadableResource.poster]
++    result = await materialize_images([], thumbs, [], resource_store, cast("WebClient", client), config, tmp_path)
++    assert result.thumb_urls == thumbs
++    assert client.downloaded == thumbs
++    source = await resource_store.resolve_source(result.poster_urls[0], cast("WebClient", client))
++    assert source is not None
++    with Image.open(source.path) as image:
++        assert image.size == (753, 1076)
++
++
++@pytest.mark.asyncio
++async def test_all_new_fail_keeps_old_cached_poster_and_thumb(resource_store: ResourceStore, tmp_path: Path) -> None:
++    old_poster, old_thumb = "https://images.test/old-poster.jpg", "https://images.test/old-thumb.jpg"
++    new_poster, new_thumb = "https://images.test/new-poster.jpg", "https://images.test/new-thumb.jpg"
++    seed = PosterClient(images={old_poster: image_bytes((700, 1000)), old_thumb: image_bytes((800, 538))})
++    await resource_store.acquire(old_poster, cast("WebClient", seed))
++    await resource_store.acquire(old_thumb, cast("WebClient", seed))
++    client = PosterClient()
++    result = await materialize_images(
++        [new_poster],
++        [new_thumb],
++        [],
++        resource_store,
++        cast("WebClient", client),
++        HotSettings(),
++        tmp_path,
++        previous_poster_urls=[old_poster],
++        previous_thumb_urls=[old_thumb],
++    )
++    assert result.poster_urls == [old_poster, new_poster]
++    assert result.thumb_urls == [old_thumb, new_thumb]
++    assert client.downloaded == [new_thumb, new_poster]
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("locked", [True, False])
++async def test_locked_or_disabled_images_skip_enrichment(
++    resource_store: ResourceStore, tmp_path: Path, locked: bool
++) -> None:
++    config = HotSettings()
++    if not locked:
++        config.scraping.download_resources = []
++    client = PosterClient()
++    result = await materialize_images(
++        ["https://images.test/poster.jpg"],
++        ["https://images.test/thumb.jpg"],
++        [],
++        resource_store,
++        cast("WebClient", client),
++        config,
++        tmp_path,
++        poster_query=poster_query(),
++        locked_fields=["poster_urls", "thumb_urls"] if locked else [],
++    )
++    assert result.poster_urls == ["https://images.test/poster.jpg"]
++    assert result.thumb_urls == ["https://images.test/thumb.jpg"]
++    assert client.page_requests == client.downloaded == []
++
++
++@pytest.mark.asyncio
++async def test_tenhow_follows_actual_group_indexes(resource_store: ResourceStore, tmp_path: Path) -> None:
++    amazon = "https://m.media-amazon.com/images/I/81Indexed.jpg"
++    client = PosterClient(
++        pages={
++            "https://www.tenhow.net/mokuji.html": '<a href="agyo.html">あ行</a><a href="kagyo.html">か行</a><a href="other.html">广告</a>',
++            "https://www.tenhow.net/agyo.html": '<html><body><a href="another.html">別の名前</a></body></html>',
++            "https://www.tenhow.net/kagyo.html": '<html><body><a href="kaede_karen.html">楓カレン</a> (かえでかれん)</body></html>',
++            "https://www.tenhow.net/kaede_karen.html": tenhow_block(),
++            "https://www.amazon.co.jp/dp/B000000001": product_html(amazon),
++        },
++        images={amazon: image_bytes()},
++    )
++    result = await materialize_images(
++        [], [], [], resource_store, cast("WebClient", client), HotSettings(), tmp_path, poster_query=poster_query()
++    )
++    assert result.poster_urls[0] == amazon
++    assert client.page_requests == [
++        "https://www.tenhow.net/mokuji.html",
++        "https://www.tenhow.net/agyo.html",
++        "https://www.tenhow.net/kagyo.html",
++        "https://www.tenhow.net/kaede_karen.html",
++        "https://www.amazon.co.jp/dp/B000000001",
++    ]
++
++
++@pytest.mark.asyncio
++async def test_amazon_age_page_continues_to_original_search(resource_store: ResourceStore, tmp_path: Path) -> None:
++    query = poster_query()
++    search = search_url(query)
++    eligibility = "https://www.amazon.co.jp/black-curtain/save-eligibility/black-curtain?" + urlencode(
++        {"returnUrl": search.removeprefix("https://www.amazon.co.jp")}
++    )
++    amazon = "https://m.media-amazon.com/images/I/81AfterEligibility.jpg"
++    client = PosterClient(
++        pages={
++            search: '<form action="/black-curtain/save-eligibility/black-curtain">年齢認証</form>',
++            eligibility: search_card(amazon),
++        },
++        images={amazon: image_bytes()},
++        redirects={eligibility: search},
++    )
++    result = await materialize_images(
++        [], [], [], resource_store, cast("WebClient", client), HotSettings(), tmp_path, poster_query=query
++    )
++    assert result.poster_urls[0] == amazon
++    assert client.page_requests.count(eligibility) == 1
++
++
++@pytest.mark.asyncio
++async def test_head_failure_does_not_reject_valid_image(
++    resource_store: ResourceStore, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    client = WebClient(limiters=RateLimiters())
++    requested: list[str] = []
++    data = image_bytes(minimum_bytes=3000)
++
++    async def request(method: HttpMethod, url: str, **kwargs: object) -> Response:
++        requested.append(method)
++        if method == "HEAD":
++            raise RequestError(url, RequestFailure(kind=FailureKind.HTTP_STATUS, status=400, message="不支持 HEAD"))
++        response = Response()
++        response.status_code = 200
++        response.url = url
++        response.content = data
++        return response
++
++    monkeypatch.setattr(client, "request", request)
++    try:
++        pool = ImagePool(resource_store, client)
++        assert await pool.acquire(["https://m.media-amazon.com/images/I/81Valid.jpg"])
++        assert pool.best is not None and pool.best.file_bytes == len(data)
++        assert requested == ["HEAD", "HEAD", "GET"]
++    finally:
++        await client.close()
++
++
++@pytest.mark.asyncio
++async def test_all_matching_amazon_cards_participate(resource_store: ResourceStore, tmp_path: Path) -> None:
++    first, second = (
++        "https://m.media-amazon.com/images/I/81First.jpg",
++        "https://m.media-amazon.com/images/I/81Second.jpg",
++    )
++    query = poster_query()
++    client = PosterClient(
++        pages={search_url(query): search_card(first) + search_card(second, "B000000002")},
++        images={first: image_bytes(minimum_bytes=3000), second: image_bytes(minimum_bytes=5000)},
++    )
++    result = await materialize_images(
++        [], [], [], resource_store, cast("WebClient", client), HotSettings(), tmp_path, poster_query=query
++    )
++    assert result.poster_urls == [second, first]
++    assert client.downloaded == [first, second]
++
++
++@pytest.mark.asyncio
++async def test_search_confirms_actor_from_product_details(resource_store: ResourceStore, tmp_path: Path) -> None:
++    query = poster_query()
++    amazon = "https://m.media-amazon.com/images/I/81DetailActor.jpg"
++    client = PosterClient(
++        pages={
++            search_url(query): search_card(amazon, title="原題の長い物語"),
++            "https://www.amazon.co.jp/dp/B000000001": product_html(amazon, title="原題の長い物語")
++            + '<div id="bylineInfo">楓カレン (出演)</div>',
++        },
++        images={amazon: image_bytes()},
++    )
++    result = await materialize_images(
++        [], [], [], resource_store, cast("WebClient", client), HotSettings(), tmp_path, poster_query=query
++    )
++    assert result.poster_urls == [amazon]
+diff --git a/tests/media/test_liu1443452494_posters.py b/tests/media/test_liu1443452494_posters.py
+new file mode 100644
+index 0000000..bcee08c
+--- /dev/null
++++ b/tests/media/test_liu1443452494_posters.py
+@@ -0,0 +1,172 @@
++"""检索原文、作品身份与主图解析的边界。"""
++
++import json
++from html import escape
++
++import pytest
++
++from amane.crawlers.models import MediaMetadata, film_actors
++from amane.media.liu1443452494_posters import (
++    PosterPage,
++    PosterQuery,
++    amazon_image_urls,
++    amazon_product,
++    make_poster_query,
++    tenhow_actor_pages,
++    tenhow_index_pages,
++    tenhow_matches,
++)
++from tests.media.test_liu1443452494_image_quality import product_html, tenhow_block
++
++
++def test_query_uses_dmm_original_and_explicit_japanese_fallback() -> None:
++    dmm = MediaMetadata(
++        number="IPZZ-396",
++        title="日本語の原題",
++        actors=film_actors(["楓カレン"]),
++        source_url="https://video.dmm.co.jp/av/content/?id=ipzz00396",
++    )
++    translated = MediaMetadata(number="IPZZ-396", title="翻译后的标题", actors=film_actors(["枫花恋"]))
++    raw = {"javdb:zh_cn": translated.model_dump(), "dmm": dmm.model_dump()}
++    query = make_poster_query("IPZZ396", raw)
++    assert query is not None
++    assert query.title == "日本語の原題"
++    assert query.actors == ["楓カレン"]
++    assert query.dmm_ids == ["ipzz00396"]
++    assert raw["dmm"]["title"] == "日本語の原題"
++    assert make_poster_query("IPZZ-396", {"javdb:zh_cn": translated.model_dump()}) is None
++    japanese = make_poster_query("IPZZ-396", {"javdb:jp": dmm.model_dump()})
++    assert japanese is not None and japanese.title == query.title and japanese.actors == query.actors
++    assert make_poster_query("IPZZ-396", {"dmm": {"number": "OTHER-396", "title": "別の作品"}}) is None
++    assert make_poster_query("IPZZ-396", {"dmm": {"title": "番号欠損"}}) is None
++    assert make_poster_query("任意の文字列", raw) is None
++
++
++def test_tenhow_actor_index_exact_names_and_ambiguity() -> None:
++    html = (
++        '<a href="kaede_karen.html">楓 カレン</a>'
++        '<a href="kaede_karen.html">楓カレン</a>'
++        '<a href="another.html">楓カレンに似た名前</a>'
++        '<a href="https://other.test/actor.html">別人</a>'
++        '<a href="https://[invalid">楓カレン</a>'
++        '<a href="ambiguous_a.html">同名</a><a href="ambiguous_b.html">同名</a>'
++    )
++    assert tenhow_actor_pages(html, ["楓カレン", "別人", "同名", "未知の名前"]) == [
++        "https://www.tenhow.net/kaede_karen.html"
++    ]
++    assert tenhow_actor_pages(html, []) == []
++    assert tenhow_index_pages(
++        '<a href="kagyo.html">か行</a><a href="https://other.test/agyo.html">あ行</a><a href="other.html">广告</a>'
++    ) == ["https://www.tenhow.net/kagyo.html"]
++
++
++@pytest.mark.parametrize(
++    ("number", "cid", "dmm_ids", "matched"),
++    [
++        ("IPZZ-396", "ipzz00396", [], True),
++        ("IPZZ396", "ipzz396", [], True),
++        ("IPZZ-396", "ipzz00397", [], False),
++        ("ABP-123", "118abp00123", [], True),
++        ("ABP-123", "999abp00123", [], False),
++        ("ABC-123", "h_777abc00123", ["h_777abc123"], True),
++        ("ABC-123", "h_778abc00123", ["h_777abc123"], False),
++        ("IPZZ-396", "ipzz00396other", [], False),
++        ("IPZZ-000", "ipzz000", [], False),
++    ],
++)
++def test_tenhow_matches_full_product_number(number: str, cid: str, dmm_ids: list[str], matched: bool) -> None:
++    result = tenhow_matches(tenhow_block(cid), PosterQuery(number=number, dmm_ids=dmm_ids))
++    assert bool(result) is matched
++    if result:
++        assert result[0].asin == "B000000001"
++        assert result[0].image_url == "https://www.tenhow.net/images/B000000001.jpg"
++
++
++def test_tenhow_keeps_identity_inside_one_product_block() -> None:
++    query = PosterQuery(number="IPZZ-396")
++    wrong = tenhow_block("ipzz00397", "B000000002")
++    matching = tenhow_block()
++    matches = tenhow_matches(wrong + matching, query)
++    assert [item.asin for item in matches] == ["B000000001"]
++    conflict = matching.replace(
++        '<div class="buythis">',
++        '<a href="https://video.dmm.co.jp/av/content/?id=ipzz00397">另一部作品</a><div class="buythis">',
++    )
++    assert tenhow_matches(conflict, query) == []
++    mixed_images = matching.replace(
++        '<div class="buythis">', '<a title="拡大表示" href="images/B000000003.jpg">海报</a><div class="buythis">'
++    )
++    assert tenhow_matches(mixed_images, query) == []
++    assert tenhow_matches('<a title="拡大表示" href="images/B000000001.jpg">无作品区块</a>', query) == []
++    assert (
++        tenhow_matches(matching.replace("images/B000000001.jpg", "https://other.test/images/B000000001.jpg"), query)
++        == []
++    )
++    assert tenhow_matches(matching.replace("B000000001.jpg", "invalid.jpg"), query) == []
++
++
++@pytest.mark.parametrize(
++    ("url", "expected"),
++    [
++        (
++            "https://m.media-amazon.com/images/I/81Example._AC_SY879_.jpg",
++            [
++                "https://m.media-amazon.com/images/I/81Example.jpg",
++                "https://m.media-amazon.com/images/I/81Example._AC_SY879_.jpg",
++            ],
++        ),
++        ("https://m.media-amazon.com/images/I/81Example.jpg", ["https://m.media-amazon.com/images/I/81Example.jpg"]),
++        (
++            "https://m.media-amazon.com/images/I/81Example._SL1500_.jpg",
++            [
++                "https://m.media-amazon.com/images/I/81Example.jpg",
++                "https://m.media-amazon.com/images/I/81Example._SL1500_.jpg",
++            ],
++        ),
++        ("https://m.media-amazon.com.evil.test/images/I/81Example.jpg", []),
++        ("https://m.media-amazon.com/images/G/placeholder.gif", []),
++        ("file:///images/I/81Example.jpg", []),
++        ("https://user:pass@m.media-amazon.com/images/I/81Example.jpg", []),
++        ("https://[invalid", []),
++    ],
++)
++def test_amazon_original_image_address(url: str, expected: list[str]) -> None:
++    assert amazon_image_urls(url) == expected
++
++
++@pytest.mark.parametrize("mismatch", ["input", "canonical", "redirect", "missing", "none"])
++def test_amazon_validates_product_identity(mismatch: str) -> None:
++    url = "https://m.media-amazon.com/images/I/81Main.jpg"
++    html = product_html(url)
++    page_url = "https://www.amazon.co.jp/dp/B000000001"
++    if mismatch == "input":
++        html = html.replace('value="B000000001"', 'value="B000000002"')
++    elif mismatch == "canonical":
++        html = html.replace(
++            'href="https://www.amazon.co.jp/dp/B000000001"', 'href="https://www.amazon.co.jp/dp/B000000002"'
++        )
++    elif mismatch == "redirect":
++        page_url = "https://www.amazon.co.jp/dp/B000000002"
++    elif mismatch == "missing":
++        html = f'<img id="landingImage" src="{url}">'
++    result = amazon_product(PosterPage(url=page_url, html=html), "B000000001")
++    if mismatch == "none":
++        assert result is not None and result.image_urls == [url]
++    else:
++        assert result is None
++
++
++def test_amazon_reads_only_main_image_metadata() -> None:
++    large = "https://m.media-amazon.com/images/I/81Main.jpg"
++    scaled = "https://m.media-amazon.com/images/I/81Main._AC_SY879_.jpg"
++    other = "https://m.media-amazon.com/images/I/81Recommendation.jpg"
++    dynamic = escape(json.dumps({scaled: [879, 614]}), quote=True)
++    html = product_html(large).replace(f'data-old-hires="{large}"', f'data-a-dynamic-image="{dynamic}" src="{scaled}"')
++    html += f'<div id="recommendations"><img data-old-hires="{other}"></div>'
++    result = amazon_product(PosterPage(url="https://www.amazon.co.jp/dp/B000000001", html=html), "B000000001")
++    assert result is not None
++    assert result.image_urls == [large, scaled]
++    malformed = amazon_product(
++        PosterPage(url="https://www.amazon.co.jp/dp/B000000001", html=html.replace(dynamic, "无效JSON")), "B000000001"
++    )
++    assert malformed is not None and malformed.image_urls == [large, scaled]

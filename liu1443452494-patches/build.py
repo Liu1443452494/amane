@@ -61,6 +61,7 @@ def prepare(root: Path, directory: Path, version: str) -> None:
         "0004-actor-mapping.patch",
         "0005-metadata-tags.patch",
         "0006-actor-delete.patch",
+        "0007-image-quality.patch",
     )
     actual = {path.name for path in directory.glob("*.patch")}
     if actual != set(patches):
@@ -122,10 +123,16 @@ def run_tests(root: Path) -> None:
         "tests/handlers/test_organize.py",
         "tests/media/test_nfo_write.py",
         "tests/media/test_liu1443452494_nfo.py",
+        "tests/media/test_liu1443452494_image_quality.py",
+        "tests/media/test_liu1443452494_posters.py",
+        "tests/media/test_pipeline.py",
+        "tests/media/test_resource_store.py",
+        "tests/media/test_images.py",
         "tests/organize/test_path_templates.py::test_from_metadata_actress_placeholders",
         "tests/organize/test_path_templates.py::test_actress_names",
         "tests/handlers/test_liu1443452494_actor_mapping.py",
         "tests/handlers/test_liu1443452494_actor_delete.py",
+        "tests/handlers/test_liu1443452494_image_quality.py",
         "tests/handlers/test_scraper.py",
         "tests/handlers/test_auto_organize.py",
         "tests/handlers/test_actor_scrape.py",
