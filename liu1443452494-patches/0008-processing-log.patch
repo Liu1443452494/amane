@@ -1,25 +1,25 @@
 diff --git a/docs/dev/frontend.md b/docs/dev/frontend.md
-index c5b8bec..2af867d 100644
+index c5b8bec..4dc1a3b 100644
 --- a/docs/dev/frontend.md
 +++ b/docs/dev/frontend.md
 @@ -75,6 +75,8 @@ Settings、任务提交、定时创建、metadata 编辑共用 `components/schem
  
  ## 实时与状态
  
-+影片详情处理日志见 `web/src/components/media/liu1443452494-processing-log.tsx::ProcessingLogButton`；任务信息、提示与日志共用滚动区。读取与番号关联规则见 [observability.md](observability.md)。
++影片详情处理日志见 `web/src/components/media/liu1443452494-processing-log.tsx::ProcessingLogButton`；来源结果与过程共用滚动区，合并记录沿用首次标识。读取与归属见 [observability.md](observability.md)。
 +
  `lib/connection.ts` 是模块级 WS 单例 (指数退避 + 断连轮询降级), 入站经 `parseWSEvent` 窄化. 任务查询的失效必须用同形对象前缀 (`[{ _id: "getTaskChildren" }]`), hey-api 生成的 query key 不是字符串前缀.
  
  | 数据 | 存储位置 |
 diff --git a/docs/dev/observability.md b/docs/dev/observability.md
-index dcc9bce..172cbc2 100644
+index dcc9bce..16151d6 100644
 --- a/docs/dev/observability.md
 +++ b/docs/dev/observability.md
 @@ -84,6 +84,8 @@ ORGANIZE / REFRESH 全量回放、浏览器 HAR、回放写生产 DB / 移动用
  
  ## 排障速查
  
-+片库详情的自用「处理日志」经 `src/amane/api/routes/liu1443452494_processing_log.py::get_latest_processing_log` 按番号分别选取最近的 SCRAPE 与 ORGANIZE，并按此顺序返回；批量整理按该番号实际日志时间比较，不使用整批结束时间替代。`src/amane/observability/liu1443452494_process_events.py::file_processing` 在文件操作范围绑定番号与历史路径，线程复制上下文；读取与中文说明见 `src/amane/observability/liu1443452494_processing_log.py`。任务编号复用以开始时间隔离，旧整理无明确归属时不关联，历史图片缺项不查询当前资源补值。读取只在详情弹窗打开时触发，长记录的省略范围必须显示。
++片库详情「处理日志」经 `src/amane/api/routes/liu1443452494_processing_log.py::get_latest_processing_log` 按番号返回最近的 SCRAPE、ORGANIZE；批量整理按该番号实际日志时间比较。`src/amane/observability/liu1443452494_process_events.py::file_processing` 绑定番号与历史路径，线程复制上下文；`src/amane/observability/liu1443452494_processing_log.py::build_report` 仅合并同任务、来源、文件、完整 URL 与方法的请求过程，终态更新首次记录；普通地址改为操作说明，最终图片地址去重，原始日志不变。任务编号复用按开始时间隔离，无归属的旧整理不关联，历史缺项不读取当前资源补值。弹窗打开时查询，读取截断须提示。
 +
  | 症状 | 排查 |
  |------|------|
@@ -358,7 +358,7 @@ index c0b0149..70a3df3 100644
              return list(dict.fromkeys([*previous, *self._attempts]))
          return [candidate.url for candidate in ranked] + [
 diff --git a/src/amane/media/liu1443452494_posters.py b/src/amane/media/liu1443452494_posters.py
-index 2c5b1b5..9e6c2a2 100644
+index 2c5b1b5..f1a5710 100644
 --- a/src/amane/media/liu1443452494_posters.py
 +++ b/src/amane/media/liu1443452494_posters.py
 @@ -365,6 +365,7 @@ class PosterResolver:
@@ -374,7 +374,7 @@ index 2c5b1b5..9e6c2a2 100644
                  else:
                      self._pages[url] = PosterPage(url=str(response.url), html=html)
 +                    structlog.get_logger().info(
-+                        "高清海报页面获取成功", url=str(response.url), status=response.status_code
++                        "高清海报页面获取成功", url=url, final_url=str(response.url), status=response.status_code
 +                    )
              except Exception as exc:
                  structlog.get_logger().warning("高清海报页面获取失败", url=url, error=str(exc))
@@ -389,7 +389,7 @@ index 2c5b1b5..9e6c2a2 100644
              return []
          index = await self._html("https://www.tenhow.net/mokuji.html")
          if index is None or not _safe_url(index.url, {"www.tenhow.net", "tenhow.net"}):
-@@ -428,18 +434,37 @@ class PosterResolver:
+@@ -428,18 +434,39 @@ class PosterResolver:
                  for match in tenhow_matches(page.html, query):
                      matches[match.asin] = match
          if len(matches) > 1:
@@ -407,29 +407,32 @@ index 2c5b1b5..9e6c2a2 100644
          return list(matches.values())
  
      async def _amazon_asin(self, asin: str) -> AmazonProduct | None:
-+        structlog.get_logger().info("日亚 ASIN 查询", asin=asin, url=f"https://www.amazon.co.jp/dp/{asin}")
-         page = await self._amazon_page(f"https://www.amazon.co.jp/dp/{asin}")
+-        page = await self._amazon_page(f"https://www.amazon.co.jp/dp/{asin}")
 -        return amazon_product(page, asin) if page else None
++        url = f"https://www.amazon.co.jp/dp/{asin}"
++        cached = url in self._pages
++        if not cached:
++            structlog.get_logger().info("日亚 ASIN 查询", asin=asin, url=url)
++        page = await self._amazon_page(url)
 +        product = amazon_product(page, asin) if page else None
-+        structlog.get_logger().info(
-+            "日亚商品主图解析结果",
-+            asin=asin,
-+            image_urls=product.image_urls if product else [],
-+            reason="商品身份已核对" if product else "页面不可用或未取得身份匹配的商品主图",
-+        )
++        if not cached:
++            structlog.get_logger().info(
++                "日亚商品主图解析结果",
++                asin=asin,
++                image_urls=product.image_urls if product else [],
++                reason="商品身份已核对" if product else "页面不可用或商品身份未通过核对",
++            )
 +        return product
  
      async def _search_title(
          self, query: PosterQuery, trusted_asins: set[str], title: str, matched_asins: set[str]
      ) -> bool | None:
          url = "https://www.amazon.co.jp/s?" + urlencode({"k": title})
-+        structlog.get_logger().info(
-+            "日亚原始标题搜索", title=query.title, actors=query.actors, search_title=title, url=url
-+        )
++        structlog.get_logger().info("日亚原始标题搜索", search_title=title, url=url)
          page = await self._amazon_page(url)
          if page is None or not _safe_url(page.url, {"www.amazon.co.jp", "amazon.co.jp"}):
              return None
-@@ -473,6 +498,7 @@ class PosterResolver:
+@@ -473,6 +500,7 @@ class PosterResolver:
              if not card_matches and not detail_matches:
                  continue
              matched_asins.add(asin)
@@ -437,25 +440,44 @@ index 2c5b1b5..9e6c2a2 100644
              images: list[str] = []
              if product is not None and detail_matches:
                  images.extend(product.image_urls)
-@@ -482,6 +508,9 @@ class PosterResolver:
+@@ -482,18 +510,35 @@ class PosterResolver:
          return success
  
      async def _search(self, query: PosterQuery, trusted_asins: set[str]) -> bool:
-+        if not poster_search_titles(query):
++        titles = poster_search_titles(query)
++        if not titles:
 +            structlog.get_logger().info("跳过日亚标题搜索", reason="没有可用的原始日文标题")
 +            return False
          matched_asins: set[str] = set()
-         for title in poster_search_titles(query):
+-        for title in poster_search_titles(query):
++        success: bool | None = False
++        for title in titles:
              success = await self._search_title(query, trusted_asins, title, matched_asins)
-@@ -490,6 +519,7 @@ class PosterResolver:
+             if success:
+                 return True
              if success is None:
++                structlog.get_logger().warning("日亚标题检索未完成", reason="搜索页面不可用")
                  break
          # 标题路径核实的新 ASIN 仍可尝试 Tenhow 直链；网络失败不触发缩短标题重试。
-+        structlog.get_logger().info("日亚标题搜索未取得有效海报", asins=sorted(matched_asins))
++        if matched_asins:
++            structlog.get_logger().info("日亚已匹配作品，未取得有效海报", asins=sorted(matched_asins))
++        elif success is not None:
++            structlog.get_logger().info("日亚未找到匹配作品")
          await self._images.acquire([f"https://www.tenhow.net/images/{asin}.jpg" for asin in sorted(matched_asins)])
          return False
  
-@@ -502,4 +532,7 @@ class PosterResolver:
+     async def resolve(self, query: PosterQuery) -> None:
++        structlog.get_logger().info(
++            "海报检索原始信息",
++            title=query.title,
++            title_source=query.title_source,
++            actors=query.actors,
++            actors_source=query.actors_source,
++        )
+         matches = await self._tenhow(query)
+         await self._images.acquire([match.image_url for match in matches])
+         success = False
+@@ -502,4 +547,7 @@ class PosterResolver:
              if product is not None:
                  success = await self._images.acquire(product.image_urls) or success
          if not success:
@@ -600,19 +622,20 @@ index 0000000..6c95739
 +        current().warning("资源已复制但大小读取失败", source_path=str(source), target_path=str(target), error=str(exc))
 diff --git a/src/amane/observability/liu1443452494_processing_log.py b/src/amane/observability/liu1443452494_processing_log.py
 new file mode 100644
-index 0000000..b4abbf2
+index 0000000..288a660
 --- /dev/null
 +++ b/src/amane/observability/liu1443452494_processing_log.py
-@@ -0,0 +1,554 @@
+@@ -0,0 +1,844 @@
 +"""按任务读取本地 JSON 日志并生成中文说明；历史数据缺失时不查询现有图片补值。"""
 +
 +import json
 +import re
 +from collections import deque
 +from datetime import UTC, datetime
++from hashlib import sha256
 +from pathlib import Path
 +from typing import Literal
-+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
++from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 +
 +from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 +
@@ -623,9 +646,11 @@ index 0000000..b4abbf2
 +
 +
 +class ProcessingLogEntry(BaseModel):
++    entry_id: str = ""
 +    timestamp: datetime | None = None
 +    level: Literal["info", "warning", "error", "debug"] = "info"
 +    stage: str
++    source_label: str = ""
 +    message: str
 +    media_path: str | None = None
 +    details: list[str] = Field(default_factory=list)
@@ -676,6 +701,21 @@ index 0000000..b4abbf2
 +    events: list[LogEvent] = Field(default_factory=list)
 +    outcomes: list[SiteOutcomeRecord] = Field(default_factory=list)
 +    notices: list[str] = Field(default_factory=list)
++
++
++class RequestTarget(BaseModel):
++    operation: str
++    details: list[str] = Field(default_factory=list)
++
++
++class RequestProgress(BaseModel):
++    entry: ProcessingLogEntry
++    retries: int = 0
++    finished: bool = False
++    exchange_seen: bool = False
++
++
++type RequestKey = tuple[str, str, str, str, str, int | None, int | None]
 +
 +
 +def utc_time(value: datetime) -> datetime:
@@ -869,6 +909,186 @@ index 0000000..b4abbf2
 +    }.get(reason, reason)
 +
 +
++def _short_reason(value: str) -> str:
++    translated = _reason_text(value)
++    if translated != value:
++        return translated
++    code = re.search(r"curl:\s*\((\d+)\)", value, re.IGNORECASE)
++    rules = (
++        (r"timed?\s*out|timeout", "请求超时"),
++        (r"connection closed|connection reset|SSL_ERROR_SYSCALL", "连接中断"),
++        (r"could not resolve|name resolution", "地址解析失败"),
++        (r"certificate|SSL peer", "证书校验失败"),
++        (r"failed to connect|connection refused", "连接失败"),
++        (r"captcha", "遇到验证码"),
++    )
++    for pattern, text in rules:
++        if re.search(pattern, value, re.IGNORECASE):
++            return text + (f"（错误码 {code[1]}）" if code else "")
++    cleaned = _clean_text(value)
++    if not re.search(r"[\u4e00-\u9fff]", re.sub(r"https?://[^\s\"<>]+", "", cleaned)):
++        return f"网络请求失败（错误码 {code[1]}）" if code else "具体原因见原始任务记录"
++    cleaned = re.sub(r"https?://[^\s\"<>]+", "（地址见原始任务记录）", cleaned)
++    return cleaned if len(cleaned) <= 240 else cleaned[:240] + "……（详见原始任务记录）"
++
++
++def _source_label(event: LogEvent) -> str:
++    source = event.text("site") or event.text("cache_key")
++    if not source and event.event.startswith(("Tenhow", "日亚")):
++        source = "tenhow" if event.event.startswith("Tenhow") else "amazon"
++    if not source:
++        try:
++            host = urlsplit(event.text("url") or "").hostname or ""
++        except ValueError:
++            host = ""
++        for domain, name in (
++            ("amazon.co.jp", "amazon"),
++            ("media-amazon.com", "amazon"),
++            ("ssl-images-amazon.com", "amazon"),
++            ("tenhow.net", "tenhow"),
++            ("dmm.co.jp", "dmm"),
++            ("dmm.com", "dmm"),
++            ("avbase.net", "avbase"),
++            ("javbus.com", "javbus"),
++        ):
++            if host == domain or host.endswith("." + domain):
++                source = name
++                break
++        source = source or host.removeprefix("www.")
++    labels = {
++        "dmm": "DMM",
++        "dmm_api": "DMM",
++        "avbase": "AVBase",
++        "javbus": "JavBus",
++        "javdb": "JavDB",
++        "amazon": "日亚",
++        "tenhow": "Tenhow",
++    }
++    return _clean_text(labels.get(source.partition(":")[0], source)) if source else ""
++
++
++def _request_target(event: LogEvent) -> RequestTarget:
++    try:
++        parsed = urlsplit(event.text("url") or "")
++        path = unquote(parsed.path)
++        params = dict(parse_qsl(parsed.query))
++    except ValueError:
++        return RequestTarget(operation="访问页面", details=["地址格式无效"])
++    source = _source_label(event)
++    target = RequestTarget(operation="访问页面")
++    asin = event.text("asin") or (
++        match[1] if (match := re.search(r"/(?:dp|gp/product|images)/([A-Z0-9]{10})(?:[/.]|$)", path)) else None
++    )
++    if source == "日亚" and path.rstrip("/") == "/s":
++        target.operation = "搜索作品"
++        search_title = event.text("search_title") or params.get("k")
++        if search_title:
++            target.details.append(f"搜索词：{_clean_text(search_title)}")
++    elif "black-curtain" in path:
++        target.operation = "进行年龄确认"
++    elif re.search(r"\.(?:jpe?g|png|webp)$", path, re.IGNORECASE):
++        target.operation = "检查图片" if event.text("method") == "HEAD" else "下载图片"
++        target.details.append(f"图片：{_clean_text(path.rsplit('/', 1)[-1])[:120]}")
++    elif source == "日亚" and asin:
++        target.operation = "访问商品详情"
++    elif source == "Tenhow":
++        target.operation = "访问演员目录" if path.endswith(("mokuji.html", "gyo.html")) else "访问演员页面"
++        target.details.append(f"页面：{_clean_text(path)[:120]}")
++    elif path:
++        target.details.append(f"页面：{_clean_text(path)[:120]}")
++    if asin:
++        target.details.append(f"商品编号：{_clean_text(asin)}")
++    return target
++
++
++def _request_key(event: LogEvent, task: Task) -> RequestKey | None:
++    if event.event not in {
++        "request retry",
++        "request failed",
++        "http exchange",
++        "访问高清海报页面",
++        "高清海报页面获取成功",
++        "高清海报页面获取失败",
++        "高清海报页面不可用",
++        "日亚原始标题搜索",
++        "日亚 ASIN 查询",
++    } or not (url := event.text("url")):
++        return None
++    return (
++        url,
++        (event.text("method") or "GET").upper(),
++        _source_label(event),
++        event.media_path or "",
++        event.number or task_number(task) or "",
++        event.task_id or task.id,
++        event.metadata_id,
++    )
++
++
++def _integer(event: LogEvent, name: str) -> int:
++    value = event.value(name)
++    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
++
++
++def _update_request(progress: RequestProgress, event: LogEvent, task: Task) -> None:
++    entry = progress.entry
++    target = _request_target(event)
++    entry.source_label = _source_label(event) or entry.source_label
++    # 同一请求保留最初位置和标识，终态覆盖重试状态；不把不同 URL 或方法合并。
++    terminal = event.event in {
++        "request failed",
++        "http exchange",
++        "高清海报页面获取成功",
++        "高清海报页面获取失败",
++        "高清海报页面不可用",
++    }
++    if terminal:
++        progress.finished = True
++    progress.exchange_seen |= event.event == "http exchange"
++    progress.retries = max(progress.retries, _integer(event, "attempt"), max(0, _integer(event, "attempts") - 1))
++    error = event.text("error") or event.text("reason") or event.text("exception")
++    status = _integer(event, "status") or _integer(event, "http_status")
++    if event.event == "request retry":
++        entry.message = f"{target.operation}：准备重试"
++        entry.level = "warning"
++    elif terminal:
++        failed = (
++            bool(error)
++            or status >= 400
++            or event.event in {"request failed", "高清海报页面获取失败", "高清海报页面不可用"}
++        )
++        result = "失败" if failed else "成功"
++        if event.event == "http exchange" and not status and not error:
++            result = "未记录最终结果"
++        entry.message = f"{target.operation}：{result}"
++        entry.level = "warning" if failed else "info"
++    elif not progress.finished:
++        entry.message = f"{target.operation}：进行中"
++        entry.level = "info"
++    details = list(target.details)
++    if error:
++        details.append(f"原因：{_short_reason(error)}")
++    if status >= 400:
++        details.append(f"HTTP 状态码：{status}")
++    if progress.retries:
++        details.append(f"已重试：{progress.retries} 次")
++    wait = event.value("retry_in")
++    if not progress.finished and isinstance(wait, (int, float)) and not isinstance(wait, bool) and wait >= 0:
++        details.append(f"等待重试：{wait:.1f} 秒")
++    duration = event.value("elapsed_ms")
++    if isinstance(duration, (int, float)) and not isinstance(duration, bool) and duration >= 0:
++        details.append(f"耗时：{duration / 1000:.1f} 秒")
++    # 包装层没有重复提供耗时、状态码时，沿用已记录事实；成功后清除旧失败原因。
++    labels = {item.partition("：")[0] for item in details}
++    remove = labels | {"等待重试"}
++    if progress.finished and entry.level == "info":
++        remove |= {"原因", "HTTP 状态码"}
++    entry.details = [item for item in entry.details if item.partition("：")[0] not in remove]
++    entry.details.extend(item for item in details if item not in entry.details)
++    if not progress.finished and task.status in {TaskStatus.DONE, TaskStatus.FAILED}:
++        entry.message = f"{target.operation}：未记录最终结果"
++
++
 +def _event_title(event: str) -> str:
 +    names = {
 +        "task started": "任务开始",
@@ -937,6 +1157,9 @@ index 0000000..b4abbf2
 +        "image_urls": "图片候选地址",
 +        "actors": "原始演员名",
 +        "title": "原始标题",
++        "search_title": "搜索词",
++        "title_source": "标题来源",
++        "actors_source": "演员来源",
 +        "image_kind": "图片类别",
 +        "file_bytes": "文件大小",
 +        "dimensions": "图片尺寸",
@@ -998,6 +1221,21 @@ index 0000000..b4abbf2
 +    for key, value in values.items():
 +        if key not in labels:
 +            continue
++        if key in {"site", "cache_key", "final_url"}:
++            continue
++        if key == "url":
++            if event.event in {"图片择优完成", "采用裁剪海报", "保留下载海报", "复用旧图片"} and value:
++                result.append(f"图片地址：{_value_text(value)}")
++            elif value:
++                result.extend(_request_target(event).details)
++            continue
++        if key in {"image_urls", "retained_urls"} and isinstance(value, list):
++            result.append(f"{'图片候选数' if key == 'image_urls' else '保留图片数'}：{len(value)}")
++            continue
++        if key in {"poster", "thumb", "trailer"} and isinstance(value, list):
++            if value:
++                result.append(f"{labels[key]}：{_value_text(value[0])}")
++            continue
 +        if value is None and key not in {"file_bytes", "dimensions", "thumb_size", "poster_size", "crop_size"}:
 +            continue
 +        text = _value_text(value)
@@ -1009,8 +1247,16 @@ index 0000000..b4abbf2
 +            and len(value) == 2
 +        ):
 +            text = f"{value[0]} × {value[1]}"
-+        elif key == "reason":
-+            text = _reason_text(text)
++        elif key in {"reason", "error", "exception"}:
++            text = _short_reason(text)
++        elif key in {"title_source", "actors_source"}:
++            text = _source_label(LogEvent.model_validate({"event": "检索来源", "site": text})) or "未记录"
++        elif (
++            key in {"duration_s", "retry_in", "elapsed_ms"}
++            and isinstance(value, (int, float))
++            and not isinstance(value, bool)
++        ):
++            text = f"{value:.1f}"
 +        elif key == "outcome":
 +            text = {"placed": "完成", "failed": "失败", "conflict": "目标冲突", "skipped": "跳过"}.get(text, text)
 +        elif key == "mode":
@@ -1077,6 +1323,7 @@ index 0000000..b4abbf2
 +        timestamp=utc_time(event.timestamp) if event.timestamp else None,
 +        level=level,
 +        stage=_stage(event, task_type),
++        source_label=_source_label(event),
 +        message=_event_title(event.event),
 +        media_path=event.media_path,
 +        details=_details(event),
@@ -1103,6 +1350,9 @@ index 0000000..b4abbf2
 +    ordered = sorted(
 +        enumerate(data.events), key=lambda pair: (utc_time(pair[1].timestamp) if pair[1].timestamp else latest, pair[0])
 +    )
++    requests: dict[RequestKey, RequestProgress] = {}
++    ambiguous: set[RequestKey] = set()
++    identifiers: dict[str, int] = {}
 +    for _, event in ordered:
 +        if event.media_path:
 +            if event.media_path != report.media_path:
@@ -1119,20 +1369,57 @@ index 0000000..b4abbf2
 +            report.file_outcome = "跳过"
 +        elif event.event in {"文件整理异常", "file operations failed"}:
 +            report.file_outcome = "失败"
-+        report.entries.append(_entry(event, task.type))
++        key = _request_key(event, task)
++        progress = requests.get(key) if key and key not in ambiguous else None
++        if (
++            key is not None
++            and progress is not None
++            and not progress.finished
++            and event.event == "request retry"
++            and _integer(event, "attempt") <= progress.retries
++        ):
++            # 历史日志缺少请求标识，并行访问同一地址时不得猜测终态归属。
++            ambiguous.add(key)
++            progress = None
++        if progress is not None and (
++            (
++                progress.finished
++                and event.event
++                in {"访问高清海报页面", "日亚原始标题搜索", "日亚 ASIN 查询", "request retry", "request failed"}
++            )
++            or (progress.exchange_seen and event.event == "http exchange")
++            or (event.event == "request retry" and _integer(event, "attempt") <= progress.retries)
++        ):
++            progress = None
++        if progress is None:
++            entry = _entry(event, task.type)
++            digest = sha256(event.model_dump_json().encode("utf-8")).hexdigest()[:20]
++            ordinal = identifiers.get(digest, 0)
++            identifiers[digest] = ordinal + 1
++            entry.entry_id = f"{digest}:{ordinal}"
++            report.entries.append(entry)
++            if key:
++                entry.details = []
++                progress = RequestProgress(entry=entry)
++                if key not in ambiguous:
++                    requests[key] = progress
++        if progress is not None:
++            _update_request(progress, event, task)
 +    for outcome in data.outcomes:
 +        label = {"ok": "取得数据", "failed": "未取得可用数据", "cache_hit": "复用缓存"}[outcome.outcome]
-+        details = [f"来源：{outcome.site}", f"结果：{label}"]
++        details: list[str] = []
 +        if outcome.reason:
 +            details.append(f"原因：{_reason_text(outcome.reason)}")
 +        if outcome.http_status:
 +            details.append(f"HTTP 状态码：{outcome.http_status}")
 +        if outcome.detail:
-+            details.append(f"补充说明：{_clean_text(outcome.detail)}")
++            details.append(f"补充说明：{_short_reason(outcome.detail)}")
 +        report.entries.append(
 +            ProcessingLogEntry(
 +                stage="来源汇总",
-+                message=f"{outcome.site}：{label}",
++                source_label=_source_label(LogEvent.model_validate({"event": "来源结果", "site": outcome.site})),
++                entry_id=f"source:{outcome.site}",
++                message=label,
 +                details=details,
 +                level="warning" if outcome.outcome == "failed" else "info",
 +            )
@@ -1141,7 +1428,11 @@ index 0000000..b4abbf2
 +        if task.error:
 +            report.entries.append(
 +                ProcessingLogEntry(
-+                    stage="任务结果", level="error", message="任务错误", details=[_clean_text(task.error)]
++                    entry_id="task:error",
++                    stage="任务结果",
++                    level="error",
++                    message="任务错误",
++                    details=[_short_reason(task.error)],
 +                )
 +            )
 +        if not any(event.value("file_bytes") is not None for event in data.events):
@@ -1157,6 +1448,27 @@ index 0000000..b4abbf2
 +        report.notices.append("仅展示当前番号的处理记录；顶部任务状态属于整个整理任务，文件结果单独显示。")
 +        if report.media_path is None:
 +            report.notices.append("历史整理记录未保存原文件路径。")
++    final_labels: dict[str, str] = {}
++    for entry in report.entries:
++        for detail in entry.details:
++            label, _, value = detail.partition("：")
++            if label in {"最终海报地址", "最终封面地址", "预告片地址"} and (
++                value not in final_labels or label == "最终海报地址"
++            ):
++                final_labels[value] = label
++    addresses: set[str] = set()
++    for entry in report.entries:
++        details: list[str] = []
++        for detail in entry.details:
++            label, _, value = detail.partition("：")
++            if label in {"图片地址", "最终海报地址", "最终封面地址", "预告片地址"}:
++                if value in addresses:
++                    continue
++                addresses.add(value)
++                detail = f"{final_labels.get(value, label)}：{value}"
++            if detail not in details:
++                details.append(detail)
++        entry.details = details
 +    return report
 diff --git a/tests/api/test_liu1443452494_processing_log.py b/tests/api/test_liu1443452494_processing_log.py
 new file mode 100644
@@ -1498,10 +1810,10 @@ index 0000000..6300f54
 +        assert str(library_root / f"{other}.mp4") not in report.model_dump_json()
 diff --git a/tests/observability/test_liu1443452494_processing_log.py b/tests/observability/test_liu1443452494_processing_log.py
 new file mode 100644
-index 0000000..282fb0e
+index 0000000..dc15d58
 --- /dev/null
 +++ b/tests/observability/test_liu1443452494_processing_log.py
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,386 @@
 +"""历史日志的归属、中文内容、缺失信息与异常输入。"""
 +
 +import json
@@ -1509,8 +1821,10 @@ index 0000000..282fb0e
 +from datetime import UTC, datetime, timedelta
 +from pathlib import Path
 +from typing import Literal
++from urllib.parse import urlencode
 +
 +import pytest
++from pydantic import JsonValue
 +
 +from amane.db.models import Task, TaskStatus, TaskType
 +from amane.net.errors import FailureReason
@@ -1730,12 +2044,168 @@ index 0000000..282fb0e
 +    assert report.target_path == "/输出/本片.mp4"
 +    assert report.media_path is None
 +    assert report.file_outcome == "完成"
++
++
++def request_event(event: str, url: str, **values: JsonValue) -> LogEvent:
++    return LogEvent.model_validate({"event": event, "url": url, "timestamp": "2026-10-31T00:00:00Z", **values})
++
++
++@pytest.mark.parametrize("status", [200, 403, None])
++def test_request_lifecycle_updates_one_row_and_keeps_final_outcome(status: int | None) -> None:
++    title = "日本語の長い原題を検索する"
++    url = "https://www.amazon.co.jp/s?" + urlencode({"k": title, "token": "private-token"})
++    error = "curl error: Failed to perform, curl: (35) BoringSSL SSL_connect: Connection closed abruptly (SSL_ERROR_SYSCALL)"
++    task = Task(id=21, type=TaskType.SCRAPE, status=TaskStatus.RUNNING)
++    events = [
++        request_event("日亚原始标题搜索", url, search_title=title),
++        request_event("访问高清海报页面", url),
++        request_event("request retry", url, attempt=1, max_retries=3, error=error, retry_in=2.163),
++        request_event("request retry", url, attempt=2, max_retries=3, error=error, retry_in=4.448),
++    ]
++    pending = build_report(task, LogRead(events=events))
++    assert pending is not None and len(pending.entries) == 1
++    assert pending.entries[0].message == "搜索作品：准备重试"
++    assert "等待重试：4.4 秒" in pending.entries[0].details
++    if status is None:
++        events.append(request_event("request failed", url, attempts=3, error=error))
++    events.append(
++        request_event(
++            "http exchange", url, status=status, attempts=3, elapsed_ms=7000, error=error if status is None else None
++        )
++    )
++    events.append(
++        request_event(
++            "高清海报页面获取成功" if status == 200 else "高清海报页面获取失败",
++            url,
++            status=status,
++            error=None if status == 200 else error,
++        )
++    )
++    report = build_report(task, LogRead(events=events))
++    assert report is not None and len(report.entries) == 1
++    entry = report.entries[0]
++    assert entry.entry_id == pending.entries[0].entry_id
++    assert entry.source_label == "日亚"
++    assert entry.message == ("搜索作品：成功" if status == 200 else "搜索作品：失败")
++    assert entry.level == ("info" if status == 200 else "warning")
++    assert entry.details.count(f"搜索词：{title}") == 1
++    assert "已重试：2 次" in entry.details and "耗时：7.0 秒" in entry.details
++    assert not any("等待重试" in detail for detail in entry.details)
++    if status == 200:
++        assert not any("原因" in detail or "状态码" in detail for detail in entry.details)
++    elif status == 403:
++        assert "HTTP 状态码：403" in entry.details
++    else:
++        assert "原因：连接中断（错误码 35）" in entry.details
++        assert not any("状态码" in detail for detail in entry.details)
++    text = report.model_dump_json()
++    assert all(value not in text for value in (url, "private-token", "BoringSSL", "4.448"))
++
++
++@pytest.mark.parametrize(
++    ("field", "left", "right"),
++    [
++        ("url", "https://www.amazon.co.jp/dp/B000000001", "https://www.amazon.co.jp/dp/B000000002"),
++        ("url", "https://www.amazon.co.jp/s?k=first", "https://www.amazon.co.jp/s?k=second"),
++        ("method", "GET", "HEAD"),
++        ("site", "dmm", "avbase"),
++        ("media_path", "/库/甲.mp4", "/库/乙.mp4"),
++        ("number", "ABP-001", "ABP-002"),
++    ],
++)
++def test_request_groups_never_mix_different_operations(field: str, left: str, right: str) -> None:
++    base: dict[str, JsonValue] = {"url": "https://images.test/poster.jpg", "timestamp": "2026-10-31T00:00:00Z"}
++    events = [
++        LogEvent.model_validate({**base, field: left, "event": "request retry", "attempt": 1}),
++        LogEvent.model_validate({**base, field: right, "event": "request retry", "attempt": 1}),
++        LogEvent.model_validate({**base, field: right, "event": "http exchange", "status": 200, "attempts": 2}),
++        LogEvent.model_validate({**base, field: left, "event": "request retry", "attempt": 2}),
++        LogEvent.model_validate({**base, field: left, "event": "http exchange", "status": 500, "attempts": 3}),
++    ]
++    report = build_report(Task(id=22, type=TaskType.SCRAPE), LogRead(events=events))
++    assert report is not None and len(report.entries) == 2
++    first, second = report.entries
++    assert first.message.endswith("失败") and "已重试：2 次" in first.details
++    assert second.message.endswith("成功") and "已重试：1 次" in second.details
++    assert first.entry_id != second.entry_id
++
++
++def test_later_request_to_same_url_starts_a_separate_row() -> None:
++    url = "https://www.amazon.co.jp/dp/B000000001"
++    events = [
++        request_event("request retry", url, attempt=1),
++        request_event("http exchange", url, status=200, attempts=2),
++        request_event("request retry", url, attempt=1),
++        request_event("http exchange", url, status=500, attempts=2),
++    ]
++    report = build_report(Task(id=23, type=TaskType.SCRAPE), LogRead(events=events))
++    assert report is not None and len(report.entries) == 2
++    assert [entry.message for entry in report.entries] == ["访问商品详情：成功", "访问商品详情：失败"]
++    assert len({entry.entry_id for entry in report.entries}) == 2
++
++
++def test_overlapping_requests_to_same_url_do_not_guess_outcome_ownership() -> None:
++    url = "https://www.amazon.co.jp/dp/B000000001"
++    events = [
++        request_event("request retry", url, attempt=1),
++        request_event("request retry", url, attempt=1),
++        request_event("http exchange", url, status=500, attempts=2),
++        request_event("http exchange", url, status=200, attempts=2),
++    ]
++    report = build_report(Task(id=26, type=TaskType.SCRAPE, status=TaskStatus.DONE), LogRead(events=events))
++    assert report is not None and len(report.entries) == 4
++    assert [entry.message for entry in report.entries] == [
++        "访问商品详情：未记录最终结果",
++        "访问商品详情：未记录最终结果",
++        "访问商品详情：失败",
++        "访问商品详情：成功",
++    ]
++    assert len({entry.entry_id for entry in report.entries}) == 4
++
++
++@pytest.mark.parametrize("invalid", [None, -1, True, "2"])
++def test_missing_or_invalid_request_results_do_not_become_success(invalid: JsonValue) -> None:
++    url = "https://[invalid"
++    report = build_report(
++        Task(id=24, type=TaskType.SCRAPE, status=TaskStatus.DONE),
++        LogRead(events=[request_event("http exchange", url, status=invalid, attempts=invalid)]),
++    )
++    assert report is not None and len(report.entries) == 1
++    entry = report.entries[0]
++    assert entry.message == "访问页面：未记录最终结果"
++    assert "地址格式无效" in entry.details
++    assert not any("已重试" in detail for detail in entry.details)
++
++
++def test_poster_address_is_kept_once_and_source_summary_does_not_repeat_fields() -> None:
++    url = "https://m.media-amazon.com/images/I/81Selected.jpg"
++    report = build_report(
++        Task(id=25, type=TaskType.SCRAPE),
++        LogRead(
++            events=[
++                request_event("图片候选校验成功", url, dimensions=[1500, 2100], file_bytes=400000),
++                request_event(
++                    "图片择优完成", url, dimensions=[1500, 2100], file_bytes=400000, reason="实际文件字节数最大"
++                ),
++                request_event("保留下载海报", url, reason="裁剪尺寸没有改善"),
++                LogEvent.model_validate({"event": "images materialized", "poster": [url]}),
++            ],
++            outcomes=[SiteOutcomeRecord(site="avbase", outcome=SiteOutcomeKind.FAILED, reason=FailureReason.NOT_FOUND)],
++        ),
++    )
++    assert report is not None
++    text = report.model_dump_json()
++    assert text.count(url) == 1
++    assert "1500 × 2100" in text and "400,000 字节" in text and "实际文件字节数最大" in text
++    summary = next(entry for entry in report.entries if entry.stage == "来源汇总")
++    assert summary.source_label == "AVBase" and summary.message == "未取得可用数据"
++    assert summary.details == ["原因：未找到资源"]
 diff --git a/web/src/components/media/liu1443452494-processing-log.module.css b/web/src/components/media/liu1443452494-processing-log.module.css
 new file mode 100644
-index 0000000..e1e48fb
+index 0000000..37eed14
 --- /dev/null
 +++ b/web/src/components/media/liu1443452494-processing-log.module.css
-@@ -0,0 +1,146 @@
+@@ -0,0 +1,172 @@
 +/* 仅虚拟列表建立滚动区域，外层与标签面板传递可用高度。 */
 +.modalContent,
 +.modalBody,
@@ -1787,7 +2257,20 @@ index 0000000..e1e48fb
 +}
 +
 +.summary {
-+  padding: 8px;
++  padding: 6px;
++}
++
++.sourceResults {
++  display: grid;
++  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
++  gap: 4px 12px;
++}
++
++.sourceResult {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: baseline;
++  gap: 2px 8px;
 +}
 +
 +.paths {
@@ -1810,10 +2293,10 @@ index 0000000..e1e48fb
 +
 +.entry {
 +  display: grid;
-+  grid-template-columns: 5rem 6rem minmax(0, 1fr);
++  grid-template-columns: 4.5rem 5.5rem minmax(0, 1fr);
 +  align-items: start;
-+  gap: 4px 10px;
-+  padding: 7px 8px;
++  gap: 2px 8px;
++  padding: 5px 6px;
 +  border-bottom: 1px solid var(--mantine-color-default-border);
 +  border-inline-start: 3px solid transparent;
 +}
@@ -1848,13 +2331,26 @@ index 0000000..e1e48fb
 +}
 +
 +.entryContent {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: baseline;
++  gap: 2px 12px;
 +  min-width: 0;
++}
++
++.message {
++  max-width: 100%;
++}
++
++.pathLine {
++  flex-basis: 100%;
 +}
 +
 +.details {
 +  display: flex;
++  flex: 1 1 20rem;
 +  flex-wrap: wrap;
-+  gap: 2px 20px;
++  gap: 2px 12px;
 +}
 +
 +.detail {
@@ -1884,10 +2380,10 @@ index 0000000..e1e48fb
 +}
 diff --git a/web/src/components/media/liu1443452494-processing-log.tsx b/web/src/components/media/liu1443452494-processing-log.tsx
 new file mode 100644
-index 0000000..927be97
+index 0000000..b3c98c6
 --- /dev/null
 +++ b/web/src/components/media/liu1443452494-processing-log.tsx
-@@ -0,0 +1,273 @@
+@@ -0,0 +1,293 @@
 +import { Alert, Badge, Button, Group, Modal, Paper, Stack, Tabs, Text } from "@mantine/core";
 +import { IconFileText, IconRefresh } from "@tabler/icons-react";
 +import { useQuery } from "@tanstack/react-query";
@@ -1928,7 +2424,8 @@ index 0000000..927be97
 +    <Virtuoso<ProcessingLogEntry, ProcessingLogContext>
 +      key={selectedRecord?.task_id}
 +      className={classes.viewport}
-+      data={selectedRecord?.entries ?? []}
++      data={selectedRecord?.entries?.filter((entry) => entry.stage !== "来源汇总") ?? []}
++      computeItemKey={(index, entry) => entry.entry_id || index}
 +      context={{
 +        record: selectedRecord,
 +        pending: query.isPending,
@@ -1978,7 +2475,7 @@ index 0000000..927be97
 +            </Button>
 +          </Group>
 +        }
-+        size="100%"
++        size="90%"
 +        xOffset={12}
 +        yOffset={12}
 +        padding="sm"
@@ -1988,7 +2485,7 @@ index 0000000..927be97
 +          title: classes.modalTitle,
 +          body: classes.modalBody,
 +        }}
-+        styles={{ content: { height: "calc(var(--amane-vh) - var(--modal-y-offset) * 2)" } }}
++        styles={{ content: { height: "calc(var(--amane-vh) * 0.85)" } }}
 +        centered
 +      >
 +        {records.length > 1 && selectedRecord ? (
@@ -2047,6 +2544,7 @@ index 0000000..927be97
 +
 +function ProcessingRecord({ record }: { record: ProcessingLogReport }) {
 +  const statuses = { queued: "排队中", running: "进行中", done: "已完成", failed: "失败" };
++  const sources = record.entries?.filter((entry) => entry.stage === "来源汇总") ?? [];
 +  return (
 +    <Stack gap="xs">
 +      <Group gap="xs">
@@ -2084,6 +2582,25 @@ index 0000000..927be97
 +          </Text>
 +        )}
 +      </Paper>
++      {sources.length > 0 && (
++        <div className={classes.sourceResults}>
++          {sources.map((entry) => (
++            <div key={entry.entry_id} className={classes.sourceResult}>
++              <Text size="sm" fw={600}>
++                {entry.source_label}
++              </Text>
++              <Text size="sm" c={entry.level === "warning" ? "orange" : "teal"}>
++                {entry.message}
++              </Text>
++              {entry.details?.map((detail) => (
++                <Text key={detail} size="sm" c="dimmed" className={classes.wrapText}>
++                  {detail}
++                </Text>
++              ))}
++            </div>
++          ))}
++        </div>
++      )}
 +      {record.notices?.map((notice) => (
 +        <Text key={notice} size="sm" c="dimmed" className={classes.wrapText}>
 +          {notice}
@@ -2116,14 +2633,14 @@ index 0000000..927be97
 +        className={classes.stage}
 +        styles={{ label: { whiteSpace: "normal", overflow: "visible" } }}
 +      >
-+        {entry.stage}
++        {entry.source_label || entry.stage}
 +      </Badge>
 +      <div className={classes.entryContent}>
-+        <Text size="sm" fw={600} className={classes.wrapText}>
++        <Text size="sm" fw={600} className={`${classes.message} ${classes.wrapText}`}>
 +          {entry.message}
 +        </Text>
 +        {entry.media_path && (
-+          <Text size="xs" c="dimmed" className={classes.wrapText}>
++          <Text size="xs" c="dimmed" className={`${classes.pathLine} ${classes.wrapText}`}>
 +            处理文件：{entry.media_path}
 +          </Text>
 +        )}
@@ -2139,9 +2656,8 @@ index 0000000..927be97
 +
 +function ProcessingDetail({ detail }: { detail: string }) {
 +  const separator = detail.indexOf("：");
-+  // 仅区分排版宽度，字段内容及顺序始终保留。
-+  const wide =
-+    detail.length > 64 || /[\r\n/\\]|(?:地址|路径|标题|详情|错误|异常|原因)[：:]/u.test(detail);
++  // 短原因与状态并排，完整路径和图片地址单独换行。
++  const wide = detail.length > 100 || /[\r\n]|(?:地址|路径)[：:]/u.test(detail);
 +  return (
 +    <Text
 +      size="sm"
