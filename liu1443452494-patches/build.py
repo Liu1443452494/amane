@@ -62,6 +62,7 @@ def prepare(root: Path, directory: Path, version: str) -> None:
         "0005-metadata-tags.patch",
         "0006-actor-delete.patch",
         "0007-image-quality.patch",
+        "0008-processing-log.patch",
     )
     actual = {path.name for path in directory.glob("*.patch")}
     if actual != set(patches):
@@ -136,6 +137,9 @@ def run_tests(root: Path) -> None:
         "tests/handlers/test_scraper.py",
         "tests/handlers/test_auto_organize.py",
         "tests/handlers/test_actor_scrape.py",
+        "tests/observability/test_liu1443452494_processing_log.py",
+        "tests/api/test_liu1443452494_processing_log.py",
+        "tests/handlers/test_liu1443452494_processing_events.py",
     )
     temp_root = Path(os.environ.get("BUILD_TEST_TEMP", str(Path(tempfile.gettempdir()) / "amane-custom-tests")))
     result = subprocess.run(

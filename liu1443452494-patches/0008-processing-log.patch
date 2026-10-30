@@ -1,0 +1,1882 @@
+diff --git a/docs/dev/frontend.md b/docs/dev/frontend.md
+index c5b8bec..2995b86 100644
+--- a/docs/dev/frontend.md
++++ b/docs/dev/frontend.md
+@@ -75,6 +75,8 @@ Settings、任务提交、定时创建、metadata 编辑共用 `components/schem
+ 
+ ## 实时与状态
+ 
++影片详情的自用处理日志入口为 `web/src/components/media/liu1443452494-processing-log.tsx::ProcessingLogButton`；按需读取与番号关联规则见 [observability.md](observability.md)。
++
+ `lib/connection.ts` 是模块级 WS 单例 (指数退避 + 断连轮询降级), 入站经 `parseWSEvent` 窄化. 任务查询的失效必须用同形对象前缀 (`[{ _id: "getTaskChildren" }]`), hey-api 生成的 query key 不是字符串前缀.
+ 
+ | 数据 | 存储位置 |
+diff --git a/docs/dev/observability.md b/docs/dev/observability.md
+index dcc9bce..8816815 100644
+--- a/docs/dev/observability.md
++++ b/docs/dev/observability.md
+@@ -84,6 +84,8 @@ ORGANIZE / REFRESH 全量回放、浏览器 HAR、回放写生产 DB / 移动用
+ 
+ ## 排障速查
+ 
++片库详情的自用「处理日志」经 `src/amane/api/routes/liu1443452494_processing_log.py::get_latest_processing_log` 按番号选取最近的 SCRAPE / ORGANIZE；批量整理按该番号实际日志时间比较，不使用整批结束时间替代。`src/amane/observability/liu1443452494_process_events.py::file_processing` 在文件操作范围绑定番号与历史路径，线程复制上下文；读取与中文说明见 `src/amane/observability/liu1443452494_processing_log.py`。任务编号复用以开始时间隔离，旧整理无明确归属时不关联，历史图片缺项不查询当前资源补值。读取只在详情弹窗打开时触发，长记录的省略范围必须显示。
++
+ | 症状 | 排查 |
+ |------|------|
+ | 无 task.log | worker 未 claim 或 Recorder 未 begin |
+diff --git a/src/amane/api/routes/__init__.py b/src/amane/api/routes/__init__.py
+index 42ba215..4c4a50a 100644
+--- a/src/amane/api/routes/__init__.py
++++ b/src/amane/api/routes/__init__.py
+@@ -12,6 +12,7 @@ from .feeds import router as feeds_router
+ from .files import router as files_router
+ from .health import router as health_router
+ from .libraries import router as libraries_router
++from .liu1443452494_processing_log import router as processing_log_router
+ from .media import router as media_router
+ from .metadata import router as metadata_router
+ from .network import router as network_router
+@@ -36,6 +37,7 @@ router.include_router(cleanup_router)
+ router.include_router(files_router)
+ router.include_router(media_router)
+ router.include_router(metadata_router)
++router.include_router(processing_log_router)
+ router.include_router(network_router)
+ router.include_router(playback_router)
+ router.include_router(plugins_router)
+diff --git a/src/amane/api/routes/liu1443452494_processing_log.py b/src/amane/api/routes/liu1443452494_processing_log.py
+new file mode 100644
+index 0000000..7e8cb0f
+--- /dev/null
++++ b/src/amane/api/routes/liu1443452494_processing_log.py
+@@ -0,0 +1,85 @@
++"""片库详情按番号读取最近可关联的刮削或整理记录，不新增任务关联表。"""
++
++from typing import Annotated
++
++from fastapi import APIRouter, HTTPException, Path
++
++from ...db.models import SortOrder, TaskSortField, TaskStatus, TaskType
++from ...observability.liu1443452494_processing_log import (
++    ProcessingLogResponse,
++    build_report,
++    read_log,
++    same_number,
++    task_number,
++    utc_time,
++)
++from ..deps import ConfigDep, RepoDep
++
++router = APIRouter(tags=["metadata"])
++
++
++@router.get("/metadata/{metadata_id}/processing-log")
++async def get_latest_processing_log(
++    metadata_id: Annotated[int, Path(ge=1)],
++    repo: RepoDep,
++    config: ConfigDep,
++) -> ProcessingLogResponse:
++    metadata = await repo.get_metadata(metadata_id)
++    if metadata is None:
++        raise HTTPException(status_code=404, detail="影片不存在")
++    response = ProcessingLogResponse(number=metadata.number)
++    # 先检查活跃任务；终态按结束时间倒序，以该时间作为批量任务中单片记录的上界。
++    for statuses, sort_by in (
++        ([TaskStatus.RUNNING, TaskStatus.QUEUED], TaskSortField.CREATED_AT),
++        ([TaskStatus.DONE, TaskStatus.FAILED], TaskSortField.FINISHED_AT),
++    ):
++        offset = 0
++        finished = False
++        while not finished:
++            tasks = await repo.list_tasks(
++                statuses=statuses,
++                task_types=[TaskType.SCRAPE, TaskType.ORGANIZE],
++                limit=50,
++                offset=offset,
++                sort_by=sort_by,
++                order=SortOrder.DESC,
++            )
++            if not tasks:
++                break
++            for task in tasks:
++                if task.id is None:
++                    continue
++                if (
++                    sort_by is TaskSortField.FINISHED_AT
++                    and task.finished_at is not None
++                    and response.record is not None
++                    and utc_time(task.finished_at) < response.record.last_activity_at
++                ):
++                    finished = True
++                    break
++                if task.type is TaskType.SCRAPE and not same_number(task_number(task), metadata.number):
++                    continue
++                if task.type is TaskType.ORGANIZE and task.started_at is None:
++                    continue
++                data = await read_log(config.cold.log_dir, task, metadata.number, metadata_id)
++                candidate = build_report(task, data)
++                if candidate is None:
++                    if data.notices:
++                        response.notices.append("部分整理日志缺失、无法读取或不完整，显示最近可确认归属的任务。")
++                    continue
++                if task.finished_at is not None:
++                    candidate.last_activity_at = min(candidate.last_activity_at, utc_time(task.finished_at))
++                if response.record is None or (candidate.last_activity_at, candidate.task_id) > (
++                    response.record.last_activity_at,
++                    response.record.task_id,
++                ):
++                    # 删除任务与读取日志可以并发；任务编号复用时不能返回上一条任务的记录。
++                    current = await repo.get_task(task.id)
++                    if current is not None and current.created_at == task.created_at:
++                        response.record = candidate
++            offset += len(tasks)
++            finished = finished or len(tasks) < 50
++    response.notices = list(dict.fromkeys(response.notices))
++    if response.record is None:
++        response.notices.append("暂无可关联的处理记录；旧整理日志未记录番号时无法确认归属。")
++    return response
+diff --git a/src/amane/handlers/file.py b/src/amane/handlers/file.py
+index 366f35a..3cc76ad 100644
+--- a/src/amane/handlers/file.py
++++ b/src/amane/handlers/file.py
+@@ -16,6 +16,7 @@ from ..media import ResourceStore, apply_cover_watermarks_from_info, crop_poster
+ from ..media import write_nfo as write_nfo_file
+ from ..media.resource_store import internal_url_hash
+ from ..net.http import WebClient
++from ..observability.liu1443452494_process_events import file_processing, record_copied_file
+ from ..observability.models import OrganizeConflict, OrganizeConflictReason
+ from ..organize import (
+     MoveMode,
+@@ -161,6 +162,7 @@ async def execute_file_operations(
+     # 写入 NFO.
+     if org_result.outcome is PlaceOutcome.PLACED and org_result.dest and write_nfo:
+         await write_nfo_file(metadata, paths.nfo, file_info=file_info)
++        logger.info("NFO 已写入", number=metadata.number, target_path=str(paths.nfo))
+ 
+     # 字幕按模板落到 video_dest 侧.
+     subtitle_conflicts: list[SubtitleConflict] = []
+@@ -315,6 +317,7 @@ def _copy_into_library(src: Path, dst: Path) -> None:
+             shutil.copystat(src, dst)
+         except OSError as exc:
+             logger.debug("copy metadata skipped", src=str(src), dst=str(dst), error=str(exc))
++    record_copied_file(src, dst)
+ 
+ 
+ @in_thread
+@@ -521,10 +524,26 @@ class OrganizeHandler(TaskHandler[OrganizePayload, OrganizeResult]):
+                     mf_path = Path(mf.path)
+                     missing = await existing_disk_path(mf_path, follow_symlinks=False) is None
+                     if missing or not is_descendant(mf_path, library_root) or is_in_trash(mf_path):
++                        logger.info(
++                            "整理跳过文件",
++                            number=mf.number,
++                            metadata_id=mf.metadata_id,
++                            media_file_id=mf.id,
++                            media_path=mf.path,
++                            reason="文件不存在、位于库外或位于回收目录，清除失效索引",
++                        )
+                         await self._repo.delete_media_file(mf.id)
+                     else:
+                         kind = await _classify_indexed(mf_path, scan)
+                         if kind is LibraryFileKind.UNWANTED or kind is LibraryFileKind.SKIP:
++                            logger.info(
++                                "整理跳过文件",
++                                number=mf.number,
++                                metadata_id=mf.metadata_id,
++                                media_file_id=mf.id,
++                                media_path=mf.path,
++                                reason="命中文件排除、大小或预告片规则",
++                            )
+                             skipped += 1
+                         else:
+                             # MEDIA, 以及 classify 返回 None 的已索引行 (不在当前扩展名白名单,
+@@ -550,30 +569,47 @@ class OrganizeHandler(TaskHandler[OrganizePayload, OrganizeResult]):
+                 path_str = media_file.path
+                 file_path = Path(path_str)
+                 if media_file.metadata_id is None:
++                    logger.info("整理跳过文件", number=media_file.number, media_path=path_str, reason="未关联影片信息")
+                     skipped += 1
+                     await self.report_progress(i, total, file_path.name)
+                     continue
+ 
+                 metadata = await self._repo.get_metadata(media_file.metadata_id)
+                 if metadata is None:
++                    logger.info(
++                        "整理跳过文件", number=media_file.number, media_path=path_str, reason="关联的影片信息不存在"
++                    )
+                     skipped += 1
+                     await self.report_progress(i, total, file_path.name)
+                     continue
+ 
+                 write_nfo = library.write_nfo if payload.write_nfo is None else payload.write_nfo
+                 copy_resources = library.copy_resources if payload.copy_resources is None else payload.copy_resources
+-                fop_result = await apply_file_operations(
+-                    self._repo,
+-                    media_file.id,
+-                    metadata,
+-                    self._config,
+-                    self._resource_store,
+-                    write_nfo=write_nfo,
+-                    copy_resources=copy_resources,
+-                    web_client=self._web_client,
+-                    safe_dirs=self._safe_dirs,
+-                    watermark_dir=self._watermark_dir,
+-                )
++                with file_processing(metadata.number, media_file):
++                    logger.info(
++                        "整理设置", write_nfo=write_nfo, copy_resources=copy_resources, mode=str(library.move_mode)
++                    )
++                    fop_result = await apply_file_operations(
++                        self._repo,
++                        media_file.id,
++                        metadata,
++                        self._config,
++                        self._resource_store,
++                        write_nfo=write_nfo,
++                        copy_resources=copy_resources,
++                        web_client=self._web_client,
++                        safe_dirs=self._safe_dirs,
++                        watermark_dir=self._watermark_dir,
++                    )
++                    logger.info(
++                        "文件整理结果",
++                        outcome=str(fop_result.outcome) if fop_result else "skipped",
++                        target_path=str(fop_result.dest or fop_result.conflict_target)
++                        if fop_result and (fop_result.dest or fop_result.conflict_target)
++                        else None,
++                        error=fop_result.error if fop_result else None,
++                        subtitle_conflicts=len(fop_result.subtitle_conflicts) if fop_result else 0,
++                    )
+                 if fop_result is None:
+                     skipped += 1
+                     await self.report_progress(i, total, file_path.name)
+diff --git a/src/amane/handlers/scrape.py b/src/amane/handlers/scrape.py
+index ae3cdc0..16e4a8d 100644
+--- a/src/amane/handlers/scrape.py
++++ b/src/amane/handlers/scrape.py
+@@ -90,6 +90,12 @@ class ScrapeHandler(TaskHandler[ScrapePayload, ScrapeResult]):
+         file = None
+         if payload.media_file_id:
+             file = await self._repo.get_media_file(media_id=payload.media_file_id)
++        rec.info(
++            "刮削对象",
++            media_file_id=payload.media_file_id,
++            media_path=file.path if file else None,
++            reason="处理关联媒体文件" if file else "本次按番号处理影片信息，未取得关联媒体文件",
++        )
+ 
+         # 仅当本次可用来源声明需要指纹时计算 oshash.
+         file_hash = file.oshash if file else None
+diff --git a/src/amane/media/liu1443452494_image_quality.py b/src/amane/media/liu1443452494_image_quality.py
+index c0b0149..70a3df3 100644
+--- a/src/amane/media/liu1443452494_image_quality.py
++++ b/src/amane/media/liu1443452494_image_quality.py
+@@ -48,10 +48,13 @@ def dimensions_improve(candidate: tuple[int, int], current: tuple[int, int] | No
+ 
+ 
+ class ImagePool:
+-    def __init__(self, store: ResourceStore, client: WebClient, *, prefer_amazon: bool = False) -> None:
++    def __init__(
++        self, store: ResourceStore, client: WebClient, *, prefer_amazon: bool = False, image_kind: str = "图片"
++    ) -> None:
+         self._store = store
+         self._client = client
+         self._prefer_amazon = prefer_amazon
++        self._image_kind = image_kind
+         self._attempts: dict[str, ImageCandidate | None] = {}
+ 
+     async def acquire(self, urls: Sequence[str]) -> bool:
+@@ -65,9 +68,19 @@ class ImagePool:
+                     if source is not None:
+                         candidate = inspect_image(url, source.locator, source.path)
+                         self._attempts[url] = candidate
++                        if candidate is not None:
++                            structlog.get_logger().info(
++                                "图片候选校验成功",
++                                image_kind=self._image_kind,
++                                url=url,
++                                file_bytes=candidate.file_bytes,
++                                dimensions=candidate.dimensions,
++                            )
+                         if candidate is None:
+                             # 无效响应不能作为永久缓存阻止后续任务重试。
+                             await self._store.invalidate(source.locator)
++                    if self._attempts[url] is None:
++                        structlog.get_logger().warning("图片候选不可用", image_kind=self._image_kind, url=url)
+                 except Exception as exc:
+                     structlog.get_logger().warning("图片候选获取失败", url=url, error=str(exc))
+             success = self._attempts[url] is not None or success
+@@ -91,6 +104,13 @@ class ImagePool:
+                     candidate = inspect_image(url, locator, path)
+                     if candidate is not None:
+                         self._attempts[url] = candidate
++                        structlog.get_logger().info(
++                            "复用旧图片",
++                            image_kind=self._image_kind,
++                            url=url,
++                            file_bytes=candidate.file_bytes,
++                            dimensions=candidate.dimensions,
++                        )
+             except Exception as exc:
+                 structlog.get_logger().warning("旧图片读取失败", url=url, error=str(exc))
+ 
+@@ -115,6 +135,32 @@ class ImagePool:
+ 
+     def ordered_urls(self, previous: Sequence[str] = ()) -> list[str]:
+         ranked = self._ranked()
++        if ranked:
++            winner = ranked[0]
++            tied = [item for item in ranked if item.file_bytes == winner.file_bytes]
++            reason = "实际文件字节数最大"
++            if len(tied) > 1:
++                reason = "最大文件同大小，保持原候选顺序"
++                amazon_count = sum(
++                    urlsplit(item.url).hostname
++                    in {"m.media-amazon.com", "images-na.ssl-images-amazon.com", "images-fe.ssl-images-amazon.com"}
++                    for item in tied
++                )
++                if self._prefer_amazon and 0 < amazon_count < len(tied):
++                    reason = "最大文件同大小，优先选择日亚图片；日亚候选之间保持原顺序"
++            structlog.get_logger().info(
++                "图片择优完成",
++                image_kind=self._image_kind,
++                url=winner.url,
++                file_bytes=winner.file_bytes,
++                dimensions=winner.dimensions,
++                valid_count=len(ranked),
++                reason=reason,
++            )
++        else:
++            structlog.get_logger().warning(
++                "没有有效图片候选", image_kind=self._image_kind, retained_urls=list(previous)
++            )
+         if not ranked and previous:
+             return list(dict.fromkeys([*previous, *self._attempts]))
+         return [candidate.url for candidate in ranked] + [
+diff --git a/src/amane/media/liu1443452494_posters.py b/src/amane/media/liu1443452494_posters.py
+index d078e42..85c9260 100644
+--- a/src/amane/media/liu1443452494_posters.py
++++ b/src/amane/media/liu1443452494_posters.py
+@@ -302,6 +302,7 @@ class PosterResolver:
+     async def _html(self, url: str) -> PosterPage | None:
+         if url not in self._pages:
+             self._pages[url] = None
++            structlog.get_logger().info("访问高清海报页面", url=url)
+             try:
+                 response = await self._client.request("GET", url, headers={"Accept-Language": "ja-JP,ja;q=0.9"})
+                 response.encoding = "utf-8"
+@@ -316,6 +317,9 @@ class PosterResolver:
+                     structlog.get_logger().warning("高清海报页面不可用", url=url, reason=reason or "验证码")
+                 else:
+                     self._pages[url] = PosterPage(url=str(response.url), html=html)
++                    structlog.get_logger().info(
++                        "高清海报页面获取成功", url=str(response.url), status=response.status_code
++                    )
+             except Exception as exc:
+                 structlog.get_logger().warning("高清海报页面获取失败", url=url, error=str(exc))
+         return self._pages[url]
+@@ -336,7 +340,9 @@ class PosterResolver:
+         return page
+ 
+     async def _tenhow(self, query: PosterQuery) -> list[TenhowMatch]:
++        structlog.get_logger().info("Tenhow 演员检索", number=query.number, actors=query.actors)
+         if not query.actors:
++            structlog.get_logger().info("跳过 Tenhow 检索", reason="没有可用的原始日文演员名")
+             return []
+         index = await self._html("https://www.tenhow.net/mokuji.html")
+         if index is None or not _safe_url(index.url, {"www.tenhow.net", "tenhow.net"}):
+@@ -365,18 +371,36 @@ class PosterResolver:
+                 for match in tenhow_matches(page.html, query):
+                     matches[match.asin] = match
+         if len(matches) > 1:
+-            structlog.get_logger().warning("Tenhow 作品对应多个 ASIN，回退标题检索", number=query.number)
++            structlog.get_logger().warning(
++                "Tenhow 作品对应多个 ASIN，回退标题检索", number=query.number, asins=list(matches)
++            )
+             return []
++        if not matches:
++            structlog.get_logger().info("Tenhow 未匹配到当前作品", number=query.number)
++        for match in matches.values():
++            structlog.get_logger().info(
++                "Tenhow 作品匹配成功", number=query.number, asin=match.asin, url=match.image_url
++            )
+         return list(matches.values())
+ 
+     async def _amazon_asin(self, asin: str) -> AmazonProduct | None:
++        structlog.get_logger().info("日亚 ASIN 查询", asin=asin, url=f"https://www.amazon.co.jp/dp/{asin}")
+         page = await self._amazon_page(f"https://www.amazon.co.jp/dp/{asin}")
+-        return amazon_product(page, asin) if page else None
++        product = amazon_product(page, asin) if page else None
++        structlog.get_logger().info(
++            "日亚商品主图解析结果",
++            asin=asin,
++            image_urls=product.image_urls if product else [],
++            reason="商品身份已核对" if product else "页面不可用或未取得身份匹配的商品主图",
++        )
++        return product
+ 
+     async def _search(self, query: PosterQuery, trusted_asins: set[str]) -> bool:
+         if not query.title:
++            structlog.get_logger().info("跳过日亚标题搜索", reason="没有可用的原始日文标题")
+             return False
+         url = "https://www.amazon.co.jp/s?" + urlencode({"k": f"{query.title} [DVD]", "i": "dvd"})
++        structlog.get_logger().info("日亚原始标题搜索", title=query.title, actors=query.actors, url=url)
+         page = await self._amazon_page(url)
+         if page is None or not _safe_url(page.url, {"www.amazon.co.jp", "amazon.co.jp"}):
+             return False
+@@ -409,6 +433,7 @@ class PosterResolver:
+             if not card_matches and not detail_matches:
+                 continue
+             matched_asins.add(asin)
++            structlog.get_logger().info("日亚搜索商品匹配成功", asin=asin, title=title)
+             images: list[str] = []
+             if product is not None and detail_matches:
+                 images.extend(product.image_urls)
+@@ -417,6 +442,7 @@ class PosterResolver:
+             success = await self._images.acquire(images) or success
+         if not success:
+             # 标题路径核实的新 ASIN 仍可尝试 Tenhow 直链；候选池负责地址去重。
++            structlog.get_logger().info("日亚标题搜索未取得有效海报", asins=sorted(matched_asins))
+             await self._images.acquire([f"https://www.tenhow.net/images/{asin}.jpg" for asin in sorted(matched_asins)])
+         return success
+ 
+@@ -429,4 +455,7 @@ class PosterResolver:
+             if product is not None:
+                 success = await self._images.acquire(product.image_urls) or success
+         if not success:
++            structlog.get_logger().info("ASIN 查询未取得有效日亚海报，继续标题搜索")
+             await self._search(query, {match.asin for match in matches})
++        else:
++            structlog.get_logger().info("已取得有效日亚海报，跳过标题搜索")
+diff --git a/src/amane/media/pipeline.py b/src/amane/media/pipeline.py
+index 08552a2..5fa5b75 100644
+--- a/src/amane/media/pipeline.py
++++ b/src/amane/media/pipeline.py
+@@ -115,7 +115,8 @@ async def materialize_images(
+         kinds.discard(DownloadableResource.poster)
+ 
+     # 裁剪使用同一份按文件大小选定的封面，包括未选择输出封面的情况。
+-    thumbs = ImagePool(store, client)
++    logger.info("图片处理设置", download_kinds=sorted(kinds), locked_fields=sorted(locked_fields))
++    thumbs = ImagePool(store, client, image_kind="封面")
+     need_thumb = DownloadableResource.thumb in kinds or (
+         DownloadableResource.poster in kinds and config.scraping.crop_poster
+     )
+@@ -135,7 +136,7 @@ async def materialize_images(
+         list(previous_poster_urls or poster_urls) if "poster_urls" in locked_fields else list(poster_urls)
+     )
+     if DownloadableResource.poster in kinds:
+-        posters = ImagePool(store, client, prefer_amazon=True)
++        posters = ImagePool(store, client, prefer_amazon=True, image_kind="海报")
+         await posters.acquire(poster_urls)
+         if poster_query is not None:
+             try:
+@@ -152,6 +153,23 @@ async def materialize_images(
+         crop_size = (min(thumb_size[0], int(thumb_size[1] * ratio)), thumb_size[1]) if thumb_size else (0, 0)
+         cropped = False
+ 
++        crop_reason = "符合裁剪条件，且裁剪尺寸严格改善"
++        if not config.scraping.crop_poster:
++            crop_reason = "裁剪功能未启用"
++        elif thumb is None:
++            crop_reason = "没有有效封面原图"
++        elif not should_crop_poster(thumb_size, cand_size, skip_ratio=config.scraping.poster_crop_skip_ratio):
++            crop_reason = "未满足原有裁剪比例或尺寸条件"
++        elif not dimensions_improve(crop_size, cand_size):
++            crop_reason = "裁剪宽高没有同时保持或改善"
++        logger.info(
++            "海报裁剪判断",
++            thumb_size=thumb_size,
++            poster_size=cand_size,
++            crop_size=crop_size if thumb_size else None,
++            reason=crop_reason,
++        )
++
+         if (
+             config.scraping.crop_poster
+             and should_crop_poster(thumb_size, cand_size, skip_ratio=config.scraping.poster_crop_skip_ratio)
+@@ -167,14 +185,27 @@ async def materialize_images(
+             try:
+                 crop_res = await store.acquire_derived(thumb.locator, "crop", args, crop_producer)
+             except Exception as exc:
+-                logger.warning("海报裁剪失败，保留下载海报", error=str(exc))
++                logger.warning("海报裁剪失败", error=str(exc))
+                 crop_res = None
++            crop_reason = "裁剪未产出有效图片"
+             if crop_res:
+                 candidate = inspect_image(crop_res.url, crop_res.url, store.full_path(crop_res))
+                 if candidate is not None and dimensions_improve(candidate.dimensions, cand_size):
+                     await _maybe_upscale(store, crop_res, config, data_dir)
+                     result_poster_urls = [_internal_url(store, crop_res.url)]
+                     cropped = True
++                    logger.info(
++                        "采用裁剪海报",
++                        url=result_poster_urls[0],
++                        dimensions=candidate.dimensions,
++                        file_bytes=candidate.file_bytes,
++                    )
++                else:
++                    crop_reason = "裁剪结果校验未通过或实际尺寸没有改善"
++        if not cropped:
++            logger.info(
++                "保留下载海报" if poster else "未生成有效海报", url=poster.url if poster else None, reason=crop_reason
++            )
+         if not cropped and poster is not None:
+             res = await store.get_by_url(poster.locator)
+             if res:
+@@ -204,7 +235,7 @@ async def materialize_images(
+         ),
+         trailer_urls=_success_first(trailer_urls, trailer_ok),
+     )
+-    logger.debug(
++    logger.info(
+         "images materialized",
+         kinds=sorted(kinds),
+         poster=out.poster_urls[:1],
+diff --git a/src/amane/observability/liu1443452494_process_events.py b/src/amane/observability/liu1443452494_process_events.py
+new file mode 100644
+index 0000000..6c95739
+--- /dev/null
++++ b/src/amane/observability/liu1443452494_process_events.py
+@@ -0,0 +1,44 @@
++"""自用处理记录：为文件操作附加番号与历史路径，图片度量失败不改变处理结果。"""
++
++from collections.abc import Generator
++from contextlib import contextmanager
++from pathlib import Path
++from typing import TYPE_CHECKING
++
++from structlog.contextvars import bound_contextvars
++
++from ..media.images import probe_size
++from .recorder import current
++
++if TYPE_CHECKING:
++    from ..db.models import MediaFile
++
++
++@contextmanager
++def file_processing(number: str, media: MediaFile) -> Generator[None]:
++    with bound_contextvars(number=number, media_path=media.path, media_file_id=media.id):
++        current().info("文件整理开始")
++        try:
++            yield
++        except Exception:
++            current().exception("文件整理异常")
++            raise
++
++
++def record_copied_file(source: Path, target: Path) -> None:
++    try:
++        file_bytes = target.stat().st_size
++        dimensions = (
++            probe_size(target)
++            if target.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".bmp"}
++            else None
++        )
++        current().info(
++            "资源已复制",
++            source_path=str(source),
++            target_path=str(target),
++            file_bytes=file_bytes,
++            dimensions=dimensions,
++        )
++    except OSError as exc:
++        current().warning("资源已复制但大小读取失败", source_path=str(source), target_path=str(target), error=str(exc))
+diff --git a/src/amane/observability/liu1443452494_processing_log.py b/src/amane/observability/liu1443452494_processing_log.py
+new file mode 100644
+index 0000000..164794a
+--- /dev/null
++++ b/src/amane/observability/liu1443452494_processing_log.py
+@@ -0,0 +1,554 @@
++"""按任务读取本地 JSON 日志并生成中文说明；历史数据缺失时不查询现有图片补值。"""
++
++import json
++import re
++from collections import deque
++from datetime import UTC, datetime
++from pathlib import Path
++from typing import Literal
++from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
++
++from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
++
++from ..db.models import Task, TaskStatus, TaskType
++from ..utils.threads import in_thread
++from .models import SiteOutcomeRecord, TaskSnapshot, TaskSummary
++from .recorder import task_dir_for
++
++
++class ProcessingLogEntry(BaseModel):
++    timestamp: datetime | None = None
++    level: Literal["info", "warning", "error", "debug"] = "info"
++    stage: str
++    message: str
++    media_path: str | None = None
++    details: list[str] = Field(default_factory=list)
++
++
++class ProcessingLogReport(BaseModel):
++    task_id: int
++    task_type: Literal["scrape", "organize"]
++    status: TaskStatus
++    started_at: datetime | None = None
++    finished_at: datetime | None = None
++    last_activity_at: datetime
++    media_path: str | None = None
++    target_path: str | None = None
++    file_outcome: str | None = None
++    entries: list[ProcessingLogEntry] = Field(default_factory=list)
++    notices: list[str] = Field(default_factory=list)
++
++
++class ProcessingLogResponse(BaseModel):
++    number: str
++    record: ProcessingLogReport | None = None
++    notices: list[str] = Field(default_factory=list)
++
++
++class LogEvent(BaseModel):
++    model_config = ConfigDict(extra="allow")
++    # Pydantic 要求以非空字典标注额外字段，所有值仍经 JsonValue 校验。
++    __pydantic_extra__: dict[str, JsonValue] = Field(init=False)  # ty: ignore[invalid-mutable-override]
++
++    event: str
++    timestamp: datetime | None = None
++    level: str = "info"
++    task_id: int | None = None
++    number: str | None = None
++    metadata_id: int | None = None
++    media_path: str | None = None
++
++    def value(self, key: str) -> JsonValue:
++        return (self.__pydantic_extra__ or {}).get(key)
++
++    def text(self, key: str) -> str | None:
++        value = self.value(key)
++        return value if isinstance(value, str) and value else None
++
++
++class LogRead(BaseModel):
++    events: list[LogEvent] = Field(default_factory=list)
++    outcomes: list[SiteOutcomeRecord] = Field(default_factory=list)
++    notices: list[str] = Field(default_factory=list)
++
++
++def utc_time(value: datetime) -> datetime:
++    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
++
++
++def same_number(left: str | None, right: str) -> bool:
++    return left is not None and left.strip().casefold() == right.strip().casefold()
++
++
++def task_number(task: Task) -> str | None:
++    value = (task.payload or {}).get("number")
++    return value if isinstance(value, str) else None
++
++
++def _safe_path(log_dir: Path, task_id: int, filename: str) -> Path:
++    root = log_dir.resolve()
++    path = task_dir_for(log_dir, task_id) / filename
++    if not path.resolve().is_relative_to(root):
++        raise ValueError("任务日志路径超出日志目录")
++    return path
++
++
++def _matches(event: LogEvent, task: Task, number: str, metadata_id: int) -> bool:
++    if event.task_id is not None and event.task_id != task.id:
++        return False
++    if task.started_at is None or event.timestamp is None:
++        return False
++    if event.timestamp is not None and utc_time(event.timestamp) < utc_time(task.started_at):
++        return False
++    if event.number is not None:
++        return same_number(event.number, number)
++    if task.type is TaskType.SCRAPE:
++        return same_number(task_number(task), number)
++    return event.metadata_id == metadata_id
++
++
++def _read_outcomes(log_dir: Path, task: Task) -> list[SiteOutcomeRecord]:
++    if task.type is not TaskType.SCRAPE or task.id is None:
++        return []
++    values = (task.result or {}).get("outcomes")
++    if isinstance(values, list):
++        try:
++            return [SiteOutcomeRecord.model_validate(value) for value in values]
++        except ValidationError:
++            pass
++    try:
++        snapshot_path = _safe_path(log_dir, task.id, "task.json")
++        summary_path = _safe_path(log_dir, task.id, "summary.json")
++        if snapshot_path.stat().st_size > 2 * 1024 * 1024 or summary_path.stat().st_size > 2 * 1024 * 1024:
++            return []
++        snapshot = TaskSnapshot.model_validate_json(snapshot_path.read_bytes())
++        if (
++            snapshot.id != task.id
++            or snapshot.started_at is None
++            or task.started_at is None
++            or utc_time(snapshot.started_at) != utc_time(task.started_at)
++        ):
++            return []
++        return list(TaskSummary.model_validate_json(summary_path.read_bytes()).outcomes.values())
++    except OSError, ValueError:
++        return []
++
++
++@in_thread
++def read_log(log_dir: Path, task: Task, number: str, metadata_id: int) -> LogRead:
++    assert task.id is not None
++    out = LogRead(outcomes=_read_outcomes(log_dir, task))
++    rows: deque[LogEvent] = deque(maxlen=10000)
++    invalid = 0
++    matched = 0
++    try:
++        path = _safe_path(log_dir, task.id, "task.log")
++        with path.open("rb") as stream:
++            size = path.stat().st_size
++            if size > 32 * 1024 * 1024:
++                stream.seek(size - 32 * 1024 * 1024)
++                stream.readline()
++                out.notices.append("任务日志超过 32 MiB，仅读取末尾部分，较早记录可能缺失。")
++            while raw := stream.readline(512 * 1024 + 1):
++                if len(raw) > 512 * 1024:
++                    while raw and not raw.endswith(b"\n"):
++                        raw = stream.readline(512 * 1024 + 1)
++                    invalid += 1
++                    continue
++                try:
++                    event = LogEvent.model_validate_json(raw)
++                except ValueError:
++                    invalid += 1
++                    continue
++                if _matches(event, task, number, metadata_id):
++                    matched += 1
++                    rows.append(event)
++    except FileNotFoundError:
++        out.notices.append("该任务的过程日志不存在或已被清除。")
++    except OSError, ValueError:
++        out.notices.append("无法读取该任务的过程日志。")
++    if invalid:
++        out.notices.append(f"有 {invalid} 条日志不完整、格式无效或超过长度限制，已跳过。")
++    if matched > len(rows):
++        out.notices.append(f"仅展示最近 {len(rows)} 条相关记录，省略 {matched - len(rows)} 条较早记录。")
++    out.events = list(rows)
++    return out
++
++
++def _secret_key(value: str) -> bool:
++    return any(
++        part in value.casefold().replace("-", "_")
++        for part in (
++            "token",
++            "secret",
++            "password",
++            "cookie",
++            "authorization",
++            "credential",
++            "api_key",
++            "apikey",
++            "signature",
++            "dsn",
++        )
++    )
++
++
++def _redact_url(match: re.Match[str]) -> str:
++    try:
++        parts = urlsplit(match.group())
++        netloc = parts.netloc.rsplit("@", 1)[-1]
++        query = urlencode(
++            [
++                (key, "***" if _secret_key(key) else value)
++                for key, value in parse_qsl(parts.query, keep_blank_values=True)
++            ]
++        )
++        return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
++    except ValueError:
++        return "[无效地址]"
++
++
++def _clean_text(value: str) -> str:
++    value = re.sub(r"https?://[^\s\"<>]+", _redact_url, value)
++    value = re.sub(r"(?i)(Bearer\s+)[A-Za-z0-9._~+/-]+=*", r"\1***", value)
++    return re.sub(
++        r"(?i)((?:password|api[_-]?key|token|secret|cookie|authorization)\s*[=:]\s*)[^\s,;&]+", r"\1***", value
++    )
++
++
++def _clean_value(value: JsonValue) -> JsonValue:
++    if isinstance(value, str):
++        return _clean_text(value)
++    if isinstance(value, list):
++        return [_clean_value(item) for item in value]
++    if isinstance(value, dict):
++        return {key: "***" if _secret_key(key) else _clean_value(item) for key, item in value.items()}
++    return value
++
++
++def _value_text(value: JsonValue) -> str:
++    if value is None:
++        return "未记录"
++    if isinstance(value, bool):
++        return "是" if value else "否"
++    if isinstance(value, str):
++        return _clean_text(value)
++    return json.dumps(_clean_value(value), ensure_ascii=False)
++
++
++def _reason_text(reason: str) -> str:
++    return {
++        "no_usable_metadata": "未取得可用元数据",
++        "timeout": "请求超时",
++        "network_error": "网络请求失败",
++        "network": "网络连接失败",
++        "api_error": "站点接口返回业务错误",
++        "not_found": "未找到资源",
++        "server_error": "站点服务器异常",
++        "cloudflare_challenge": "遇到 Cloudflare 验证页面",
++        "cloudflare_blocked": "请求被 Cloudflare 拦截",
++        "ip_banned": "站点限制当前 IP 访问",
++        "geo_restricted": "站点限制当前地区访问",
++        "empty_response": "站点返回空内容",
++        "crawler_unavailable": "来源当前不可用",
++        "http_error": "HTTP 请求失败",
++        "parse_error": "返回内容解析失败",
++        "unexpected": "发生未预期的错误",
++        "cloudflare": "遇到 Cloudflare 验证或访问限制",
++        "captcha": "遇到验证码",
++        "age_verification": "需要年龄确认",
++        "geo_blocked": "站点限制当前地区访问",
++        "login_required": "需要登录",
++        "rate_limited": "请求频率受限",
++    }.get(reason, reason)
++
++
++def _event_title(event: str) -> str:
++    names = {
++        "task started": "任务开始",
++        "task completed": "任务完成",
++        "task failed": "任务失败",
++        "scraping started": "开始获取影片信息",
++        "scrape completed": "刮削完成",
++        "scrape ok": "来源刮削成功",
++        "search hit": "找到作品页面",
++        "search miss": "未找到匹配的作品页面",
++        "source returned no usable metadata": "来源未返回可用元数据",
++        "source failed": "来源获取失败",
++        "site cache hit": "复用来源缓存",
++        "request retry": "请求失败，准备重试",
++        "request failed": "请求失败",
++        "http exchange": "HTTP 请求结果",
++        "images materialized": "图片处理完成，确定最终地址",
++        "image materialization failed, keeping raw urls": "图片处理异常，保留已有地址",
++        "translation failed, keeping original": "翻译失败，保留原文",
++        "field translated": "字段翻译完成",
++        "no eligible crawlers for content type": "该内容类型没有可用来源",
++        "no crawlers available": "没有可调用的来源",
++        "no data found from any source": "所有来源均未取得可用数据",
++        "resource download failed": "资源下载失败",
++        "resource is upstream placeholder": "资源地址返回占位图，已排除",
++        "resource file missing, invalidating record": "资源文件不存在，清除失效缓存",
++        "probe_size failed": "图片尺寸读取失败",
++        "file operations done": "文件整理完成",
++        "file operations failed": "文件整理失败",
++        "organize failed": "文件整理失败",
++        "organize target occupied": "目标路径已被其他文件占用",
++        "organize target state unknown": "无法确认目标路径状态",
++        "source file missing": "源文件不存在",
++        "downloading images via store": "准备整理所需图片",
++        "copy metadata skipped": "内容复制完成，部分文件属性未能保留",
++        "file moved": "文件已移动",
++        "file copied": "文件已复制",
++        "hardlink created": "硬链接已创建",
++        "symlink created": "符号链接已创建",
++        "nfo written": "NFO 已写入",
++        "fetch graph built": "已确定来源与字段获取顺序",
++        "fetch phases": "已确定来源执行阶段",
++        "auto organize skipped: media file missing": "未创建自动整理任务：媒体文件不存在",
++    }
++    if event in names:
++        return names[event]
++    return event if re.search(r"[\u4e00-\u9fff]", event) else "其他处理记录"
++
++
++def _stage(event: LogEvent, task_type: TaskType) -> str:
++    if any(word in event.event.casefold() for word in ("image", "poster", "图片", "海报", "tenhow", "日亚", "裁剪")):
++        return "图片处理"
++    if task_type is TaskType.ORGANIZE:
++        return "文件整理"
++    if event.event.startswith("task ") or event.event in {"刮削对象", "scrape completed"}:
++        return "任务结果"
++    return "元数据获取"
++
++
++def _details(event: LogEvent) -> list[str]:
++    labels = {
++        "url": "地址",
++        "final_url": "实际响应地址",
++        "asin": "ASIN",
++        "asins": "ASIN 列表",
++        "image_urls": "图片候选地址",
++        "actors": "原始演员名",
++        "title": "原始标题",
++        "image_kind": "图片类别",
++        "file_bytes": "文件大小",
++        "dimensions": "图片尺寸",
++        "thumb_size": "封面尺寸",
++        "poster_size": "下载海报尺寸",
++        "crop_size": "预计裁剪尺寸",
++        "reason": "原因",
++        "error": "错误详情",
++        "exception": "异常详情",
++        "method": "请求方式",
++        "status": "HTTP 状态码",
++        "http_status": "HTTP 状态码",
++        "duration_s": "耗时（秒）",
++        "elapsed_ms": "耗时（毫秒）",
++        "attempt": "重试序号",
++        "attempts": "请求次数",
++        "max_retries": "最多请求次数",
++        "retry_in": "等待重试（秒）",
++        "site": "来源",
++        "source": "来源",
++        "cache_key": "缓存来源",
++        "field": "字段",
++        "target": "目标",
++        "lang": "请求语言",
++        "target_path": "目标路径",
++        "source_path": "原路径",
++        "path": "路径",
++        "dest": "目标路径",
++        "src": "原路径",
++        "dst": "目标路径",
++        "poster": "最终海报地址",
++        "thumb": "最终封面地址",
++        "trailer": "预告片地址",
++        "valid_count": "有效候选数",
++        "retained_urls": "保留的图片地址",
++        "media_file_id": "媒体文件编号",
++        "mode": "整理方式",
++        "outcome": "文件处理结果",
++        "subtitle_conflicts": "字幕冲突数",
++        "write_nfo": "写入 NFO",
++        "copy_resources": "复制资源类别",
++        "download_kinds": "下载类别",
++        "kinds": "图片类别",
++        "locked_fields": "锁定字段",
++        "crawlers": "刮削来源",
++        "failed_sites": "未成功来源",
++        "fields_resolved": "已取得字段数",
++        "sites_used": "采用来源数",
++        "organize_followups": "后续整理任务数",
++        "actor_followups": "后续演员任务数",
++        "followups": "后续任务",
++        "organized": "整理完成数",
++        "skipped": "跳过数",
++        "conflicted": "冲突数",
++        "failed": "失败数",
++    }
++    result: list[str] = []
++    values = event.__pydantic_extra__ or {}
++    for key, value in values.items():
++        if key not in labels:
++            continue
++        if value is None and key not in {"file_bytes", "dimensions", "thumb_size", "poster_size", "crop_size"}:
++            continue
++        text = _value_text(value)
++        if key == "file_bytes" and isinstance(value, int) and not isinstance(value, bool):
++            text = f"{value:,} 字节（{value / 1024:.2f} KiB）"
++        elif (
++            key in {"dimensions", "thumb_size", "poster_size", "crop_size"}
++            and isinstance(value, list)
++            and len(value) == 2
++        ):
++            text = f"{value[0]} × {value[1]}"
++        elif key == "reason":
++            text = _reason_text(text)
++        elif key == "outcome":
++            text = {"placed": "完成", "failed": "失败", "conflict": "目标冲突", "skipped": "跳过"}.get(text, text)
++        elif key == "mode":
++            text = {
++                "move": "移动",
++                "copy": "复制",
++                "hardlink": "硬链接",
++                "symlink": "符号链接",
++                "none": "原地整理",
++            }.get(text, text)
++        elif key == "source" and event.event.startswith("organize target"):
++            result.append(f"原路径：{text}")
++            continue
++        elif key in {"download_kinds", "copy_resources", "kinds", "locked_fields", "field"}:
++            names = {
++                "thumb": "封面",
++                "poster": "海报",
++                "fanart": "缩略图",
++                "extrafanart": "剧照",
++                "trailer": "预告片",
++                "thumb_urls": "封面地址",
++                "poster_urls": "海报地址",
++                "title": "标题",
++                "plot": "剧情",
++                "actors": "演员",
++                "tags": "标签",
++                "genres": "类型",
++            }
++            if isinstance(value, list):
++                text = (
++                    "、".join(
++                        names.get(item, _value_text(item)) if isinstance(item, str) else _value_text(item)
++                        for item in value
++                    )
++                    or "无"
++                )
++            elif isinstance(value, str):
++                text = names.get(value, text)
++        if len(text) > 16000:
++            text = text[:16000] + "……（本字段过长，剩余内容请查看原始任务记录）"
++        result.append(f"{labels[key]}：{text}")
++    url = event.text("url")
++    if url and event.value("asin") is None:
++        asin = re.search(
++            r"https?://(?:www\.)?(?:amazon\.co\.jp/(?:dp|gp/product)/|tenhow\.net/images/)([A-Z0-9]{10})(?:[/?#.]|$)",
++            url,
++        )
++        if asin:
++            result.insert(0, f"ASIN：{asin[1]}")
++    if _event_title(event.event) == "其他处理记录":
++        result.insert(0, f"原始事件：{_clean_text(event.event)}")
++    return result
++
++
++def _entry(event: LogEvent, task_type: TaskType) -> ProcessingLogEntry:
++    level: Literal["info", "warning", "error", "debug"] = "info"
++    if event.level.casefold() in {"error", "critical"} or event.value("outcome") == "failed":
++        level = "error"
++    elif event.level.casefold() == "warning" or event.value("outcome") == "conflict":
++        level = "warning"
++    elif event.level.casefold() == "debug":
++        level = "debug"
++    return ProcessingLogEntry(
++        timestamp=utc_time(event.timestamp) if event.timestamp else None,
++        level=level,
++        stage=_stage(event, task_type),
++        message=_event_title(event.event),
++        media_path=event.media_path,
++        details=_details(event),
++    )
++
++
++def build_report(task: Task, data: LogRead) -> ProcessingLogReport | None:
++    assert task.id is not None
++    if task.type is TaskType.ORGANIZE and not data.events:
++        return None
++    moments = [utc_time(event.timestamp) for event in data.events if event.timestamp is not None]
++    latest = max(moments, default=utc_time(task.started_at or task.created_at))
++    if task.type is TaskType.SCRAPE and task.finished_at is not None:
++        latest = max(latest, utc_time(task.finished_at))
++    report = ProcessingLogReport(
++        task_id=task.id,
++        task_type="scrape" if task.type is TaskType.SCRAPE else "organize",
++        status=task.status,
++        started_at=utc_time(task.started_at) if task.started_at else None,
++        finished_at=utc_time(task.finished_at) if task.finished_at else None,
++        last_activity_at=latest,
++        notices=data.notices,
++    )
++    ordered = sorted(
++        enumerate(data.events), key=lambda pair: (utc_time(pair[1].timestamp) if pair[1].timestamp else latest, pair[0])
++    )
++    for _, event in ordered:
++        if event.media_path:
++            if event.media_path != report.media_path:
++                report.target_path = None
++                report.file_outcome = None
++            report.media_path = event.media_path
++        if event.event in {"文件整理结果", "file operations done", "organize target occupied"}:
++            report.target_path = event.text("target_path") or event.text("dest")
++            outcome = event.text("outcome")
++            report.file_outcome = {"placed": "完成", "failed": "失败", "conflict": "目标冲突", "skipped": "跳过"}.get(
++                outcome or "", {"file operations done": "完成", "organize target occupied": "目标冲突"}.get(event.event)
++            )
++        elif event.event == "整理跳过文件":
++            report.file_outcome = "跳过"
++        elif event.event in {"文件整理异常", "file operations failed"}:
++            report.file_outcome = "失败"
++        report.entries.append(_entry(event, task.type))
++    for outcome in data.outcomes:
++        label = {"ok": "取得数据", "failed": "未取得可用数据", "cache_hit": "复用缓存"}[outcome.outcome]
++        details = [f"来源：{outcome.site}", f"结果：{label}"]
++        if outcome.reason:
++            details.append(f"原因：{_reason_text(outcome.reason)}")
++        if outcome.http_status:
++            details.append(f"HTTP 状态码：{outcome.http_status}")
++        if outcome.detail:
++            details.append(f"补充说明：{_clean_text(outcome.detail)}")
++        report.entries.append(
++            ProcessingLogEntry(
++                stage="来源汇总",
++                message=f"{outcome.site}：{label}",
++                details=details,
++                level="warning" if outcome.outcome == "failed" else "info",
++            )
++        )
++    if task.type is TaskType.SCRAPE:
++        if task.error:
++            report.entries.append(
++                ProcessingLogEntry(
++                    stage="任务结果", level="error", message="任务错误", details=[_clean_text(task.error)]
++                )
++            )
++        if not any(event.value("file_bytes") is not None for event in data.events):
++            report.notices.append("该次任务未记录图片尺寸与文件大小；不会使用当前图片替代历史数据。")
++        if report.media_path is None:
++            media_id = (task.payload or {}).get("media_file_id")
++            report.notices.append(
++                f"历史记录未保存媒体文件路径（媒体文件编号：{media_id}）。"
++                if media_id is not None
++                else "本次按番号处理影片信息，未指定媒体文件。"
++            )
++    else:
++        report.notices.append("仅展示当前番号的处理记录；顶部任务状态属于整个整理任务，文件结果单独显示。")
++        if report.media_path is None:
++            report.notices.append("历史整理记录未保存原文件路径。")
++    return report
+diff --git a/tests/api/test_liu1443452494_processing_log.py b/tests/api/test_liu1443452494_processing_log.py
+new file mode 100644
+index 0000000..8098e44
+--- /dev/null
++++ b/tests/api/test_liu1443452494_processing_log.py
+@@ -0,0 +1,159 @@
++"""详情日志按实际单片处理时间选取，包含子任务、失败与历史缺失情况。"""
++
++from datetime import UTC, datetime, timedelta
++from pathlib import Path
++from typing import TYPE_CHECKING
++from unittest.mock import patch
++
++import pytest
++
++from amane.db.models import Task, TaskStatus, TaskType
++from amane.observability.liu1443452494_processing_log import LogEvent, ProcessingLogResponse
++from tests.observability.test_liu1443452494_processing_log import write_events
++
++if TYPE_CHECKING:
++    from fastapi import FastAPI
++    from httpx2 import AsyncClient
++
++    from amane.db.repository import Repository
++
++
++async def recorded_task(
++    repo: Repository, kind: TaskType, start: datetime, finish: datetime, number: str | None = None
++) -> Task:
++    task = await repo.create_task(kind, {"number": number} if number else {"library_id": 1})
++    assert task.id is not None
++    with patch("amane.db.repos.tasks._utcnow", return_value=start):
++        claimed = await repo.claim_next_task()
++    assert claimed is not None and claimed.id == task.id
++    with patch("amane.db.repos.tasks._utcnow", return_value=finish):
++        await repo.complete_task(task.id)
++    saved = await repo.get_task(task.id)
++    assert saved is not None
++    return saved
++
++
++@pytest.mark.asyncio(loop_scope="function")
++async def test_latest_record_scope_pagination_failure_and_missing(
++    client: AsyncClient,
++    repo: Repository,
++    app: FastAPI,
++    stop_worker: None,
++    tmp_path: Path,
++) -> None:
++    metadata = await repo.upsert_metadata(number="ABP-901")
++    assert metadata.id is not None
++    endpoint = f"metadata/{metadata.id}/processing-log"
++    for path, status in (("metadata/0/processing-log", 422), ("metadata/99999/processing-log", 404), (endpoint, 200)):
++        response = await client.get(path)
++        assert response.status_code == status
++    assert ProcessingLogResponse.model_validate(response.json()).record is None
++
++    logs = tmp_path / "logs"
++    base = datetime.now(UTC)
++    batch = await recorded_task(repo, TaskType.ORGANIZE, base, base + timedelta(seconds=10))
++    scrape = await recorded_task(
++        repo, TaskType.SCRAPE, base + timedelta(seconds=3), base + timedelta(seconds=4), "abp-901"
++    )
++    assert batch.id is not None and scrape.id is not None
++    events = [
++        LogEvent.model_validate(
++            {
++                "event": "文件整理结果",
++                "task_id": batch.id,
++                "timestamp": base + timedelta(seconds=2),
++                "number": "ABP-901",
++                "media_path": "/库/本片.mp4",
++                "target_path": "/输出/本片.mp4",
++                "outcome": "placed",
++            }
++        ),
++        LogEvent.model_validate(
++            {
++                "event": "文件整理结果",
++                "task_id": batch.id,
++                "timestamp": base + timedelta(seconds=9),
++                "number": "ABP-9010",
++                "media_path": "/库/其他片.mp4",
++                "target_path": "/输出/其他片.mp4",
++                "outcome": "failed",
++            }
++        ),
++    ]
++    write_events(logs, batch.id, events)
++    result = ProcessingLogResponse.model_validate((await client.get(endpoint)).json())
++    assert result.record is not None and result.record.task_id == scrape.id
++
++    events.append(
++        LogEvent.model_validate(
++            {
++                "event": "文件整理结果",
++                "task_id": batch.id,
++                "timestamp": base + timedelta(seconds=8),
++                "number": "ABP-901",
++                "media_path": "/库/本片另一份.mp4",
++                "target_path": "/输出/本片另一份.mp4",
++                "outcome": "conflict",
++            }
++        )
++    )
++    write_events(logs, batch.id, events)
++    result = ProcessingLogResponse.model_validate((await client.get(endpoint)).json())
++    assert result.record is not None and result.record.task_id == batch.id
++    assert result.record.media_path == "/库/本片另一份.mp4"
++    assert result.record.file_outcome == "目标冲突"
++    assert "其他片" not in result.model_dump_json()
++
++    # 超过一页的无关任务不能让真正相关的记录消失。
++    unrelated = await repo.create_tasks(TaskType.SCRAPE, [{"number": f"OTHER-{index}"} for index in range(51)])
++    with patch("amane.db.repos.tasks._utcnow", return_value=base + timedelta(seconds=20)):
++        for task in unrelated:
++            assert task.id is not None
++            await repo.complete_task(task.id)
++    result = ProcessingLogResponse.model_validate((await client.get(endpoint)).json())
++    assert result.record is not None and result.record.task_id == batch.id
++
++    failed = await recorded_task(
++        repo, TaskType.SCRAPE, base + timedelta(seconds=22), base + timedelta(seconds=23), "ABP-901"
++    )
++    assert failed.id is not None
++    with patch("amane.db.repos.tasks._utcnow", return_value=base + timedelta(seconds=24)):
++        await repo.fail_task(failed.id, "站点请求失败")
++    result = ProcessingLogResponse.model_validate((await client.get(endpoint)).json())
++    assert result.record is not None and result.record.task_id == failed.id
++    assert result.record.status is TaskStatus.FAILED
++    assert "站点请求失败" in result.model_dump_json()
++    await repo.delete_task(failed.id)
++    result = ProcessingLogResponse.model_validate((await client.get(endpoint)).json())
++    assert result.record is not None and result.record.task_id == batch.id
++
++    parent = await repo.create_task(TaskType.REFRESH, {"library_id": 1})
++    assert parent.id is not None
++    with patch("amane.db.repos.tasks._utcnow", return_value=base + timedelta(seconds=30)):
++        await repo.claim_next_task()
++        children = await repo.complete_task_with_followups(
++            parent.id,
++            None,
++            [("scrape:1", TaskType.SCRAPE, {"number": "ABP-901"}, 0)],
++        )
++    assert len(children) == 1 and children[0].id is not None
++    with patch("amane.db.repos.tasks._utcnow", return_value=base + timedelta(seconds=31)):
++        await repo.claim_next_task()
++    with patch("amane.db.repos.tasks._utcnow", return_value=base + timedelta(seconds=32)):
++        await repo.complete_task(children[0].id)
++    result = ProcessingLogResponse.model_validate((await client.get(endpoint)).json())
++    assert result.record is not None and result.record.task_id == children[0].id
++
++    active = await repo.create_task(TaskType.SCRAPE, {"number": "ABP-901", "media_file_id": 5})
++    assert active.id is not None
++    with patch("amane.db.repos.tasks._utcnow", return_value=base + timedelta(seconds=33)):
++        await repo.claim_next_task()
++    write_events(
++        logs,
++        active.id,
++        [LogEvent(event="刮削对象", timestamp=base + timedelta(seconds=34), media_path="/库/当前文件.mp4")],
++    )
++    result = ProcessingLogResponse.model_validate((await client.get(endpoint)).json())
++    assert result.record is not None and result.record.task_id == active.id
++    assert result.record.status is TaskStatus.RUNNING
++    assert result.record.media_path == "/库/当前文件.mp4"
+diff --git a/tests/handlers/test_liu1443452494_processing_events.py b/tests/handlers/test_liu1443452494_processing_events.py
+new file mode 100644
+index 0000000..6300f54
+--- /dev/null
++++ b/tests/handlers/test_liu1443452494_processing_events.py
+@@ -0,0 +1,139 @@
++"""正常日志级别记录图片数据，批量整理的日志携带当前文件归属。"""
++
++import logging
++from datetime import UTC, datetime
++from pathlib import Path
++from typing import cast
++
++import pytest
++from structlog.contextvars import bound_contextvars, get_contextvars
++
++from amane.config import HotSettings
++from amane.db.models import MediaFileStatus, Task, TaskStatus, TaskType
++from amane.db.repository import Repository
++from amane.enums import DownloadableResource, MoveMode
++from amane.handlers import OrganizeHandler, OrganizePayload
++from amane.media import ResourceStore, materialize_images
++from amane.net.http import WebClient
++from amane.observability.liu1443452494_processing_log import build_report, read_log
++from amane.observability.logging import setup_logging
++from amane.observability.recorder import Recorder
++from tests.media.test_liu1443452494_image_quality import (
++    PosterClient,
++    image_bytes,
++    poster_query,
++    product_html,
++    tenhow_block,
++)
++
++
++@pytest.mark.asyncio
++async def test_image_report_records_actual_measurements_and_asin_at_info(
++    resource_store: ResourceStore,
++    tmp_path: Path,
++    caplog: pytest.LogCaptureFixture,
++) -> None:
++    setup_logging("INFO")
++    thumbnail = "https://images.test/thumb.jpg"
++    amazon = "https://m.media-amazon.com/images/I/poster.jpg"
++    tenhow = "https://www.tenhow.net/images/B000000001.jpg"
++    client = PosterClient(
++        pages={
++            "https://www.tenhow.net/mokuji.html": '<a href="kaede.html">楓カレン</a>',
++            "https://www.tenhow.net/kaede.html": tenhow_block(),
++            "https://www.amazon.co.jp/dp/B000000001": product_html(amazon),
++        },
++        images={
++            thumbnail: image_bytes((800, 540)),
++            tenhow: image_bytes((1055, 1500), 100000),
++            amazon: image_bytes((1784, 2535), 366664),
++        },
++    )
++    config = HotSettings()
++    config.scraping.download_resources = [DownloadableResource.thumb, DownloadableResource.poster]
++    config.scraping.crop_poster = True
++    task = Task(id=81, type=TaskType.SCRAPE, started_at=datetime.now(UTC), payload={"number": "IPZZ-396"})
++    with caplog.at_level(logging.INFO, logger="amane"), bound_contextvars(number="IPZZ-396"):
++        recorder = Recorder.begin(tmp_path / "logs", task, config)
++        try:
++            result = await materialize_images(
++                [],
++                [thumbnail],
++                [],
++                resource_store,
++                cast(WebClient, client),
++                config,
++                tmp_path,
++                poster_query=poster_query(),
++            )
++            task.status = TaskStatus.DONE
++            task.finished_at = datetime.now(UTC)
++            recorder.finalize(task, success=True, error=None, debug_capture=False)
++        finally:
++            recorder.close()
++    assert result.poster_urls[0] == amazon
++    report = build_report(task, await read_log(tmp_path / "logs", task, "IPZZ-396", 1))
++    assert report is not None
++    text = report.model_dump_json()
++    for expected in (
++        "B000000001",
++        "1784 × 2535",
++        "366,664 字节",
++        "Tenhow 作品匹配成功",
++        "海报裁剪判断",
++        "跳过标题搜索",
++        "最终海报地址",
++    ):
++        assert expected in text
++    assert not (tmp_path / "logs" / "tasks" / "task-81" / "http").exists()
++
++
++@pytest.mark.asyncio
++async def test_organize_records_per_file_paths_and_restores_context(
++    repo: Repository,
++    resource_store: ResourceStore,
++    tmp_path: Path,
++    caplog: pytest.LogCaptureFixture,
++) -> None:
++    setup_logging("INFO")
++    library_root = tmp_path / "库"
++    library_root.mkdir()
++    library = await repo.create_library(
++        name="测试",
++        path=str(library_root),
++        write_nfo=True,
++        move_mode=MoveMode.MOVE,
++        video_template="{number}/{number}",
++        min_file_size=0,
++    )
++    assert library.id is not None
++    numbers = ["ABP-901", "ABP-9010"]
++    for number in numbers:
++        metadata = await repo.upsert_metadata(number=number)
++        path = library_root / f"{number}.mp4"
++        path.write_bytes(b"video")
++        await repo.create_media_file(
++            library.id, path=str(path), number=number, metadata_id=metadata.id, status=MediaFileStatus.SCRAPED
++        )
++    task = Task(id=82, type=TaskType.ORGANIZE, started_at=datetime.now(UTC), payload={"library_id": library.id})
++    with caplog.at_level(logging.INFO, logger="amane"), bound_contextvars(number="调用方上下文"):
++        recorder = Recorder.begin(tmp_path / "logs", task, HotSettings())
++        try:
++            result = await OrganizeHandler(repo, HotSettings(), resource_store).handle(
++                OrganizePayload(library_id=library.id, path=str(library_root))
++            )
++            task.status = TaskStatus.DONE
++            task.finished_at = datetime.now(UTC)
++            recorder.finalize(task, success=True, error=None, debug_capture=False)
++            assert get_contextvars()["number"] == "调用方上下文"
++        finally:
++            recorder.close()
++    assert result.result is not None and result.result.organized == 2
++    for number in numbers:
++        report = build_report(task, await read_log(tmp_path / "logs", task, number, 0))
++        assert report is not None
++        assert report.media_path == str(library_root / f"{number}.mp4")
++        assert report.file_outcome == "完成"
++        assert any(entry.message == "NFO 已写入" for entry in report.entries)
++        other = next(value for value in numbers if value != number)
++        assert str(library_root / f"{other}.mp4") not in report.model_dump_json()
+diff --git a/tests/observability/test_liu1443452494_processing_log.py b/tests/observability/test_liu1443452494_processing_log.py
+new file mode 100644
+index 0000000..282fb0e
+--- /dev/null
++++ b/tests/observability/test_liu1443452494_processing_log.py
+@@ -0,0 +1,228 @@
++"""历史日志的归属、中文内容、缺失信息与异常输入。"""
++
++import json
++import sys
++from datetime import UTC, datetime, timedelta
++from pathlib import Path
++from typing import Literal
++
++import pytest
++
++from amane.db.models import Task, TaskStatus, TaskType
++from amane.net.errors import FailureReason
++from amane.observability.liu1443452494_processing_log import LogEvent, LogRead, build_report, read_log
++from amane.observability.models import SiteOutcomeKind, SiteOutcomeRecord
++from amane.observability.recorder import task_dir_for
++from tests.helpers import make_junction
++
++
++def write_events(log_dir: Path, task_id: int, events: list[LogEvent]) -> Path:
++    directory = task_dir_for(log_dir, task_id)
++    directory.mkdir(parents=True, exist_ok=True)
++    path = directory / "task.log"
++    path.write_text("".join(event.model_dump_json() + "\n" for event in events), encoding="utf-8")
++    return path
++
++
++@pytest.mark.parametrize("kind", [TaskType.SCRAPE, TaskType.ORGANIZE])
++def test_reader_excludes_other_numbers_reused_ids_and_invalid_lines(tmp_path: Path, kind: TaskType) -> None:
++    started = datetime(2026, 10, 30, tzinfo=UTC)
++    task = Task(id=4, type=kind, started_at=started, payload={"number": "ABP-901"}, status=TaskStatus.DONE)
++    events = [
++        LogEvent(event="旧记录", task_id=4, number="ABP-901", timestamp=started - timedelta(seconds=1)),
++        LogEvent(event="其他番号", task_id=4, number="ABP-9010", timestamp=started),
++        LogEvent(event="其他任务", task_id=5, number="ABP-901", timestamp=started),
++        LogEvent(event="缺少时间", task_id=4, number="ABP-901"),
++        LogEvent(event="文件整理开始", task_id=4, number="abp-901", media_path="/库/甲.mp4", timestamp=started),
++        LogEvent(event="未标明番号", task_id=4, timestamp=started),
++    ]
++    path = write_events(tmp_path, 4, events)
++    with path.open("ab") as stream:
++        stream.write(b'{broken\n{"event":42}\n' + b"x" * (512 * 1024 + 2) + b"\n")
++    data = read_log.sync(tmp_path, task, "ABP-901", 1)
++    assert [event.event for event in data.events] == (
++        ["文件整理开始", "未标明番号"] if kind is TaskType.SCRAPE else ["文件整理开始"]
++    )
++    assert any("3 条" in notice for notice in data.notices)
++    task.started_at = None
++    assert read_log.sync(tmp_path, task, "ABP-901", 1).events == []
++
++
++def test_report_preserves_image_values_and_redacts_credentials() -> None:
++    started = datetime(2026, 10, 30, tzinfo=UTC)
++    task = Task(id=7, type=TaskType.SCRAPE, started_at=started, payload={"number": "ABP-901"})
++    report = build_report(
++        task,
++        LogRead(
++            events=[
++                LogEvent.model_validate(
++                    {
++                        "event": "http exchange",
++                        "timestamp": started,
++                        "url": "https://www.amazon.co.jp/dp/B07W5SKWHK",
++                        "status": 500,
++                    }
++                ),
++                LogEvent.model_validate(
++                    {
++                        "event": "图片择优完成",
++                        "timestamp": started,
++                        "dimensions": [1784, 2535],
++                        "file_bytes": 366664,
++                        "url": "https://user:private@images.test/poster.jpg?token=confidential&size=large",
++                        "reason": "实际文件字节数最大",
++                    }
++                ),
++                LogEvent.model_validate(
++                    {
++                        "event": "request failed",
++                        "timestamp": started,
++                        "error": "Authorization=private Bearer secret-value",
++                    }
++                ),
++                LogEvent.model_validate({"event": "unknown event", "timestamp": started, "password": "private"}),
++            ],
++            outcomes=[
++                SiteOutcomeRecord(
++                    site="avbase", outcome=SiteOutcomeKind.FAILED, reason=FailureReason.CLOUDFLARE_BLOCKED
++                )
++            ],
++        ),
++    )
++    assert report is not None
++    text = report.model_dump_json()
++    for expected in (
++        "B07W5SKWHK",
++        "1784 × 2535",
++        "366,664 字节",
++        "358.07 KiB",
++        "HTTP 状态码：500",
++        "Cloudflare 拦截",
++        "unknown event",
++    ):
++        assert expected in text
++    for forbidden in ("private", "confidential", "secret-value"):
++        assert forbidden not in text
++    assert "size=large" in text
++    assert not any("未记录图片" in notice for notice in report.notices)
++
++
++def test_report_highlights_last_file_and_keeps_its_own_result() -> None:
++    started = datetime(2026, 10, 30, tzinfo=UTC)
++    task = Task(id=2, type=TaskType.ORGANIZE, started_at=started, status=TaskStatus.DONE)
++    data = LogRead(
++        events=[
++            LogEvent.model_validate(
++                {
++                    "event": "文件整理结果",
++                    "media_path": "/库/甲.mp4",
++                    "timestamp": started,
++                    "target_path": "/输出/甲.mp4",
++                    "outcome": "placed",
++                }
++            ),
++            LogEvent.model_validate(
++                {
++                    "event": "整理跳过文件",
++                    "media_path": "/库/乙.mp4",
++                    "timestamp": started + timedelta(seconds=2),
++                    "reason": "文件已失效",
++                }
++            ),
++            LogEvent(event="旧事件", media_path="/库/甲.mp4", timestamp=started - timedelta(seconds=1)),
++        ]
++    )
++    report = build_report(task, data)
++    assert report is not None
++    assert report.media_path == "/库/乙.mp4"
++    assert report.target_path is None
++    assert report.file_outcome == "跳过"
++    assert report.status is TaskStatus.DONE
++    assert [entry.media_path for entry in report.entries][-2:] == ["/库/甲.mp4", "/库/乙.mp4"]
++    assert build_report(task, LogRead()) is None
++
++
++def test_missing_logs_and_stale_summary_never_invent_image_data(tmp_path: Path) -> None:
++    started = datetime(2026, 10, 30, tzinfo=UTC)
++    task = Task(id=3, type=TaskType.SCRAPE, started_at=started, payload={"number": "ABP-901", "media_file_id": 8})
++    directory = task_dir_for(tmp_path, 3)
++    directory.mkdir(parents=True)
++    (directory / "task.json").write_text(
++        json.dumps({"id": 3, "type": "scrape", "status": "done", "started_at": "2020-01-01T00:00:00Z"}),
++        encoding="utf-8",
++    )
++    (directory / "summary.json").write_text(
++        json.dumps({"outcomes": {"old": {"site": "old", "outcome": "ok"}}}), encoding="utf-8"
++    )
++    data = read_log.sync(tmp_path, task, "ABP-901", 1)
++    assert data.outcomes == []
++    report = build_report(task, data)
++    assert report is not None
++    assert report.media_path is None
++    assert any("媒体文件编号：8" in notice for notice in report.notices)
++    assert any("过程日志不存在" in notice for notice in report.notices)
++    assert any("未记录图片尺寸" in notice for notice in report.notices)
++
++
++def test_reader_rejects_log_directory_link_outside_root(tmp_path: Path) -> None:
++    logs = tmp_path / "logs"
++    outside = tmp_path / "outside"
++    outside.mkdir()
++    (outside / "task.log").write_text('{"event":"不得读取"}\n', encoding="utf-8")
++    path = task_dir_for(logs, 9)
++    path.parent.mkdir(parents=True)
++    if sys.platform == "win32":
++        make_junction(path, outside)
++    else:
++        path.symlink_to(outside, target_is_directory=True)
++    task = Task(id=9, type=TaskType.SCRAPE, started_at=datetime.now(UTC), payload={"number": "ABP-901"})
++    result = read_log.sync(logs, task, "ABP-901", 1)
++    assert result.events == []
++    assert result.notices == ["无法读取该任务的过程日志。"]
++
++
++@pytest.mark.parametrize("limit", ["bytes", "entries"])
++def test_large_log_keeps_recent_events_and_explains_omissions(
++    tmp_path: Path, limit: Literal["bytes", "entries"]
++) -> None:
++    started = datetime(2026, 10, 30, tzinfo=UTC)
++    task = Task(id=12, type=TaskType.ORGANIZE, started_at=started)
++    latest = LogEvent(event="最近记录", timestamp=started, number="ABP-901", media_path="/库/最近.mp4")
++    path = write_events(tmp_path, 12, [latest])
++    if limit == "bytes":
++        with path.open("wb") as stream:
++            stream.seek(33 * 1024 * 1024)
++            stream.write(b"\n" + latest.model_dump_json().encode("utf-8") + b"\n")
++    else:
++        with path.open("wb") as stream:
++            old = LogEvent(event="较早记录", timestamp=started, number="ABP-901", media_path="/库/较早.mp4")
++            stream.write((old.model_dump_json().encode("utf-8") + b"\n") * 10005)
++            stream.write(latest.model_dump_json().encode("utf-8") + b"\n")
++    result = read_log.sync(tmp_path, task, "ABP-901", 1)
++    assert result.events[-1] == latest
++    assert any("32 MiB" in notice if limit == "bytes" else "省略 6 条" in notice for notice in result.notices)
++    report = build_report(task, result)
++    assert report is not None and report.media_path == "/库/最近.mp4"
++
++
++def test_legacy_organize_uses_explicit_metadata_id_and_reports_result(tmp_path: Path) -> None:
++    started = datetime(2026, 10, 30, tzinfo=UTC)
++    task = Task(id=13, type=TaskType.ORGANIZE, started_at=started)
++    write_events(
++        tmp_path,
++        13,
++        [
++            LogEvent(event="其他影片", timestamp=started, metadata_id=2),
++            LogEvent(event="冲突番号", timestamp=started, metadata_id=1, number="ABP-9010"),
++            LogEvent.model_validate(
++                {"event": "file operations done", "timestamp": started, "metadata_id": 1, "dest": "/输出/本片.mp4"}
++            ),
++        ],
++    )
++    data = read_log.sync(tmp_path, task, "ABP-901", 1)
++    assert [event.event for event in data.events] == ["file operations done"]
++    report = build_report(task, data)
++    assert report is not None
++    assert report.target_path == "/输出/本片.mp4"
++    assert report.media_path is None
++    assert report.file_outcome == "完成"
+diff --git a/web/src/components/media/liu1443452494-processing-log.tsx b/web/src/components/media/liu1443452494-processing-log.tsx
+new file mode 100644
+index 0000000..9c30ad7
+--- /dev/null
++++ b/web/src/components/media/liu1443452494-processing-log.tsx
+@@ -0,0 +1,167 @@
++import { Alert, Badge, Button, Group, Modal, Paper, Stack, Text } from "@mantine/core";
++import { IconFileText, IconRefresh } from "@tabler/icons-react";
++import { useQuery } from "@tanstack/react-query";
++import { useState } from "react";
++import { Virtuoso } from "react-virtuoso";
++import { getLatestProcessingLogOptions } from "@/client/@tanstack/react-query.gen";
++import type { ProcessingLogEntry } from "@/client/types.gen";
++import { extractErrorMessage } from "@/lib/api-error";
++
++/** 报告始终属于当前番号；重新打开时查询最新记录，关闭后停止轮询。 */
++export function ProcessingLogButton({ metadataId }: { metadataId: number }) {
++  const [opened, setOpened] = useState(false);
++  const query = useQuery({
++    ...getLatestProcessingLogOptions({ path: { metadata_id: metadataId } }),
++    enabled: opened,
++    staleTime: 0,
++    refetchOnWindowFocus: false,
++    refetchInterval: (state) =>
++      opened &&
++      (state.state.data?.record?.status === "running" ||
++        state.state.data?.record?.status === "queued")
++        ? 3000
++        : false,
++  });
++  const record = query.data?.record;
++  const statuses = { queued: "排队中", running: "进行中", done: "已完成", failed: "失败" };
++
++  return (
++    <>
++      <Button
++        size="xs"
++        variant="light"
++        leftSection={<IconFileText size={14} />}
++        onClick={() => setOpened(true)}
++      >
++        处理日志
++      </Button>
++      <Modal
++        opened={opened}
++        onClose={() => setOpened(false)}
++        title="最近处理记录"
++        size="xl"
++        centered
++      >
++        <Stack gap="sm">
++          <Group justify="space-between">
++            <Text fw={600}>{query.data?.number ?? "正在读取记录"}</Text>
++            <Button
++              size="xs"
++              variant="subtle"
++              leftSection={<IconRefresh size={14} />}
++              loading={query.isFetching}
++              onClick={() => void query.refetch()}
++            >
++              刷新
++            </Button>
++          </Group>
++          {query.isPending && <Text c="dimmed">正在读取本地任务日志……</Text>}
++          {query.isError && (
++            <Alert color="red" title="日志读取失败">
++              {extractErrorMessage(query.error, "无法读取处理日志")}
++            </Alert>
++          )}
++          {query.data?.notices?.map((notice) => (
++            <Alert key={notice} color="yellow">
++              {notice}
++            </Alert>
++          ))}
++          {record && (
++            <>
++              <Group gap="xs">
++                <Badge>{record.task_type === "scrape" ? "刮削" : "整理"}</Badge>
++                <Badge
++                  color={
++                    record.status === "failed" ? "red" : record.status === "done" ? "teal" : "blue"
++                  }
++                >
++                  任务{statuses[record.status]}
++                </Badge>
++                <Text size="sm">任务 #{record.task_id}</Text>
++                <Text size="sm" c="dimmed">
++                  {new Date(record.last_activity_at).toLocaleString("zh-CN")}
++                </Text>
++              </Group>
++              <Paper withBorder p="sm" radius="sm">
++                <Text size="sm" fw={700}>
++                  最近处理的文件
++                </Text>
++                <Text size="sm" style={{ overflowWrap: "anywhere" }}>
++                  {record.media_path ?? "本次记录未提供文件路径"}
++                </Text>
++                {record.target_path && (
++                  <>
++                    <Text size="sm" fw={700} mt="xs">
++                      目标路径
++                    </Text>
++                    <Text size="sm" style={{ overflowWrap: "anywhere" }}>
++                      {record.target_path}
++                    </Text>
++                  </>
++                )}
++                {record.file_outcome && (
++                  <Text size="sm" mt="xs">
++                    此文件处理结果：{record.file_outcome}
++                  </Text>
++                )}
++              </Paper>
++              {record.notices?.map((notice) => (
++                <Text key={notice} size="sm" c="dimmed">
++                  {notice}
++                </Text>
++              ))}
++              {!record.entries?.length ? (
++                <Text c="dimmed">该任务暂无可显示的过程日志。</Text>
++              ) : (
++                <Virtuoso
++                  style={{ height: "min(52vh, 620px)", minHeight: 240 }}
++                  data={record.entries}
++                  itemContent={renderProcessingEntry}
++                />
++              )}
++            </>
++          )}
++        </Stack>
++      </Modal>
++    </>
++  );
++}
++
++function renderProcessingEntry(_index: number, entry: ProcessingLogEntry) {
++  return <ProcessingEntry entry={entry} />;
++}
++
++function ProcessingEntry({ entry }: { entry: ProcessingLogEntry }) {
++  const colors = { info: "blue", warning: "orange", error: "red", debug: "gray" };
++  return (
++    <Paper withBorder p="sm" radius="sm" mb="xs">
++      <Group gap="xs" mb={4}>
++        <Badge size="xs" color={colors[entry.level ?? "info"]}>
++          {entry.stage}
++        </Badge>
++        {entry.timestamp && (
++          <Text size="xs" c="dimmed">
++            {new Date(entry.timestamp).toLocaleTimeString("zh-CN")}
++          </Text>
++        )}
++        <Text size="sm" fw={600}>
++          {entry.message}
++        </Text>
++      </Group>
++      {entry.media_path && (
++        <Text size="xs" c="dimmed" style={{ overflowWrap: "anywhere" }}>
++          处理文件：{entry.media_path}
++        </Text>
++      )}
++      {entry.details?.map((detail, index) => (
++        <Text
++          key={`${index}:${detail}`}
++          size="sm"
++          style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
++        >
++          {detail}
++        </Text>
++      ))}
++    </Paper>
++  );
++}
+diff --git a/web/src/routes/meta.$metadataId.tsx b/web/src/routes/meta.$metadataId.tsx
+index 6ef131e..9442824 100644
+--- a/web/src/routes/meta.$metadataId.tsx
++++ b/web/src/routes/meta.$metadataId.tsx
+@@ -57,6 +57,7 @@ import {
+ import { getMetadataSchema } from "@/client/sdk.gen";
+ import type { MetadataField, MetadataResponse } from "@/client/types.gen";
+ import { FacetBadge } from "@/components/media/facet-badge";
++import { ProcessingLogButton } from "@/components/media/liu1443452494-processing-log";
+ import { LockChip, LockToggle, type LockProps } from "@/components/media/field-lock";
+ import { UserTagActions } from "@/components/media/user-tag-add";
+ import { VrBadge } from "@/components/media/vr-badge";
+@@ -786,6 +787,7 @@ function TitleDetailPage() {
+           )}
+ 
+           <Group gap="xs" pt="xs">
++            <ProcessingLogButton metadataId={id} />
+             <Menu shadow="md" position="bottom-start">
+               <Menu.Target>
+                 <Button
