@@ -66,6 +66,7 @@ def prepare(root: Path, directory: Path, version: str) -> None:
         "0009-matching.patch",
         "0010-library-jpeg.patch",
         "0011-library-metadata-directory.patch",
+        "0012-watermark-editor.patch",
     )
     actual = {path.name for path in directory.glob("*.patch")}
     if actual != set(patches):
@@ -114,6 +115,14 @@ def check_release(version: str) -> None:
 
 def run_tests(root: Path) -> None:
     cases = (
+        "tests/db/test_liu1443452494_watermarks.py",
+        "tests/db/test_liu1443452494_watermark_migration.py",
+        "tests/api/test_liu1443452494_watermarks.py",
+        "tests/api/test_media.py",
+        "tests/handlers/test_liu1443452494_watermarks.py",
+        "tests/media/test_liu1443452494_watermarks.py",
+        "tests/organize/test_liu1443452494_watermark_outputs.py",
+        "tests/organize/test_subtitles.py",
         "tests/db/test_liu1443452494_metadata_tags.py",
         "tests/db/test_repository.py::TestMetadataRepo",
         "tests/db/test_facets.py::TestFacetSync",
@@ -155,6 +164,12 @@ def run_tests(root: Path) -> None:
     )
     if result.returncode:
         raise BuildError("补丁相关逻辑测试失败，已停止构建")
+    frontend = subprocess.run(
+        ["node", "--experimental-strip-types", "--test", "web/tests/watermark-edit.test.mjs"],
+        cwd=root,
+    )
+    if frontend.returncode:
+        raise BuildError("水印编辑的前端逻辑测试失败，已停止构建")
     append_summary("\n补丁相关逻辑测试通过。")
 
 

@@ -1,0 +1,3069 @@
+diff --git a/docs/dev/api.md b/docs/dev/api.md
+index 95569c8e6d8788eedf798b00f5e493ed9c8cadd9..9b0b6e89bdac368b23dac2357b75a1931c134473 100644
+--- a/docs/dev/api.md
++++ b/docs/dev/api.md
+@@ -44,6 +44,7 @@ OpenAPI 列出参数, 不表达组合语义:
+ - GET `/media` 的相位 query 作用在单行列上; `uncensored` 与 `content_type` 是例外: 两者都按所属条目判定 (`uncensored` = 条目无码或这一份带无码标记, `content_type` = 条目类型), 未绑定条目的文件只看自身标记、不命中任何类型; 布尔侧按空值安全比较. 未知 `definition` → 422; 相位列不纳入 PATCH.
+ - 手动裁切基准是源图**当前本地文件**像素 (含就地超分后尺寸): 海报以 `thumb_urls[0]` 为源并替换 `poster_urls`, 演员头像以 `image_urls[0]` 为源并前插保留原图; 库路径海报不受影响. locator 见 [data-model.md](data-model.md).
+ - `PUT /metadata/{id}/locks` 与 `PUT /actors/{id}/locks` 整体替换锁定字段集合; 锁语义见 [data-model.md](data-model.md)「字段锁定」.
++- `src/amane/api/routes/media.py::update_media_watermarks` 与整理共用库级锁, 首次编辑前只读取旧产物位置; 保存不修改磁盘, 也不提交整理任务. 自动模式保存时重新检查路径和同目录字幕; 手动按实际变化保护字段, 有效值口径见 [data-model.md](data-model.md).
+ - `GET /facets/{kind}` 的 `favorite` 过滤与 `POST /facets/{kind}/batch` 的收藏写入只在可收藏的分类上成立 (`db/models.py::FAVORITE_FACET_KINDS`; 链接型分类中的 `director` 与 `tag` 同样成立): 传入 `favorite` (与取值无关) 或对不支持的 kind 写收藏都是 400, 其余 kind 恒为 false. 写端点按 `action` 分派, 空 `facet_ids` 与未登记的 `action` 是 422, 取去重后的 `facet_ids`, 不存在的 id 计入 `missing` 而不报 404, 三个计数之和等于去重后的条目数. 见 [data-model.md](data-model.md).
+ - 注册顺序有约束的五处: `/facets/{kind}/rules` 先于 `/{facet_id}` (否则 `rules` 被当成 facet_id); `/plugins/reload` 先于 `/plugins/{plugin_id}` (否则 `reload` 被当成插件 ID); `/tasks/batch` 与 `/tasks/worker*` 先于 `/{task_id}` (否则被当成非法整数 id); `/feeds/items` 先于 `/{feed_id}`; `/playback/sources` 先于 `/{source_id}`.
+ - 播放端点的形状 (流的一行、`available` / `key` / `detail` 的三种组合、Range、HLS 分片与字幕路径、404 / 502 语义) 见 [plugins.md](plugins.md)「播放源」.
+diff --git a/docs/dev/data-model.md b/docs/dev/data-model.md
+index 21f50a34c7f9d44d35d07f490d0dbe40cfcdea42..22c4d76202f5814cdc243df6806e5c7d7abbb1c0 100644
+--- a/docs/dev/data-model.md
++++ b/docs/dev/data-model.md
+@@ -4,7 +4,7 @@
+ 
+ ## 数据所有权
+ 
+-**SQLite 是唯一数据源**, NFO / 海报 / fanart 等磁盘文件是从 DB 派生的副产物 (兼容 Emby / Jellyfin / Kodi). 重建顺序为 DB → 派生文件, 不反向; 不允许从 NFO 反推 Metadata. `media/nfo.py::write_nfo` 读取数据库标签, 根据整理阶段的 `FileInfo` 追加当前文件的字幕与马赛克性质标签; 连续写入 tag 后写入同序 genre, 仅在 NFO 中省略导演, 不回写 Metadata.
++**SQLite 是唯一数据源**, NFO / 海报 / fanart 等磁盘文件由 DB 派生 (兼容 Emby / Jellyfin / Kodi), 不允许从 NFO 反推 Metadata. `src/amane/media/nfo.py::write_nfo` 根据有效 `FileInfo` 追加文件标签, 连续写入 tag 后写入同序 genre; 人工覆盖的同类来源标签仅在 NFO 中替换, 同步分辨率与流出标签, 不修改标题或共享 Metadata.
+ 
+ 实体边界:
+ 
+@@ -31,7 +31,9 @@
+ 
+ Metadata 列表与 `/media` 文件行的角标与筛选: 有码 / 无码取条目类型 (没有挂载文件也成立), 无码再并上「存在无码标记的文件」; 中字 / 分辨率 / 破解 / 流出按关联 EXISTS 或页级聚合 (`file_phase`) 判定, 任一挂载文件具备即亮, `definition` 取最高档; 布尔取值的口径见 [api.md](api.md). 文件行同样返回派生的 `censored` / `uncensored`: `censored` 取这一份文件的性质 (带无码标记的副本不算有码), `uncensored` 与列表筛选同口径, 未绑定条目的文件只看自身标记. VR 标识与 `GET /metadata` 的 `vr` 筛选不来自文件相位, 也不物化: 只依据 `Metadata.tags` 与 `parsing/file_info.py::VR_TAGS` 的整体相等判定, 番号不参与; Python 与 SQL 两侧共用同一份词表 (`db/models.py::metadata_vr_predicate`, 用法同 `has_subtitle_predicate`), 因此重命名 / 合并标签后判定立即变化, 无需回填. 代价是判定随 `tags` 的单源取值: 字段链首个非空站点不给 VR 标签的条目判为否.
+ 
+-马赛克性质 (`parsing/file_info.py::MosaicNature`) 是**展示口径**, 不落库: 词表标记优先, 没命中时继承条目类型的有码 / 无码 (HEYZO 等无标记的无码番因此也显示无码), 其余类型为空. 模板占位符 `{mosaic?}` 输出它 (`{content_type}` 输出条目类型), 因此 `censored=` 是合法映射键; 筛选参数与列仍只有标记三个取值.
++人工水印属于单个媒体文件, 独立于路径投影和共享 Metadata. `src/amane/db/watermarks.py::apply_watermark_update` 只保护实际修改字段, 明确的否定值和空分辨率同样受保护; 自动模式清除全部人工覆盖, 路径与字幕识别继续更新自动投影. 页面、SQL 筛选与整理必须使用有效值; `src/amane/db/watermarks.py::effective_file_info` 保留解析的番号、分集及未保护字段. 强制刮削不清除媒体文件的人工设置.
++
++马赛克性质 (`src/amane/parsing/file_info.py::MosaicNature`) 优先使用人工覆盖, 否则由词表标记或条目类型派生. `{mosaic?}` 与图片水印共用这一性质, `{content_type}` 仍为条目类型; `censored=` 是合法映射键. 文件相位聚合与筛选也须读取覆盖值, 不允许为表达人工有码而修改共享条目类型.
+ 
+ ## Library 归属
+ 
+diff --git a/docs/dev/frontend.md b/docs/dev/frontend.md
+index 86a29fbe64132fe4bb9895fe2f8f07ec3f805f7a..aba59bd8f8a4b0f63268d78701564a1b8ae742c5 100644
+--- a/docs/dev/frontend.md
++++ b/docs/dev/frontend.md
+@@ -79,6 +79,8 @@ Settings、任务提交、定时创建、metadata 编辑共用 `components/schem
+ 
+ 影片详情处理日志见 `web/src/components/media/liu1443452494-processing-log.tsx::ProcessingLogButton`；来源结果与过程共用滚动区，合并记录沿用首次标识。读取与归属见 [observability.md](observability.md)。
+ 
++影片详情水印编辑见 `web/src/components/media/watermark-edit-dialog.tsx::WatermarkEditButton`, 按媒体文件选择并读取当前状态; 自动模式禁用字段, 手动只提交实际修改. 保存后刷新详情与列表, 存在变化才询问是否提交原有 ORGANIZE 单文件任务; 取消提示不影响已保存设置. 持久化与保护口径见 [data-model.md](data-model.md).
++
+ `lib/connection.ts` 是模块级 WS 单例 (指数退避 + 断连轮询降级), 入站经 `parseWSEvent` 窄化. 任务查询的失效必须用同形对象前缀 (`[{ _id: "getTaskChildren" }]`), hey-api 生成的 query key 不是字符串前缀.
+ 
+ | 数据 | 存储位置 |
+diff --git a/docs/dev/task-system.md b/docs/dev/task-system.md
+index 42016e6ce1fe271f596c32e0be064c78707af0ca..5d82efee0d974249581b3b2237e0fdf569583716 100644
+--- a/docs/dev/task-system.md
++++ b/docs/dev/task-system.md
+@@ -83,7 +83,7 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
+ | ------ | ------ | -------- | ------ |
+ | `LibraryScan` | `library/scan.py` | REFRESH / watcher / ORGANIZE / SCAN_INVALID | 单路径分类 (跳过 / 无效 / 媒体), `unwanted_kind` 给出无效原因; 规则常量与校验在 `library/rules.py` |
+ | `scan_library` | `handlers/_common.py` | clouddrive 巡检 | 库目录遍历; `@in_thread` 包装 glob / stat. 入库扫描与清理清单改走 `library/cleanup/inventory.py::scan_inventory` 的显式递归 (能收集读错误并产出目录条目) |
+-| `LibraryTaskLocks` | `handlers/_common.py` | ORGANIZE / DELETE | `build_handlers` 构造一份注入两端, 同库执行期串行; 测试里未注入时各 handler 自建, 互不共享 |
++| `LibraryTaskLocks` | `handlers/_common.py` | ORGANIZE / DELETE / 水印保存 | runtime 共用一份实例, 同库执行期串行; 测试未注入时各 handler 自建 |
+ | `finalize_media_file` | `handlers/_common.py` | SCRAPE (缓存 / 主路径) | 标记 SCRAPED + 关联 Metadata |
+ | `apply_file_operations` | `handlers/file.py` | ORGANIZE | 读取 MediaFile→读取 Library→渲染路径→执行 file ops; 库路径 I/O 经 `@in_thread` |
+ 
+@@ -93,6 +93,8 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
+ 
+ ## 落盘执行
+ 
++所有整理入口在 `src/amane/handlers/file.py::apply_file_operations` 合成有效水印. 编辑过的文件通过 `src/amane/organize/watermark_outputs.py::capture_output_baseline` 和 `finish_output_snapshot` 记录产物位置, 新产物成功后才删除被替代且指纹未变的旧文件, 仅清除因此腾空的目录. 独立元数据目录内已记录的字幕经 `src/amane/organize/subtitles.py::place_subtitles` 按库配置重新放置; 不递归删除目录, 其它版本共用路径和外部修改的文件保留. 固定模板共用目标时报告失败, 原图缺失或输出失败时保留旧产物, 不使用已有水印图作为原图. 未编辑文件保持原整理流程.
++
+ `execute_file_operations` 是落盘执行单元, 仅 ORGANIZE 经 `apply_file_operations` 调用. 不变量:
+ 
+ - **整理图片**: 优先用 Resource 原图, 缺失才 `acquire`; `Library.copy_resources` 或 payload 决定写出类型并覆盖选中产物. fanart 独立选择并复用 thumb 原图. `src/amane/handlers/file.py::_copy_library_image` 对 JPG 输出复制 JPEG, 其余仅转换库路径副本, 与角标共用刮削质量设置; 刮削缓存和候选排序不参与转换.
+diff --git a/src/amane/api/models/media.py b/src/amane/api/models/media.py
+index bdd0531a52220ff628a147344146f860598947f9..b77ad4fcbe060b800c28ba4cb2c881b90d294e6c 100644
+--- a/src/amane/api/models/media.py
++++ b/src/amane/api/models/media.py
+@@ -4,7 +4,8 @@ from typing import TYPE_CHECKING
+ from pydantic import BaseModel, Field
+ 
+ from ...db import MediaFile, MediaFileStatus
+-from ...parsing import ContentType, Mosaic, MosaicNature, mosaic_nature, shows_uncensored
++from ...db.watermarks import WatermarkState, WatermarkUpdate, effective_mosaic, watermark_state
++from ...parsing import DEFINITION_VALUES, ContentType, Mosaic, MosaicNature, WatermarkField, shows_uncensored
+ from ...utils.model import create_partial_model, to_resp
+ 
+ 
+@@ -35,14 +36,46 @@ def to_media_file_response(media: MediaFile, content_type: ContentType | None =
+     条目类型为无码, 或这一份带无码标记. ``content_type`` 为 None (未绑定条目) 时只看自身标记.
+     """
+     response = to_resp(MediaFileResponse, media)
++    state = watermark_state(media, content_type)
+     return response.model_copy(
+         update={
+-            "censored": mosaic_nature(media.mosaic, content_type) is MosaicNature.CENSORED,
+-            "uncensored": shows_uncensored(media.mosaic, content_type),
++            "mosaic": effective_mosaic(media),
++            "definition": state.definition,
++            "censored": state.mosaic is MosaicNature.CENSORED,
++            "uncensored": state.mosaic is MosaicNature.UNCENSORED
++            if WatermarkField.MOSAIC in state.protected_fields
++            else shows_uncensored(media.mosaic, content_type),
+         }
+     )
+ 
+ 
++class MediaWatermarkResponse(WatermarkState):
++    media_id: int
++    definition_options: list[str]
++
++
++class MediaWatermarkUpdateRequest(WatermarkUpdate):
++    """自动仅清除人工设置; 手动按省略字段保留、明确字段更新."""
++
++
++class MediaWatermarkUpdateResponse(MediaWatermarkResponse):
++    changed: bool
++
++
++def to_media_watermark_response(media: MediaFile, content_type: ContentType | None) -> MediaWatermarkResponse:
++    assert media.id is not None
++    state = watermark_state(media, content_type)
++    return MediaWatermarkResponse(
++        media_id=media.id,
++        mode=state.mode,
++        has_subtitle=state.has_subtitle,
++        mosaic=state.mosaic,
++        definition=state.definition,
++        protected_fields=state.protected_fields,
++        definition_options=list(DEFINITION_VALUES),
++    )
++
++
+ class MediaListResponse(BaseModel):
+     items: list[MediaFileResponse]
+     total: int
+diff --git a/src/amane/api/routes/media.py b/src/amane/api/routes/media.py
+index 6b488a1ce7de5c687bd97f3940459f7e16f7a260..7300223878d0352e2671c2fe3f8711939fce3141 100644
+--- a/src/amane/api/routes/media.py
++++ b/src/amane/api/routes/media.py
+@@ -1,12 +1,16 @@
+ from collections.abc import Sequence
++from pathlib import Path
+ from typing import TYPE_CHECKING, Annotated, cast
+ 
+ import structlog
+ from fastapi import APIRouter, HTTPException, Query, Response
+ 
+ from ...db.models import MediaFile, MediaFileStatus, MediaSortField, SortOrder
+-from ...parsing import DEFINITION_VALUES, ContentType, Mosaic
+-from ..deps import RepoDep
++from ...db.watermarks import effective_file_info
++from ...library import has_companion_subtitle
++from ...organize.watermark_outputs import capture_output_baseline
++from ...parsing import DEFINITION_VALUES, ContentType, Mosaic, WatermarkMode, parse_file_info
++from ..deps import RepoDep, RuntimeDep
+ from ..models import (
+     MediaBatchDeleteRequest,
+     MediaBatchDeleteResponse,
+@@ -15,8 +19,15 @@ from ..models import (
+     MediaListResponse,
+     to_media_file_response,
+ )
++from ..models.media import (
++    MediaWatermarkResponse,
++    MediaWatermarkUpdateRequest,
++    MediaWatermarkUpdateResponse,
++    to_media_watermark_response,
++)
+ 
+ if TYPE_CHECKING:
++    from ...app.runtime import AppRuntime
+     from ...db.repo_types import MediaFileUpdates
+     from ...db.repository import Repository
+ 
+@@ -102,6 +113,72 @@ async def get_media(media_id: int, repo: RepoDep) -> MediaFileResponse:
+     return (await _phase_responses(repo, [media]))[0]
+ 
+ 
++@router.get("/{media_id}/watermarks", summary="读取水印设置")
++async def get_media_watermarks(media_id: int, repo: RepoDep) -> MediaWatermarkResponse:
++    media = await repo.get_media_file(media_id)
++    if media is None:
++        raise HTTPException(status_code=404, detail="媒体文件不存在")
++    metadata = await repo.get_metadata(media.metadata_id) if media.metadata_id is not None else None
++    return to_media_watermark_response(media, metadata.content_type if metadata is not None else None)
++
++
++@router.patch("/{media_id}/watermarks", summary="保存水印设置")
++async def update_media_watermarks(
++    media_id: int, req: MediaWatermarkUpdateRequest, repo: RepoDep, runtime: RuntimeDep
++) -> MediaWatermarkUpdateResponse:
++    media = await repo.get_media_file(media_id)
++    if media is None:
++        raise HTTPException(status_code=404, detail="媒体文件不存在")
++    lock = await runtime.library_locks.get(media.library_id)
++    async with lock:
++        return await _save_media_watermarks(media_id, req, repo, runtime)
++
++
++async def _save_media_watermarks(
++    media_id: int,
++    req: MediaWatermarkUpdateRequest,
++    repo: Repository,
++    runtime: AppRuntime,
++) -> MediaWatermarkUpdateResponse:
++    media = await repo.get_media_file(media_id)
++    if media is None:
++        raise HTTPException(status_code=404, detail="媒体文件不存在")
++    library = await repo.get_library(media.library_id)
++    metadata = await repo.get_metadata(media.metadata_id) if media.metadata_id is not None else None
++    baseline: str | None = None
++    if (
++        media.organized_outputs is None
++        and library is not None
++        and metadata is not None
++        and (req.mode is WatermarkMode.MANUAL or media.watermark_mode is WatermarkMode.MANUAL)
++    ):
++        actor_genders = {actor.name: actor.gender for actor in await repo.get_actors_by_names(metadata.actors)}
++        try:
++            baseline = await capture_output_baseline(
++                library,
++                metadata,
++                Path(media.path),
++                effective_file_info(
++                    media, parse_file_info(media.path, has_external_subtitle=media.has_external_subtitle)
++                ),
++                safe_dirs=runtime.safe_dirs,
++                actor_genders=actor_genders,
++            )
++        except (OSError, ValueError) as exc:
++            # 旧模板或旧路径不可用时仍可保存设置; 整理阶段负责报告输出限制.
++            logger.warning("watermark output baseline unavailable", media_id=media_id, error=str(exc))
++    external: bool | None = None
++    if req.mode is WatermarkMode.AUTO and library is not None:
++        external = await has_companion_subtitle(Path(media.path), library.subtitle_extensions or [])
++    result = await repo.update_media_watermarks(
++        media_id, req, has_external_subtitle=external, organized_outputs=baseline
++    )
++    if result is None:
++        raise HTTPException(status_code=404, detail="媒体文件不存在")
++    response = to_media_watermark_response(result.media, metadata.content_type if metadata is not None else None)
++    return MediaWatermarkUpdateResponse(**response.model_dump(), changed=result.changed)
++
++
+ @router.patch("/{media_id}")
+ async def update_media(media_id: int, req: MediaFileUpdateRequest, repo: RepoDep) -> MediaFileResponse:
+     updates = cast("MediaFileUpdates", req.model_dump(exclude_unset=True))
+diff --git "a/src/amane/db/migrations/versions/2016f33e04dd_\344\277\235\345\255\230\345\252\222\344\275\223\346\226\207\344\273\266\346\260\264\345\215\260\350\256\276\347\275\256.py" "b/src/amane/db/migrations/versions/2016f33e04dd_\344\277\235\345\255\230\345\252\222\344\275\223\346\226\207\344\273\266\346\260\264\345\215\260\350\256\276\347\275\256.py"
+new file mode 100644
+index 0000000000000000000000000000000000000000..0139c516e13bd7298b61a9c739d03e46a06574dc
+--- /dev/null
++++ "b/src/amane/db/migrations/versions/2016f33e04dd_\344\277\235\345\255\230\345\252\222\344\275\223\346\226\207\344\273\266\346\260\264\345\215\260\350\256\276\347\275\256.py"
+@@ -0,0 +1,48 @@
++"""保存媒体文件水印设置
++
++迁移版本: 2016f33e04dd
++父版本: 9054ebacea29
++"""
++
++from collections.abc import Sequence
++
++import sqlalchemy as sa
++from alembic import op
++
++# Alembic 使用的迁移标识.
++revision: str = "2016f33e04dd"
++down_revision: str | None = "9054ebacea29"
++branch_labels: str | Sequence[str] | None = None
++depends_on: str | Sequence[str] | None = None
++
++
++def upgrade() -> None:
++    op.add_column(
++        "media_files",
++        sa.Column(
++            "watermark_mode", sa.Enum("AUTO", "MANUAL", name="watermarkmode"), nullable=False, server_default="AUTO"
++        ),
++    )
++    op.add_column("media_files", sa.Column("watermark_subtitle", sa.Boolean(), nullable=True))
++    op.add_column(
++        "media_files",
++        sa.Column(
++            "watermark_mosaic",
++            sa.Enum("CENSORED", "UNCENSORED", "CRACKED", "LEAKED", name="mosaicnature"),
++            nullable=True,
++        ),
++    )
++    op.add_column("media_files", sa.Column("watermark_definition", sa.String(), nullable=True))
++    op.add_column(
++        "media_files", sa.Column("watermark_definition_locked", sa.Boolean(), nullable=False, server_default=sa.false())
++    )
++    op.add_column("media_files", sa.Column("organized_outputs", sa.Text(), nullable=True))
++
++
++def downgrade() -> None:
++    op.drop_column("media_files", "organized_outputs")
++    op.drop_column("media_files", "watermark_definition_locked")
++    op.drop_column("media_files", "watermark_definition")
++    op.drop_column("media_files", "watermark_mosaic")
++    op.drop_column("media_files", "watermark_subtitle")
++    op.drop_column("media_files", "watermark_mode")
+diff --git a/src/amane/db/models.py b/src/amane/db/models.py
+index ac3ab2c58692787d69207eda4c74ce36b58e266a..04568a1414b03836f2d0329c54bf18b134ceaef8 100644
+--- a/src/amane/db/models.py
++++ b/src/amane/db/models.py
+@@ -2,7 +2,7 @@ from datetime import UTC, datetime
+ from enum import StrEnum
+ from typing import Any, NoReturn
+ 
+-from sqlalchemy import Boolean, Column, Index, String, Text, UniqueConstraint, exists, func, or_, text
++from sqlalchemy import Boolean, Column, Index, String, Text, UniqueConstraint, and_, exists, func, or_, text
+ from sqlalchemy.sql.elements import ColumnElement
+ from sqlmodel import JSON, Field, SQLModel, col, select
+ 
+@@ -17,7 +17,7 @@ from ..library import (
+ )
+ from ..organize.path_templates import VIDEO_TEMPLATE_DEFAULT, PathTemplate
+ from ..organize.strm_content import StrmContentTemplate
+-from ..parsing import VR_TAGS, ContentType, Mosaic, is_vr
++from ..parsing import VR_TAGS, ContentType, Mosaic, MosaicNature, WatermarkMode, is_vr
+ 
+ 
+ def _utcnow() -> datetime:
+@@ -199,6 +199,14 @@ class MediaFile(SQLModel, table=True):
+     #: 作为 `parse_file_info` 的 `has_external_subtitle` 入参并入文件相位.
+     has_external_subtitle: bool = Field(default=False, index=True)
+     definition: str | None = Field(default=None, index=True)
++    # 原识别列继续随路径和扫描更新; 人工设置独立保存, 避免取消项被重新识别覆盖.
++    watermark_mode: WatermarkMode = Field(default=WatermarkMode.AUTO)
++    watermark_subtitle: bool | None = None
++    watermark_mosaic: MosaicNature | None = None
++    watermark_definition: str | None = None
++    watermark_definition_locked: bool = False
++    # 最近一次整理的输出位置; JSON 结构由 organize.watermark_outputs 定义.
++    organized_outputs: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+     metadata_id: int | None = Field(default=None, foreign_key="metadata.id", index=True)
+     library_id: int = Field(foreign_key="libraries.id", index=True)
+     created_at: datetime = Field(default_factory=_utcnow)
+@@ -206,16 +214,57 @@ class MediaFile(SQLModel, table=True):
+ 
+     @_HasSubtitleProperty
+     def has_subtitle(self) -> bool:
+-        """文件名标记与同目录字幕命中任一即真."""
++        """人工选择优先, 自动模式合并文件名与同目录字幕."""
++        if self.watermark_mode is WatermarkMode.MANUAL and self.watermark_subtitle is not None:
++            return self.watermark_subtitle
+         return self.has_subtitle_in_name or self.has_external_subtitle
+ 
+ 
+ def has_subtitle_predicate() -> ColumnElement[bool]:
+-    """`MediaFile.has_subtitle` 的 SQL 等价式: 文件名标记或同目录字幕命中.
++    """`MediaFile.has_subtitle` 的 SQL 等价式.
+ 
+     判定中字的查询与筛选一律走这里, 与实例属性口径必须一致.
+     """
+-    return or_(col(MediaFile.has_subtitle_in_name).is_(True), col(MediaFile.has_external_subtitle).is_(True))
++    protected = and_(
++        col(MediaFile.watermark_mode) == WatermarkMode.MANUAL,
++        col(MediaFile.watermark_subtitle).is_not(None),
++    )
++    return or_(
++        and_(protected, col(MediaFile.watermark_subtitle).is_(True)),
++        and_(
++            ~protected,
++            or_(col(MediaFile.has_subtitle_in_name).is_(True), col(MediaFile.has_external_subtitle).is_(True)),
++        ),
++    )
++
++
++def protected_mosaic_predicate() -> ColumnElement[bool]:
++    """本行是否明确指定了人工马赛克性质."""
++    return and_(
++        col(MediaFile.watermark_mode) == WatermarkMode.MANUAL,
++        col(MediaFile.watermark_mosaic).is_not(None),
++    )
++
++
++def media_mosaic_predicate(value: Mosaic) -> ColumnElement[bool]:
++    """文件标记筛选使用人工值, 没有人工值时使用路径投影."""
++    protected = protected_mosaic_predicate()
++    return or_(
++        and_(protected, col(MediaFile.watermark_mosaic).is_(MosaicNature(value))),
++        and_(~protected, col(MediaFile.mosaic).is_(value)),
++    )
++
++
++def media_definition_predicate(value: str) -> ColumnElement[bool]:
++    """明确清空分辨率时不能回退文件名中的分辨率."""
++    protected = and_(
++        col(MediaFile.watermark_mode) == WatermarkMode.MANUAL,
++        col(MediaFile.watermark_definition_locked).is_(True),
++    )
++    return or_(
++        and_(protected, col(MediaFile.watermark_definition) == value),
++        and_(~protected, col(MediaFile.definition) == value),
++    )
+ 
+ 
+ class _VrProperty(property):
+diff --git a/src/amane/db/repo_types.py b/src/amane/db/repo_types.py
+index 3ddf48b88d212d88114ec12501565eac94b5d355..2ac22731c0b08e19edb4d2498eb2b5662ddefedc 100644
+--- a/src/amane/db/repo_types.py
++++ b/src/amane/db/repo_types.py
+@@ -3,13 +3,13 @@ from enum import StrEnum
+ from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict
+ 
+ from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
+-from sqlalchemy import UnaryExpression, asc, desc, exists, func, or_
++from sqlalchemy import UnaryExpression, and_, asc, desc, exists, func, or_
+ from sqlalchemy.sql.elements import ColumnElement
+ from sqlmodel import col, select
+ from sqlmodel.sql.expression import SelectOfScalar
+ 
+ from ..enums import ActorGender, LibraryAutomation, LibraryIngest, LibraryResource, LinkMode, MoveMode
+-from ..parsing import ContentType, Mosaic
++from ..parsing import ContentType, Mosaic, MosaicNature, WatermarkMode
+ from ..utils.dates import normalize_calendar_date
+ from .models import (
+     ActorSortField,
+@@ -24,6 +24,9 @@ from .models import (
+     Task,
+     TaskSortField,
+     has_subtitle_predicate,
++    media_definition_predicate,
++    media_mosaic_predicate,
++    protected_mosaic_predicate,
+ )
+ 
+ if TYPE_CHECKING:
+@@ -118,7 +121,11 @@ def _media_file_uncensored_predicate() -> ColumnElement[bool]:
+     entry_uncensored = exists().where(
+         col(Metadata.id) == col(MediaFile.metadata_id), col(Metadata.content_type) == ContentType.UNCENSORED
+     )
+-    return or_(col(MediaFile.mosaic).is_(Mosaic.UNCENSORED), entry_uncensored)
++    protected = protected_mosaic_predicate()
++    return or_(
++        and_(protected, col(MediaFile.watermark_mosaic).is_(MosaicNature.UNCENSORED)),
++        and_(~protected, or_(col(MediaFile.mosaic).is_(Mosaic.UNCENSORED), entry_uncensored)),
++    )
+ 
+ 
+ def _apply_media_phase_filters(
+@@ -135,12 +142,12 @@ def _apply_media_phase_filters(
+         flag = has_subtitle_predicate()
+         stmt = stmt.where(flag if has_subtitle else ~flag)
+     if mosaic is not None:
+-        stmt = stmt.where(col(MediaFile.mosaic) == mosaic)
++        stmt = stmt.where(media_mosaic_predicate(mosaic))
+     if uncensored is not None:
+         flag = _media_file_uncensored_predicate()
+         stmt = stmt.where(flag if uncensored else ~flag)
+     if definition is not None:
+-        stmt = stmt.where(col(MediaFile.definition) == definition)
++        stmt = stmt.where(media_definition_predicate(definition))
+     if content_type is not None:
+         stmt = stmt.where(_media_file_entry_type_predicate(content_type))
+     return stmt
+@@ -152,9 +159,21 @@ def _metadata_linked_file_exists(*extra: ColumnElement[bool]) -> ColumnElement[b
+ 
+ def _metadata_uncensored_predicate() -> ColumnElement[bool]:
+     """条目无码: 类型为无码, 或存在带无码标记的文件. 没有挂载文件也成立."""
++    protected = protected_mosaic_predicate()
+     return or_(
+-        col(Metadata.content_type) == ContentType.UNCENSORED,
+-        _metadata_linked_file_exists(col(MediaFile.mosaic) == Mosaic.UNCENSORED),
++        and_(col(Metadata.content_type) == ContentType.UNCENSORED, ~_metadata_linked_file_exists()),
++        _metadata_linked_file_exists(
++            or_(
++                and_(protected, col(MediaFile.watermark_mosaic).is_(MosaicNature.UNCENSORED)),
++                and_(
++                    ~protected,
++                    or_(
++                        col(Metadata.content_type) == ContentType.UNCENSORED,
++                        col(MediaFile.mosaic).is_(Mosaic.UNCENSORED),
++                    ),
++                ),
++            )
++        ),
+     )
+ 
+ 
+@@ -310,6 +329,12 @@ class MediaFileUpdates(TypedDict, total=False):
+     status: MediaFileStatus
+     metadata_id: int | None
+     has_external_subtitle: bool
++    watermark_mode: WatermarkMode
++    watermark_subtitle: bool | None
++    watermark_mosaic: MosaicNature | None
++    watermark_definition: str | None
++    watermark_definition_locked: bool
++    organized_outputs: str | None
+ 
+ 
+ class LibraryUpdates(TypedDict, total=False):
+diff --git a/src/amane/db/repos/media.py b/src/amane/db/repos/media.py
+index 757c84a23c2d94951cdbfacb9680e96be3672c95..49cabcc611b30a3fd22406250e7d6c398dc7d936 100644
+--- a/src/amane/db/repos/media.py
++++ b/src/amane/db/repos/media.py
+@@ -7,11 +7,29 @@ from sqlalchemy.sql.functions import count
+ from sqlmodel import col, select
+ from sqlmodel.sql.expression import SelectOfScalar
+ 
+-from ...parsing import ContentType, FilePhase, FilePhaseSummary, Mosaic, file_phase_from_path, summarize_file_phases
++from ...parsing import (
++    ContentType,
++    FilePhase,
++    FilePhaseSummary,
++    Mosaic,
++    WatermarkField,
++    WatermarkMode,
++    file_phase_from_path,
++    summarize_file_phases,
++)
+ from ...utils.collections import unique_ids
+ from ...utils.path import nfc_path
+ from ..models import MediaFile, MediaFileStatus, MediaSortField, Metadata, SortOrder
+ from ..repo_types import _MEDIA_SORT_COLUMNS, MediaFileUpdates, _apply_media_phase_filters, _order_clause, _utcnow
++from ..watermarks import (
++    WatermarkUpdate,
++    WatermarkUpdateResult,
++    apply_watermark_update,
++    effective_definition,
++    effective_mosaic,
++    protected_watermark_fields,
++    watermark_state,
++)
+ from .base import RepositoryMixinBase, chunks
+ 
+ 
+@@ -29,11 +47,14 @@ def _apply_path_phase(media: MediaFile) -> None:
+ 
+ def file_phase_of(media: MediaFile) -> FilePhase:
+     """从已落库列组装, 不再解析 path. 中字取文件名标记与同目录字幕的并集."""
+-    return FilePhase(
+-        mosaic=media.mosaic,
++    phase = FilePhase(
++        mosaic=effective_mosaic(media),
+         has_subtitle=media.has_subtitle,
+-        definition=media.definition,
++        definition=effective_definition(media),
+     )
++    if WatermarkField.MOSAIC in protected_watermark_fields(media) and media.watermark_mosaic is not None:
++        phase["mosaic_override"] = media.watermark_mosaic
++    return phase
+ 
+ 
+ class MetadataFilesSummary(NamedTuple):
+@@ -210,12 +231,65 @@ class MediaRepoMixin(RepositoryMixinBase):
+                 media.metadata_id = updates["metadata_id"]
+             if "has_external_subtitle" in updates:
+                 media.has_external_subtitle = updates["has_external_subtitle"]
++            if "watermark_mode" in updates:
++                media.watermark_mode = updates["watermark_mode"]
++            if "watermark_subtitle" in updates:
++                media.watermark_subtitle = updates["watermark_subtitle"]
++            if "watermark_mosaic" in updates:
++                media.watermark_mosaic = updates["watermark_mosaic"]
++            if "watermark_definition" in updates:
++                media.watermark_definition = updates["watermark_definition"]
++            if "watermark_definition_locked" in updates:
++                media.watermark_definition_locked = updates["watermark_definition_locked"]
++            if "organized_outputs" in updates:
++                media.organized_outputs = updates["organized_outputs"]
+             media.updated_at = _utcnow()
+             session.add(media)
+             await session.commit()
+             await session.refresh(media)
+             return media
+ 
++    async def update_media_watermarks(
++        self,
++        media_id: int,
++        update: WatermarkUpdate,
++        *,
++        has_external_subtitle: bool | None = None,
++        organized_outputs: str | None = None,
++    ) -> WatermarkUpdateResult | None:
++        """水印设置与其模式在同一事务保存; 相同设置不刷新更新时间."""
++        async with self._session() as session:
++            connection = await session.connection()
++            await connection.exec_driver_sql("BEGIN IMMEDIATE")
++            media = await session.get(MediaFile, media_id)
++            if media is None:
++                return None
++            metadata = await session.get(Metadata, media.metadata_id) if media.metadata_id is not None else None
++            content_type = metadata.content_type if metadata is not None else None
++            previous = watermark_state(media, content_type)
++            previous_auto = (media.mosaic, media.definition, media.has_subtitle_in_name, media.has_external_subtitle)
++            apply_watermark_update(media, update, content_type)
++            if update.mode is WatermarkMode.AUTO:
++                _apply_path_phase(media)
++                if has_external_subtitle is not None:
++                    media.has_external_subtitle = has_external_subtitle
++            changed = previous != watermark_state(media, content_type)
++            auto_changed = previous_auto != (
++                media.mosaic,
++                media.definition,
++                media.has_subtitle_in_name,
++                media.has_external_subtitle,
++            )
++            captured = organized_outputs is not None and media.organized_outputs is None
++            if captured:
++                media.organized_outputs = organized_outputs
++            if changed or auto_changed or captured:
++                media.updated_at = _utcnow()
++                session.add(media)
++                await session.commit()
++                await session.refresh(media)
++            return WatermarkUpdateResult(media=media, changed=changed)
++
+     async def delete_media_file(self, media_id: int) -> bool:
+         async with self._session() as session:
+             media = await session.get(MediaFile, media_id)
+diff --git a/src/amane/db/repos/metadata.py b/src/amane/db/repos/metadata.py
+index d1132eefd3d3e392f045c1d2a2e0c786971b4c99..449df6b577a3997dfd9dd07bea2ef0eb4e4a2e60 100644
+--- a/src/amane/db/repos/metadata.py
++++ b/src/amane/db/repos/metadata.py
+@@ -14,7 +14,6 @@ from ...parsing import ContentType, Mosaic, infer_content_type
+ from ...utils.collections import unique_ids
+ from ...utils.text import normalize_long_text
+ from ..models import (
+-    MediaFile,
+     Metadata,
+     MetadataActor,
+     MetadataDirector,
+@@ -26,6 +25,8 @@ from ..models import (
+     SortOrder,
+     Studio,
+     has_subtitle_predicate,
++    media_definition_predicate,
++    media_mosaic_predicate,
+     metadata_number_predicate,
+     metadata_vr_predicate,
+ )
+@@ -202,12 +203,12 @@ class MetadataRepoMixin(RepositoryMixinBase):
+         elif has_subtitle is False:
+             conditions.append(~_metadata_linked_file_exists(has_subtitle_predicate()))
+         if mosaic is not None:
+-            conditions.append(_metadata_linked_file_exists(col(MediaFile.mosaic) == mosaic))
++            conditions.append(_metadata_linked_file_exists(media_mosaic_predicate(mosaic)))
+         if uncensored is not None:
+             flag = _metadata_uncensored_predicate()
+             conditions.append(flag if uncensored else ~flag)
+         if definition is not None:
+-            conditions.append(_metadata_linked_file_exists(col(MediaFile.definition) == definition))
++            conditions.append(_metadata_linked_file_exists(media_definition_predicate(definition)))
+         if content_type is not None:
+             conditions.append(col(Metadata.content_type) == content_type)
+         if updated_before is not None:
+diff --git a/src/amane/db/watermarks.py b/src/amane/db/watermarks.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..4dade740a3bee643b430d70897ebef663c61293b
+--- /dev/null
++++ b/src/amane/db/watermarks.py
+@@ -0,0 +1,135 @@
++"""媒体文件的人工水印设置与统一生效值."""
++
++from dataclasses import replace
++from typing import Self
++
++from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
++
++from ..parsing import (
++    DEFINITION_VALUES,
++    ContentType,
++    FileInfo,
++    Mosaic,
++    MosaicNature,
++    WatermarkField,
++    WatermarkMode,
++    mosaic_nature,
++)
++from .models import MediaFile
++
++
++class WatermarkUpdate(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++
++    mode: WatermarkMode
++    has_subtitle: StrictBool | None = None
++    mosaic: MosaicNature | None = None
++    definition: str | None = None
++
++    @field_validator("definition")
++    @classmethod
++    def known_definition(cls, value: str | None) -> str | None:
++        if value is not None and value not in DEFINITION_VALUES:
++            raise ValueError(f"未知分辨率: {value}")
++        return value
++
++    @model_validator(mode="after")
++    def validate_fields(self) -> Self:
++        changed_fields = self.model_fields_set - {"mode"}
++        if self.mode is WatermarkMode.AUTO and changed_fields:
++            raise ValueError("自动模式不能指定人工水印字段")
++        if "has_subtitle" in changed_fields and self.has_subtitle is None:
++            raise ValueError("中字必须明确选择有或无")
++        if "mosaic" in changed_fields and self.mosaic is None:
++            raise ValueError("马赛克性质必须选择有码、无码、破解或流出")
++        return self
++
++
++class WatermarkState(BaseModel):
++    mode: WatermarkMode
++    has_subtitle: bool
++    mosaic: MosaicNature | None
++    definition: str | None
++    protected_fields: list[WatermarkField] = Field(default_factory=list)
++
++
++class WatermarkUpdateResult(BaseModel):
++    media: MediaFile
++    changed: bool
++
++
++def protected_watermark_fields(media: MediaFile) -> frozenset[WatermarkField]:
++    if media.watermark_mode is WatermarkMode.AUTO:
++        return frozenset()
++    fields: set[WatermarkField] = set()
++    if media.watermark_subtitle is not None:
++        fields.add(WatermarkField.SUBTITLE)
++    if media.watermark_mosaic is not None:
++        fields.add(WatermarkField.MOSAIC)
++    if media.watermark_definition_locked:
++        fields.add(WatermarkField.DEFINITION)
++    return frozenset(fields)
++
++
++def effective_mosaic(media: MediaFile) -> Mosaic | None:
++    if media.watermark_mode is WatermarkMode.MANUAL and media.watermark_mosaic is not None:
++        if media.watermark_mosaic is MosaicNature.CENSORED:
++            return None
++        return Mosaic(media.watermark_mosaic)
++    return media.mosaic
++
++
++def effective_definition(media: MediaFile) -> str | None:
++    if media.watermark_mode is WatermarkMode.MANUAL and media.watermark_definition_locked:
++        return media.watermark_definition
++    return media.definition
++
++
++def watermark_state(media: MediaFile, content_type: ContentType | None) -> WatermarkState:
++    fields = protected_watermark_fields(media)
++    return WatermarkState(
++        mode=media.watermark_mode,
++        has_subtitle=media.has_subtitle,
++        mosaic=media.watermark_mosaic if WatermarkField.MOSAIC in fields else mosaic_nature(media.mosaic, content_type),
++        definition=effective_definition(media),
++        protected_fields=[field for field in WatermarkField if field in fields],
++    )
++
++
++def effective_file_info(media: MediaFile, parsed: FileInfo) -> FileInfo:
++    """只替换受保护字段; 解析得到的番号、分集及其他上下文继续沿用."""
++    fields = protected_watermark_fields(media)
++    subtitle = media.watermark_subtitle if WatermarkField.SUBTITLE in fields else None
++    nature = media.watermark_mosaic if WatermarkField.MOSAIC in fields else None
++    mosaic = parsed.mosaic
++    if nature is not None:
++        mosaic = None if nature is MosaicNature.CENSORED else Mosaic(nature)
++    return replace(
++        parsed,
++        has_subtitle_in_name=subtitle if subtitle is not None else parsed.has_subtitle_in_name,
++        has_external_subtitle=False if subtitle is not None else parsed.has_external_subtitle,
++        mosaic=mosaic,
++        mosaic_override=nature,
++        definition=media.watermark_definition if WatermarkField.DEFINITION in fields else parsed.definition,
++        watermark_fields=fields,
++    )
++
++
++def apply_watermark_update(media: MediaFile, update: WatermarkUpdate, content_type: ContentType | None) -> None:
++    """仅保护实际改变的字段; 重复提交当前值不扩大保护范围."""
++    previous = watermark_state(media, content_type)
++    media.watermark_mode = update.mode
++    if update.mode is WatermarkMode.AUTO:
++        media.watermark_subtitle = None
++        media.watermark_mosaic = None
++        media.watermark_definition = None
++        media.watermark_definition_locked = False
++        return
++    fields = update.model_fields_set
++    if "has_subtitle" in fields and update.has_subtitle != previous.has_subtitle:
++        media.watermark_subtitle = update.has_subtitle
++    if "mosaic" in fields and update.mosaic != previous.mosaic:
++        media.watermark_mosaic = update.mosaic
++    if "definition" in fields and update.definition != previous.definition:
++        media.watermark_definition = update.definition
++        media.watermark_definition_locked = True
+diff --git a/src/amane/handlers/file.py b/src/amane/handlers/file.py
+index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3306789f5 100644
+--- a/src/amane/handlers/file.py
++++ b/src/amane/handlers/file.py
+@@ -11,6 +11,7 @@ from PIL import Image
+ from ..config import HotSettings, WatermarkConfig
+ from ..db.models import Library, MediaFile
+ from ..db.repo_types import MediaFileUpdates
++from ..db.watermarks import effective_file_info
+ from ..enums import ActorGender, LibraryResource, LinkMode
+ from ..library import MEDIA_EXTENSIONS, LibraryFileKind, LibraryScan, ancestor_dirs, prune_empty_dirs
+ from ..library.rules import is_in_trash
+@@ -36,9 +37,18 @@ from ..organize import (
+     video_dest,
+ )
+ from ..organize.link import create_video_link
+-from ..parsing import ContentType, FileInfo, parse_file_info
++from ..organize.watermark_outputs import (
++    OutputPath,
++    capture_output_baseline,
++    finish_output_snapshot,
++    planned_outputs,
++    read_output_snapshot,
++    retained_subtitle_sources,
++    shared_output_protection,
++)
++from ..parsing import ContentType, FileInfo, WatermarkMode, parse_file_info
+ from ..utils.path import existing_disk_path as existing_disk_path_sync
+-from ..utils.path import is_descendant, nfc_path, path_is_under
++from ..utils.path import is_descendant, nfc_path, path_is_under, path_key
+ from ..utils.threads import existing_disk_path, in_thread, path_is_dir
+ from ._common import LibraryTaskLocks, refresh_external_subtitle
+ from .models import (
+@@ -69,6 +79,7 @@ class FileOperationsResult:
+     """CONFLICT 时被占用的目标路径."""
+     subtitle_conflicts: list[SubtitleConflict] = field(default_factory=list)
+     error: str | None = None
++    outputs: list[OutputPath] = field(default_factory=list)
+ 
+ 
+ async def execute_file_operations(
+@@ -87,6 +98,9 @@ async def execute_file_operations(
+     safe_dirs: Sequence[Path] | None = (),
+     watermark_dir: Path | None = None,
+     actor_genders: dict[str, ActorGender] | None = None,
++    track_outputs: bool = False,
++    required_images: frozenset[str] = frozenset(),
++    saved_subtitles: Sequence[Path] = (),
+ ) -> FileOperationsResult:
+     """``file_info`` 由渲染路径的那一次 ``parse_file_info`` 产出, 必须带上 ``has_external_subtitle``.
+ 
+@@ -110,25 +124,38 @@ async def execute_file_operations(
+         return FileOperationsResult(outcome=PlaceOutcome.FAILED, error=check.error)
+ 
+     # 下载图片; 水印打在库路径副本上, 不能修改 Resource 原图.
++    outputs: list[OutputPath] = []
+     if web_client and download_images:
+         logger.debug("downloading images via store", number=metadata.number)
+         kinds = set(copy_resources) if copy_resources is not None else set(LibraryResource)
+-        await _download_images_via_store(
+-            metadata,
+-            resource_store,
+-            web_client,
+-            paths,
+-            config,
+-            kinds,
+-            file_info=file_info,
+-            content_type=metadata.content_type,
+-            watermark_dir=watermark_dir,
+-        )
++        try:
++            outputs = await _download_images_via_store(
++                metadata,
++                resource_store,
++                web_client,
++                paths,
++                config,
++                kinds,
++                file_info=file_info,
++                content_type=metadata.content_type,
++                watermark_dir=watermark_dir,
++                fresh_only=track_outputs,
++                required_images=required_images,
++            )
++        except (OSError, ValueError) as exc:
++            if not track_outputs:
++                raise
++            return FileOperationsResult(outcome=PlaceOutcome.FAILED, error=str(exc))
+ 
+     # 发现字幕: 必须在视频移动前检查同目录.
+     subtitles: list[Path] = []
+     if library is not None:
+         subtitles = await discover_subtitles(source_path, library.subtitle_extensions, file_info)
++        known = {path_key(path) for path in subtitles}
++        extensions = {extension.lower() for extension in library.subtitle_extensions}
++        subtitles.extend(
++            path for path in saved_subtitles if path_key(path) not in known and path.suffix.lower() in extensions
++        )
+ 
+     org_result = await execute_organize(
+         source=source_path,
+@@ -138,7 +165,7 @@ async def execute_file_operations(
+     )
+ 
+     if org_result.outcome is PlaceOutcome.CONFLICT:
+-        return FileOperationsResult(outcome=PlaceOutcome.CONFLICT, conflict_target=org_result.dest)
++        return FileOperationsResult(outcome=PlaceOutcome.CONFLICT, conflict_target=org_result.dest, outputs=outputs)
+ 
+     # 写链接; 失败仍带 dest, 以便回写 MediaFile.path.
+     if org_result.outcome is PlaceOutcome.PLACED and org_result.dest and paths.link is not None:
+@@ -157,19 +184,31 @@ async def execute_file_operations(
+                     actor_genders=actor_genders,
+                 )
+             except ValueError as e:
+-                return FileOperationsResult(outcome=PlaceOutcome.FAILED, dest=org_result.dest, error=str(e))
++                return FileOperationsResult(
++                    outcome=PlaceOutcome.FAILED, dest=org_result.dest, error=str(e), outputs=outputs
++                )
+         link_result = await create_video_link(org_result.dest, paths.link, mode, content=strm_content)
+         if link_result.outcome is not PlaceOutcome.PLACED:
+-            return FileOperationsResult(outcome=PlaceOutcome.FAILED, dest=org_result.dest, error=link_result.error)
++            return FileOperationsResult(
++                outcome=PlaceOutcome.FAILED, dest=org_result.dest, error=link_result.error, outputs=outputs
++            )
++        outputs.append(OutputPath(kind="link", path=paths.link))
+ 
+     # 写入 NFO.
+     if org_result.outcome is PlaceOutcome.PLACED and org_result.dest and write_nfo:
+-        await write_nfo_file(metadata, paths.nfo, file_info=file_info)
++        written = await write_nfo_file(metadata, paths.nfo, file_info=file_info)
++        if not written and track_outputs:
++            return FileOperationsResult(
++                outcome=PlaceOutcome.FAILED, dest=org_result.dest, error=f"NFO 写入失败: {paths.nfo}", outputs=outputs
++            )
++        if written:
++            outputs.append(OutputPath(kind="nfo", path=paths.nfo))
+         logger.info("NFO 已写入", number=metadata.number, target_path=str(paths.nfo))
+ 
+     # 字幕按模板落到 video_dest 侧.
+     subtitle_conflicts: list[SubtitleConflict] = []
+     if org_result.outcome is PlaceOutcome.PLACED and org_result.dest and library is not None and subtitles:
++        placed_subtitles: list[Path] = []
+         subtitle_conflicts = await place_subtitles(
+             subtitles,
+             video_source=source_path,
+@@ -182,15 +221,22 @@ async def execute_file_operations(
+             link_dir=paths.link.parent if paths.link is not None else None,
+             link_name=paths.link.stem if paths.link is not None else None,
+             actor_genders=actor_genders,
++            placed_paths=placed_subtitles if track_outputs else None,
++        )
++        original_subtitles = {path_key(path) for path in subtitles} - {path_key(path) for path in saved_subtitles}
++        outputs.extend(
++            OutputPath(kind="subtitle", path=path)
++            for path in placed_subtitles
++            if path_key(path) not in original_subtitles
+         )
+ 
+     if org_result.outcome is PlaceOutcome.PLACED:
+         logger.debug("file operations done", number=metadata.number, dest=str(org_result.dest), mode=str(move_mode))
+         return FileOperationsResult(
+-            outcome=PlaceOutcome.PLACED, dest=org_result.dest, subtitle_conflicts=subtitle_conflicts
++            outcome=PlaceOutcome.PLACED, dest=org_result.dest, subtitle_conflicts=subtitle_conflicts, outputs=outputs
+         )
+     logger.debug("file operations failed", number=metadata.number, error=org_result.error)
+-    return FileOperationsResult(outcome=PlaceOutcome.FAILED, error=org_result.error)
++    return FileOperationsResult(outcome=PlaceOutcome.FAILED, error=org_result.error, outputs=outputs)
+ 
+ 
+ async def apply_file_operations(
+@@ -220,7 +266,8 @@ async def apply_file_operations(
+ 
+     # 渲染路径后执行落盘.
+     ext = Path(media_file.path).suffix.lstrip(".")
+-    file_info = parse_file_info(media_file.path, has_external_subtitle=media_file.has_external_subtitle)
++    parsed = parse_file_info(media_file.path, has_external_subtitle=media_file.has_external_subtitle)
++    file_info = effective_file_info(media_file, parsed)
+     actor_genders = {a.name: a.gender for a in await repo.get_actors_by_names(metadata.actors)}
+     paths = resolve_paths(
+         library,
+@@ -231,7 +278,35 @@ async def apply_file_operations(
+         safe_dirs=safe_dirs,
+         actor_genders=actor_genders,
+     )
+-    return await execute_file_operations(
++    tracking = media_file.watermark_mode is WatermarkMode.MANUAL or media_file.organized_outputs is not None
++    previous = read_output_snapshot(media_file.organized_outputs, metadata.number)
++    kinds = list(copy_resources) if copy_resources is not None else list(LibraryResource)
++    if tracking and media_file.organized_outputs is None:
++        baseline = await capture_output_baseline(
++            library,
++            metadata,
++            Path(media_file.path),
++            parsed,
++            safe_dirs=safe_dirs,
++            actor_genders=actor_genders,
++        )
++        previous = read_output_snapshot(baseline, metadata.number)
++        await repo.update_media_file(media_file_id, organized_outputs=baseline)
++    protection = await shared_output_protection(repo, media_file, metadata, safe_dirs=safe_dirs) if tracking else None
++    saved_subtitles: list[Path] = []
++    if protection is not None:
++        # 共用固定文件名时无法表示不同版本的水印, 必须由路径模板区分后再整理.
++        shared = [
++            output.path
++            for output in planned_outputs(paths, write_nfo=write_nfo, kinds=kinds)
++            if protection.contains(output.path)
++        ]
++        if shared:
++            return FileOperationsResult(
++                outcome=PlaceOutcome.FAILED, error=f"多个媒体文件共用整理目标，请在模板中区分版本: {shared[0]}"
++            )
++        saved_subtitles = await retained_subtitle_sources(previous, Path(library.path), safe_dirs, protection)
++    result = await execute_file_operations(
+         media_file,
+         metadata,
+         paths,
+@@ -247,7 +322,24 @@ async def apply_file_operations(
+         safe_dirs=safe_dirs,
+         watermark_dir=watermark_dir,
+         actor_genders=actor_genders,
++        track_outputs=tracking,
++        required_images=frozenset(output.kind for output in previous.outputs),
++        saved_subtitles=saved_subtitles,
+     )
++    if tracking and protection is not None:
++        # 索引中的视频和 STRM 即使与旧产物路径相同也不能删除.
++        indexed = await repo.get_valid(str(output.path) for output in previous.outputs)
++        protection.paths.update(path_key(row.path) for row in indexed)
++        snapshot = await finish_output_snapshot(
++            previous,
++            result.outputs,
++            library_root=Path(library.path),
++            safe_dirs=safe_dirs,
++            protection=protection,
++            success=result.outcome is PlaceOutcome.PLACED,
++        )
++        await repo.update_media_file(media_file_id, organized_outputs=snapshot)
++    return result
+ 
+ 
+ async def commit_organized_media_file(
+@@ -284,6 +376,15 @@ async def commit_organized_media_file(
+         occupant_updates["oshash"] = media.oshash
+     if occupant.number is None and media.number is not None:
+         occupant_updates["number"] = media.number
++    latest = await repo.get_media_file(media.id)
++    if latest is not None and (latest.watermark_mode is WatermarkMode.MANUAL or latest.organized_outputs is not None):
++        occupant_updates["watermark_mode"] = latest.watermark_mode
++        occupant_updates["watermark_subtitle"] = latest.watermark_subtitle
++        occupant_updates["watermark_mosaic"] = latest.watermark_mosaic
++        occupant_updates["watermark_definition"] = latest.watermark_definition
++        occupant_updates["watermark_definition_locked"] = latest.watermark_definition_locked
++    if latest is not None and latest.organized_outputs is not None:
++        occupant_updates["organized_outputs"] = latest.organized_outputs
+     if occupant_updates:
+         await repo.update_media_file(occupant.id, **occupant_updates)
+     await repo.delete_media_file(media.id)
+@@ -395,11 +496,13 @@ def _place_library_images(
+     file_info: FileInfo | None,
+     content_type: ContentType,
+     watermark_dir: Path | None,
+-) -> None:
++    fresh_only: bool = False,
++) -> list[OutputPath]:
+     # 复制封面 / 海报 / 预告片 / extrafanart 到库路径, 不判断目标上是否已有产物.
+     # fanart 与封面独立选择，共用资源目录中的封面原图。
+     converted_thumb = False
+     converted_poster = False
++    outputs: list[OutputPath] = []
+     if thumb_local is not None:
+         if LibraryResource.thumb in kinds:
+             paths.thumb.parent.mkdir(parents=True, exist_ok=True)
+@@ -411,9 +514,11 @@ def _place_library_images(
+                 content_type=content_type,
+                 watermark_dir=watermark_dir,
+             )
++            outputs.append(OutputPath(kind="thumb", path=paths.thumb))
+         if LibraryResource.fanart in kinds:
+             paths.fanart.parent.mkdir(parents=True, exist_ok=True)
+             _copy_library_image(thumb_local, paths.fanart, config=config)
++            outputs.append(OutputPath(kind="fanart", path=paths.fanart))
+ 
+     if LibraryResource.poster in kinds:
+         if poster_local is not None:
+@@ -426,29 +531,42 @@ def _place_library_images(
+                 content_type=content_type,
+                 watermark_dir=watermark_dir,
+             )
++            outputs.append(OutputPath(kind="poster", path=paths.poster))
+         elif thumb_local is not None and config is not None and config.scraping.crop_poster:
+             paths.poster.parent.mkdir(parents=True, exist_ok=True)
+-            crop_poster(
++            cropped = crop_poster(
+                 thumb_local,
+                 paths.poster,
+                 poster_ratio=config.scraping.poster_ratio,
+                 jpeg_quality=config.scraping.jpeg_quality,
+             )
++            if cropped:
++                outputs.append(OutputPath(kind="poster", path=paths.poster))
++            elif fresh_only:
++                raise OSError(f"海报裁切失败: {thumb_local}")
+ 
+     if trailer_local is not None and LibraryResource.trailer in kinds:
+         paths.trailer.parent.mkdir(parents=True, exist_ok=True)
+         _copy_into_library(trailer_local, paths.trailer)
++        outputs.append(OutputPath(kind="trailer", path=paths.trailer))
+ 
+     if extrafanart and LibraryResource.extrafanart in kinds:
+         paths.extrafanart_dir.mkdir(parents=True, exist_ok=True)
+         for i, p in enumerate(extrafanart):
+             _copy_library_image(p, paths.extrafanart_dir / f"{i + 1}.jpg", config=config)
++            outputs.append(OutputPath(kind="extrafanart", path=paths.extrafanart_dir / f"{i + 1}.jpg"))
+ 
+     # 叠加水印 (thumb / poster).
+     wm = config.watermark if config is not None else WatermarkConfig()
+     if wm.enabled and file_info is not None:
+         jpeg_quality = config.scraping.jpeg_quality if config is not None else 95
+-        if LibraryResource.thumb in kinds and paths.thumb.exists() and not converted_thumb:
++        written = {output.kind for output in outputs}
++        if (
++            LibraryResource.thumb in kinds
++            and paths.thumb.exists()
++            and not converted_thumb
++            and (not fresh_only or "thumb" in written)
++        ):
+             apply_cover_watermarks_from_info(
+                 paths.thumb,
+                 file_info,
+@@ -458,7 +576,7 @@ def _place_library_images(
+                 scale=wm.scale,
+                 corners=wm.corners,
+             )
+-        if paths.poster.exists() and not converted_poster:
++        if paths.poster.exists() and not converted_poster and (not fresh_only or "poster" in written):
+             apply_cover_watermarks_from_info(
+                 paths.poster,
+                 file_info,
+@@ -468,6 +586,7 @@ def _place_library_images(
+                 scale=wm.scale,
+                 corners=wm.corners,
+             )
++    return outputs
+ 
+ 
+ async def _download_images_via_store(
+@@ -480,7 +599,10 @@ async def _download_images_via_store(
+     file_info: FileInfo | None,
+     content_type: ContentType,
+     watermark_dir: Path | None = None,
+-) -> None:
++    *,
++    fresh_only: bool = False,
++    required_images: frozenset[str] = frozenset(),
++) -> list[OutputPath]:
+     """优先用 Resource 已有文件; 缺失则现场 acquire."""
+     poster_local = None
+     if LibraryResource.poster in kinds:
+@@ -507,7 +629,36 @@ async def _download_images_via_store(
+             priority = list(extrafanart_by_site.keys())
+             extrafanart = await store.acquire_extrafanart(extrafanart_by_site, priority, client)
+ 
+-    await _place_library_images(
++    if fresh_only:
++        missing: list[str] = []
++        if (
++            LibraryResource.poster in kinds
++            and poster_local is None
++            and not (needs_crop and thumb_local is not None)
++            and (metadata.poster_urls or "poster" in required_images)
++        ):
++            missing.append("海报")
++        if (
++            (LibraryResource.thumb in kinds or LibraryResource.fanart in kinds)
++            and thumb_local is None
++            and (metadata.thumb_urls or required_images.intersection({"thumb", "fanart"}))
++        ):
++            missing.append("封面原图")
++        if (
++            LibraryResource.trailer in kinds
++            and trailer_local is None
++            and (metadata.trailer_urls or "trailer" in required_images)
++        ):
++            missing.append("预告片")
++        if (
++            LibraryResource.extrafanart in kinds
++            and not extrafanart
++            and (metadata.extrafanart_urls or "extrafanart" in required_images)
++        ):
++            missing.append("剧照")
++        if missing:
++            raise OSError(f"无法取得整理所需的原始资源: {'、'.join(missing)}；旧产物保留，补齐资源后可重新整理")
++    return await _place_library_images(
+         paths,
+         thumb_local=thumb_local,
+         poster_local=poster_local,
+@@ -518,6 +669,7 @@ async def _download_images_via_store(
+         file_info=file_info,
+         content_type=content_type,
+         watermark_dir=watermark_dir,
++        fresh_only=fresh_only,
+     )
+ 
+ 
+diff --git a/src/amane/media/images.py b/src/amane/media/images.py
+index 0630bc4eee88d04f4894eadf8b90e3be19cd551c..2c79f39e8c33743b2799bee3c915d06915cfa84a 100644
+--- a/src/amane/media/images.py
++++ b/src/amane/media/images.py
+@@ -8,7 +8,7 @@ import structlog
+ from PIL import Image, ImageOps
+ 
+ from ..enums import WatermarkCorner, WatermarkKind
+-from ..parsing import ContentType, FileInfo, Mosaic, shows_uncensored
++from ..parsing import ContentType, FileInfo, Mosaic, file_shows_uncensored
+ from .watermarks import load_stamp
+ 
+ logger = structlog.get_logger()
+@@ -364,11 +364,11 @@ def apply_cover_watermarks_from_info(
+     corners: Mapping[WatermarkKind, WatermarkCorner] | None = None,
+     preserve_details: bool = False,
+ ) -> bool:
+-    """``content_type`` 是条目类型: 无码章与列表角标同用 ``parsing/file_info.py::shows_uncensored`` 的口径."""
++    """水印使用当前文件的有效标记, 人工性质优先于条目类型."""
+     return apply_cover_watermarks(
+         path,
+         has_subtitle=info.has_subtitle,
+-        uncensored=shows_uncensored(info.mosaic, content_type),
++        uncensored=file_shows_uncensored(info, content_type),
+         mosaic=info.mosaic,
+         definition=info.definition,
+         jpeg_quality=jpeg_quality,
+diff --git a/src/amane/media/nfo.py b/src/amane/media/nfo.py
+index 9c3807fe0a7c805d3d7f9aa1658ed5458f9545e2..434828f97216bc89c47ed22bc4fc1d4b18c81727 100644
+--- a/src/amane/media/nfo.py
++++ b/src/amane/media/nfo.py
+@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
+ import aiofiles
+ import structlog
+ 
+-from ..parsing.file_info import MosaicNature, mosaic_nature
++from ..parsing.file_info import DEFINITION_VALUES, MosaicNature, WatermarkField, file_mosaic_nature, mosaic_nature
+ from ..utils.text import strip_illegal_xml_chars
+ 
+ if TYPE_CHECKING:
+@@ -98,15 +98,33 @@ async def write_nfo(metadata: Metadata, nfo_path: Path, *, file_info: FileInfo |
+             code.write(f"  <label>{_escape_xml(metadata.publisher)}</label>\n")
+ 
+         labels = list(metadata.tags)
++        if file_info is not None:
++            # 人工否定必须同时排除来源中的同类标签; 共享的影片标签保持原值.
++            excluded: set[str] = set()
++            if WatermarkField.SUBTITLE in file_info.watermark_fields:
++                excluded.add("中文字幕")
++            if WatermarkField.MOSAIC in file_info.watermark_fields:
++                excluded.update(("有码", "无码", "破解", "流出"))
++            if WatermarkField.DEFINITION in file_info.watermark_fields:
++                excluded.update(DEFINITION_VALUES)
++            labels = [label for label in labels if label not in excluded]
+         if file_info is not None and file_info.has_subtitle:
+             labels.append("中文字幕")
+-        nature = mosaic_nature(file_info.mosaic if file_info is not None else None, metadata.content_type)
++        nature = (
++            file_mosaic_nature(file_info, metadata.content_type)
++            if file_info is not None
++            else mosaic_nature(None, metadata.content_type)
++        )
+         if nature is MosaicNature.CENSORED:
+             labels.append("有码")
+         elif nature is MosaicNature.UNCENSORED:
+             labels.append("无码")
+         elif nature is MosaicNature.CRACKED:
+             labels.append("破解")
++        elif nature is MosaicNature.LEAKED and file_info is not None and file_info.watermark_fields:
++            labels.append("流出")
++        if file_info is not None and file_info.watermark_fields and file_info.definition:
++            labels.append(file_info.definition)
+         labels = list(dict.fromkeys(label for label in labels if label))
+         for element in ("tag", "genre"):
+             for label in labels:
+diff --git a/src/amane/organize/subtitles.py b/src/amane/organize/subtitles.py
+index dea692c8461d5d50c76fae8fe98e450e85821736..d99df04bedaf0f059ee4cc0669a434c537336996 100644
+--- a/src/amane/organize/subtitles.py
++++ b/src/amane/organize/subtitles.py
+@@ -65,6 +65,7 @@ def place_subtitles(
+     link_dir: Path | None = None,
+     link_name: str | None = None,
+     actor_genders: Mapping[str, ActorGender] | None = None,
++    placed_paths: list[Path] | None = None,
+ ) -> list[SubtitleConflict]:
+     """失败与冲突只记日志, 不抛异常; 返回被占用而跳过的字幕源与其目标."""
+     conflicted: list[SubtitleConflict] = []
+@@ -92,7 +93,8 @@ def place_subtitles(
+         )
+         match result.outcome:
+             case PlaceOutcome.PLACED:
+-                pass
++                if placed_paths is not None and result.dest is not None:
++                    placed_paths.append(result.dest)
+             case PlaceOutcome.CONFLICT:
+                 logger.warning("subtitle target occupied", source=str(sub), dest=str(dest))
+                 conflicted.append(SubtitleConflict(source=sub, target=dest))
+diff --git a/src/amane/organize/template.py b/src/amane/organize/template.py
+index 134feeb406b45e2d5610c20d5e144ec86d3f81a6..c3bb768af81aa983a9587a42743a613ee35e838a 100644
+--- a/src/amane/organize/template.py
++++ b/src/amane/organize/template.py
+@@ -15,6 +15,7 @@ from ..parsing.file_info import (
+     DEFINITION_VALUES,
+     MOSAIC_NATURE_VALUES,
+     FileInfo,
++    file_mosaic_nature,
+     mosaic_nature,
+     split_number,
+ )
+@@ -350,7 +351,11 @@ def _build_variables(
+         "sub?": "C" if file_info is not None and file_info.has_subtitle else "",
+         "content_type": str(metadata.content_type),
+         "mosaic?": str(nature)
+-        if (nature := mosaic_nature(file_info.mosaic if file_info else None, metadata.content_type))
++        if (
++            nature := file_mosaic_nature(file_info, metadata.content_type)
++            if file_info
++            else mosaic_nature(None, metadata.content_type)
++        )
+         else "",
+         "def?": file_info.definition if file_info is not None and file_info.definition else "",
+         "video_dir": _UNKNOWN,
+diff --git a/src/amane/organize/watermark_outputs.py b/src/amane/organize/watermark_outputs.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a3f9347c838fceaa8749320754adadd291d14c12
+--- /dev/null
++++ b/src/amane/organize/watermark_outputs.py
+@@ -0,0 +1,314 @@
++"""水印编辑关联的整理产物快照; 只删除已被成功替代且未被外部修改的文件."""
++
++import stat
++from collections.abc import Mapping, Sequence
++from contextlib import suppress
++from pathlib import Path
++from typing import TYPE_CHECKING, Literal
++from xml.etree import ElementTree
++
++import structlog
++from pydantic import BaseModel, Field, ValidationError
++
++from ..db.watermarks import effective_file_info
++from ..enums import ActorGender, LibraryResource
++from ..parsing import FileInfo, parse_file_info
++from ..utils.path import is_descendant, path_is_under, path_key, resolved_path
++from ..utils.threads import in_thread
++from .file import video_dest
++from .path_templates import ResolvedPaths, resolve_paths
++from .subtitles import discover_subtitles
++
++if TYPE_CHECKING:
++    from ..db.models import Library, MediaFile, Metadata
++    from ..db.repository import Repository
++
++logger = structlog.get_logger()
++
++type OutputKind = Literal["nfo", "thumb", "poster", "fanart", "trailer", "extrafanart", "link", "subtitle"]
++
++
++class OutputPath(BaseModel):
++    kind: OutputKind
++    path: Path
++
++
++class OutputStamp(OutputPath):
++    parent: Path
++    size: int
++    modified_ns: int
++    changed_ns: int
++    device: int
++    inode: int
++    symlink: bool
++
++
++class OutputSnapshot(BaseModel):
++    version: Literal[1] = 1
++    number: str
++    outputs: list[OutputStamp] = Field(default_factory=list)
++
++
++class OutputProtection(BaseModel):
++    paths: set[str] = Field(default_factory=set)
++    directories: list[Path] = Field(default_factory=list)
++
++    def contains(self, path: Path) -> bool:
++        return path_key(path) in self.paths or any(
++            path_is_under(path.parent, directory) for directory in self.directories
++        )
++
++
++def read_output_snapshot(value: str | None, number: str) -> OutputSnapshot:
++    if value is not None:
++        try:
++            snapshot = OutputSnapshot.model_validate_json(value)
++            if snapshot.number.casefold() == number.casefold():
++                return snapshot
++        except ValidationError:
++            pass
++        logger.warning("整理产物快照无效", number=number)
++    return OutputSnapshot(number=number)
++
++
++def planned_outputs(paths: ResolvedPaths, *, write_nfo: bool, kinds: Sequence[LibraryResource]) -> list[OutputPath]:
++    outputs: list[OutputPath] = []
++    if write_nfo:
++        outputs.append(OutputPath(kind="nfo", path=paths.nfo))
++    if paths.link is not None:
++        outputs.append(OutputPath(kind="link", path=paths.link))
++    outputs.extend(
++        output
++        for output in (
++            OutputPath(kind="thumb", path=paths.thumb),
++            OutputPath(kind="poster", path=paths.poster),
++            OutputPath(kind="fanart", path=paths.fanart),
++            OutputPath(kind="trailer", path=paths.trailer),
++        )
++        if LibraryResource(output.kind) in kinds
++    )
++    return outputs
++
++
++def _stamp(output: OutputPath) -> OutputStamp | None:
++    try:
++        info = output.path.lstat()
++        symlink = stat.S_ISLNK(info.st_mode)
++        if not stat.S_ISREG(info.st_mode) and not (symlink and output.kind == "link"):
++            return None
++        return OutputStamp(
++            kind=output.kind,
++            path=output.path,
++            parent=resolved_path(output.path.parent),
++            size=info.st_size,
++            modified_ns=info.st_mtime_ns,
++            changed_ns=info.st_ctime_ns,
++            device=info.st_dev,
++            inode=info.st_ino,
++            symlink=symlink,
++        )
++    except OSError:
++        return None
++
++
++def _nfo_matches(path: Path, number: str) -> bool:
++    try:
++        if path.stat().st_size > 2_000_000 or path.is_symlink():
++            return False
++        content = path.read_bytes()
++        if b"<!DOCTYPE" in content.upper() or b"<!ENTITY" in content.upper():
++            return False
++        return ElementTree.fromstring(content).findtext("num", "").casefold() == number.casefold()
++    except OSError, ElementTree.ParseError, ValueError:
++        return False
++
++
++@in_thread
++def capture_output_baseline(
++    library: Library,
++    metadata: Metadata,
++    source: Path,
++    file_info: FileInfo,
++    *,
++    safe_dirs: Sequence[Path] | None,
++    actor_genders: Mapping[str, ActorGender],
++) -> str:
++    """首次编辑前记录旧模板位置; NFO 只验证番号归属, 不用于恢复元数据."""
++    paths = resolve_paths(
++        library,
++        metadata,
++        ext=source.suffix.lstrip("."),
++        source_path=source,
++        file_info=file_info,
++        safe_dirs=safe_dirs,
++        actor_genders=actor_genders,
++    )
++    snapshot = OutputSnapshot(number=metadata.number)
++    dest = video_dest(paths.video.parent, paths.video.stem, source)
++    owns_outputs = _nfo_matches(paths.nfo, metadata.number)
++    if not owns_outputs and not paths.nfo.exists():
++        with suppress(OSError):
++            owns_outputs = source.samefile(dest)
++    if not owns_outputs:
++        return snapshot.model_dump_json()
++    outputs = planned_outputs(paths, write_nfo=library.write_nfo, kinds=library.copy_resources)
++    if LibraryResource.extrafanart in library.copy_resources and paths.extrafanart_dir.is_dir():
++        outputs.extend(
++            OutputPath(kind="extrafanart", path=path)
++            for path in paths.extrafanart_dir.glob("*.jpg")
++            if path.stem.isdecimal()
++        )
++    # 独立元数据目录中的字幕不在视频旁边, 首次编辑时一并记录其位置.
++    subtitle_dirs = {paths.nfo.parent, paths.link.parent if paths.link is not None else paths.nfo.parent}
++    for directory in subtitle_dirs:
++        if path_key(directory) != path_key(source.parent):
++            outputs.extend(
++                OutputPath(kind="subtitle", path=path)
++                for path in discover_subtitles.sync(directory / source.name, library.subtitle_extensions, file_info)
++            )
++    snapshot.outputs = [stamp for output in outputs if (stamp := _stamp(output)) is not None]
++    return snapshot.model_dump_json()
++
++
++async def shared_output_protection(
++    repo: Repository,
++    media: MediaFile,
++    metadata: Metadata,
++    *,
++    safe_dirs: Sequence[Path] | None,
++) -> OutputProtection:
++    """同番号的其它版本可以共享附属文件; 当前版本不得删除它们仍在使用的路径."""
++    protection = OutputProtection(paths={path_key(media.path)})
++    if metadata.id is None:
++        return protection
++    peers = await repo.list_media_files(metadata_ids=[metadata.id], limit=None)
++    actor_genders = {actor.name: actor.gender for actor in await repo.get_actors_by_names(metadata.actors)}
++    for peer in peers:
++        if peer.id == media.id:
++            continue
++        protection.paths.add(path_key(peer.path))
++        protection.paths.update(
++            path_key(output.path) for output in read_output_snapshot(peer.organized_outputs, metadata.number).outputs
++        )
++        library = await repo.get_library(peer.library_id)
++        if library is None:
++            continue
++        try:
++            paths = await _peer_paths(library, metadata, peer, safe_dirs, actor_genders)
++            if peer.organized_outputs is None:
++                baseline = await capture_output_baseline(
++                    library,
++                    metadata,
++                    Path(peer.path),
++                    effective_file_info(
++                        peer, parse_file_info(peer.path, has_external_subtitle=peer.has_external_subtitle)
++                    ),
++                    safe_dirs=safe_dirs,
++                    actor_genders=actor_genders,
++                )
++                protection.paths.update(
++                    path_key(output.path) for output in read_output_snapshot(baseline, metadata.number).outputs
++                )
++        except OSError, ValueError:
++            continue
++        protection.paths.update(
++            path_key(output.path)
++            for output in planned_outputs(paths, write_nfo=library.write_nfo, kinds=library.copy_resources)
++        )
++        if LibraryResource.extrafanart in library.copy_resources:
++            protection.directories.append(paths.extrafanart_dir)
++    return protection
++
++
++@in_thread
++def _peer_paths(
++    library: Library,
++    metadata: Metadata,
++    peer: MediaFile,
++    safe_dirs: Sequence[Path] | None,
++    actor_genders: Mapping[str, ActorGender],
++) -> ResolvedPaths:
++    return resolve_paths(
++        library,
++        metadata,
++        ext=Path(peer.path).suffix.lstrip("."),
++        source_path=Path(peer.path),
++        file_info=effective_file_info(
++            peer, parse_file_info(peer.path, has_external_subtitle=peer.has_external_subtitle)
++        ),
++        safe_dirs=safe_dirs,
++        actor_genders=actor_genders,
++    )
++
++
++@in_thread
++def retained_subtitle_sources(
++    snapshot: OutputSnapshot,
++    library_root: Path,
++    safe_dirs: Sequence[Path] | None,
++    protection: OutputProtection,
++) -> list[Path]:
++    roots = [library_root, *(safe_dirs or [])]
++    return [
++        output.path
++        for output in snapshot.outputs
++        if output.kind == "subtitle"
++        and not protection.contains(output.path)
++        and output.parent == resolved_path(output.path.parent)
++        and (safe_dirs is None or any(is_descendant(output.path.parent, root) for root in roots))
++        and _stamp(output) == output
++    ]
++
++
++@in_thread
++def finish_output_snapshot(
++    previous: OutputSnapshot,
++    outputs: Sequence[OutputPath],
++    *,
++    library_root: Path,
++    safe_dirs: Sequence[Path] | None,
++    protection: OutputProtection,
++    success: bool,
++) -> str:
++    current = [stamp for output in outputs if (stamp := _stamp(output)) is not None]
++    keys = {path_key(output.path) for output in current}
++    kinds = {output.kind for output in current}
++    remaining: list[OutputStamp] = []
++    roots = [library_root, *(safe_dirs or [])]
++    for old in previous.outputs:
++        if path_key(old.path) in keys:
++            continue
++        if not success or old.kind not in kinds or protection.contains(old.path):
++            remaining.append(old)
++            continue
++        if not old.path.is_absolute() or old.parent != resolved_path(old.path.parent):
++            logger.warning("保留位置发生变化的旧产物", path=str(old.path))
++            remaining.append(old)
++            continue
++        if safe_dirs is not None and not any(is_descendant(old.path.parent, root) for root in roots):
++            logger.warning("保留安全目录外的旧产物", path=str(old.path))
++            remaining.append(old)
++            continue
++        actual = _stamp(old)
++        if actual is None:
++            continue
++        if actual != old:
++            logger.warning("保留已被外部修改的旧产物", path=str(old.path))
++            remaining.append(old)
++            continue
++        try:
++            old.path.unlink()
++            logger.info("已删除被替代的整理产物", path=str(old.path))
++            parent = old.path.parent
++            while parent != parent.parent and all(path_key(parent) != path_key(root) for root in roots):
++                if safe_dirs is not None and not any(is_descendant(parent, root) for root in roots):
++                    break
++                try:
++                    parent.rmdir()
++                except OSError:
++                    break
++                parent = parent.parent
++        except OSError as exc:
++            remaining.append(old)
++            logger.warning("旧整理产物删除失败", path=str(old.path), error=str(exc))
++    return OutputSnapshot(number=previous.number, outputs=[*remaining, *current]).model_dump_json()
+diff --git a/src/amane/parsing/__init__.py b/src/amane/parsing/__init__.py
+index 695bb6fcc9511de3100aa377aae1d6ee90aded94..58deef3eca7d3e0ff83cc66f1522cab8a38c4f7a 100644
+--- a/src/amane/parsing/__init__.py
++++ b/src/amane/parsing/__init__.py
+@@ -11,9 +11,13 @@ from .file_info import (
+     FilePhaseSummary,
+     Mosaic,
+     MosaicNature,
++    WatermarkField,
++    WatermarkMode,
+     detect_cd,
+     extract_number,
++    file_mosaic_nature,
+     file_phase_from_path,
++    file_shows_uncensored,
+     infer_content_type,
+     is_amateur,
+     is_uncensored,
+@@ -38,9 +42,13 @@ __all__ = [
+     "FilePhaseSummary",
+     "Mosaic",
+     "MosaicNature",
++    "WatermarkField",
++    "WatermarkMode",
+     "detect_cd",
+     "extract_number",
++    "file_mosaic_nature",
+     "file_phase_from_path",
++    "file_shows_uncensored",
+     "infer_content_type",
+     "is_amateur",
+     "is_uncensored",
+diff --git a/src/amane/parsing/file_info.py b/src/amane/parsing/file_info.py
+index 79e4b9493f3e69e564cc2a5875228afa4576fffd..0a324b0ebbf403f77fed7256a1558688cf7b54c8 100644
+--- a/src/amane/parsing/file_info.py
++++ b/src/amane/parsing/file_info.py
+@@ -16,7 +16,7 @@ from collections.abc import Iterable
+ from dataclasses import dataclass
+ from enum import StrEnum
+ from pathlib import Path
+-from typing import TypedDict
++from typing import NotRequired, TypedDict
+ 
+ # ---------------------------------------------------------------------------
+ # Types
+@@ -42,7 +42,7 @@ class Mosaic(StrEnum):
+ 
+ 
+ class MosaicNature(StrEnum):
+-    """马赛克性质: 展示口径的 有码 / 无码 / 破解 / 流出, 不落库.
++    """马赛克性质: 人工覆盖优先, 否则由文件标记与条目类型合成.
+ 
+     比 ``Mosaic`` 多一个 ``CENSORED``: 标记是这一份文件自己的证据, 性质是标记与条目类型合成后的结果.
+     """
+@@ -53,6 +53,17 @@ class MosaicNature(StrEnum):
+     LEAKED = "leaked"
+ 
+ 
++class WatermarkMode(StrEnum):
++    AUTO = "auto"
++    MANUAL = "manual"
++
++
++class WatermarkField(StrEnum):
++    SUBTITLE = "has_subtitle"
++    MOSAIC = "mosaic"
++    DEFINITION = "definition"
++
++
+ @dataclass(frozen=True)
+ class FileInfo:
+     number: str | None
+@@ -63,6 +74,9 @@ class FileInfo:
+     has_external_subtitle: bool = False
+     mosaic: Mosaic | None = None
+     definition: str | None = None
++    # 人工性质包含有码, 不能通过修改番号类型表达.
++    mosaic_override: MosaicNature | None = None
++    watermark_fields: frozenset[WatermarkField] = frozenset()
+ 
+     @property
+     def has_subtitle(self) -> bool:
+@@ -76,6 +90,7 @@ class FilePhase(TypedDict):
+     mosaic: Mosaic | None
+     has_subtitle: bool
+     definition: str | None
++    mosaic_override: NotRequired[MosaicNature]
+ 
+ 
+ @dataclass(frozen=True)
+@@ -383,6 +398,18 @@ def mosaic_nature(mosaic: Mosaic | None, content_type: ContentType | None) -> Mo
+     return None
+ 
+ 
++def file_mosaic_nature(info: FileInfo, content_type: ContentType | None) -> MosaicNature | None:
++    """人工性质优先, 未设置时保留原有类型继承规则."""
++    return info.mosaic_override or mosaic_nature(info.mosaic, content_type)
++
++
++def file_shows_uncensored(info: FileInfo, content_type: ContentType | None) -> bool:
++    """人工选择有码、破解或流出时, 不再额外继承番号的无码标记."""
++    if info.mosaic_override is not None:
++        return info.mosaic_override is MosaicNature.UNCENSORED
++    return shows_uncensored(info.mosaic, content_type)
++
++
+ def max_definition(values: Iterable[str | None]) -> str | None:
+     """按 DEFINITION_VALUES 顺序取最高档; 未知值忽略."""
+     rank = {name: index for index, name in enumerate(DEFINITION_VALUES)}
+@@ -404,8 +431,22 @@ def summarize_file_phases(phases: Iterable[FilePhase], content_type: ContentType
+     mosaic_present = {phase["mosaic"] for phase in items if phase["mosaic"] is not None}
+     return FilePhaseSummary(
+         has_subtitle=any(phase["has_subtitle"] for phase in items),
+-        censored=content_type is ContentType.CENSORED,
+-        uncensored=content_type is ContentType.UNCENSORED or Mosaic.UNCENSORED in mosaic_present,
++        censored=any(
++            phase["mosaic_override"] is MosaicNature.CENSORED
++            if "mosaic_override" in phase
++            else content_type is ContentType.CENSORED
++            for phase in items
++        )
++        if items
++        else content_type is ContentType.CENSORED,
++        uncensored=any(
++            phase["mosaic_override"] is MosaicNature.UNCENSORED
++            if "mosaic_override" in phase
++            else shows_uncensored(phase["mosaic"], content_type)
++            for phase in items
++        )
++        if items
++        else content_type is ContentType.UNCENSORED,
+         mosaics=tuple(mosaic for mosaic in MOSAIC_VALUES if mosaic in mosaic_present),
+         definition=max_definition(phase["definition"] for phase in items),
+     )
+diff --git a/tests/api/test_liu1443452494_watermarks.py b/tests/api/test_liu1443452494_watermarks.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..91d6f015a68b34734d156fe95e08df16966a69ee
+--- /dev/null
++++ b/tests/api/test_liu1443452494_watermarks.py
+@@ -0,0 +1,70 @@
++"""水印接口的文件范围、磁盘延迟更新及非法请求."""
++
++from pathlib import Path
++
++import pytest
++from httpx2 import AsyncClient
++
++from amane.db.repository import Repository
++from amane.media import write_nfo
++from amane.parsing import parse_file_info
++
++
++@pytest.mark.asyncio
++async def test_watermark_http(client: AsyncClient, repo: Repository, safe_path: Path) -> None:
++    library = await repo.create_library(
++        name="测试库", path=str(safe_path), video_template="{raw_name}.{ext}", subtitle_extensions=[".srt"]
++    )
++    metadata = await repo.upsert_metadata(number="SSIS-345", title="原有标题", tags=["剧情"])
++    assert library.id is not None and metadata.id is not None
++    source = safe_path / "SSIS-345-C-1080p.mp4"
++    source.write_bytes(b"video")
++    media = await repo.create_media_file(library.id, path=str(source), metadata_id=metadata.id)
++    assert media.id is not None
++    other = await repo.create_media_file(library.id, path=str(safe_path / "SSIS-345.mp4"), metadata_id=metadata.id)
++    nfo = source.with_suffix(".nfo")
++    assert await write_nfo(metadata, nfo, file_info=parse_file_info(source))
++    original_nfo = nfo.read_bytes()
++    endpoint = f"media/{media.id}/watermarks"
++    current = await client.get(endpoint)
++    assert current.status_code == 200
++    assert current.json()["mode"] == "auto" and current.json()["has_subtitle"]
++    assert "4K" in current.json()["definition_options"]
++    for body in (
++        {"mode": "manual", "has_subtitle": None},
++        {"mode": "manual", "has_subtitle": 0},
++        {"mode": "manual", "definition": "未知档位"},
++        {"mode": "manual", "mosaic": None},
++        {"mode": "auto", "definition": None},
++        {"mode": "manual", "path": "禁止修改路径"},
++        {},
++    ):
++        response = await client.patch(endpoint, json=body)
++        assert response.status_code == 422 and response.json()["detail"]
++
++    updated = await client.patch(endpoint, json={"mode": "manual", "has_subtitle": False, "definition": None})
++    assert updated.status_code == 200 and updated.json()["changed"]
++    assert not updated.json()["has_subtitle"] and updated.json()["definition"] is None
++    assert set(updated.json()["protected_fields"]) == {"has_subtitle", "definition"}
++    assert nfo.read_bytes() == original_nfo and source.read_bytes() == b"video"
++    stored = await repo.get_media_file(media.id)
++    assert stored is not None and stored.organized_outputs is not None
++    assert (await client.get(f"media/{other.id}/watermarks")).json()["mode"] == "auto"
++    detail = (await client.get(f"metadata/{metadata.id}")).json()
++    assert detail["metadata"]["title"] == "原有标题"
++    assert not detail["metadata"]["file_phase"]["has_subtitle"]
++    assert (await client.get("tasks")).json()["total"] == 0
++    repeated = await client.patch(endpoint, json={"mode": "manual", "has_subtitle": False, "definition": None})
++    assert not repeated.json()["changed"]
++
++    (safe_path / "外挂字幕.srt").write_text("字幕", encoding="utf-8")
++    restored = await client.patch(endpoint, json={"mode": "auto"})
++    assert restored.status_code == 200 and restored.json()["changed"]
++    assert restored.json()["protected_fields"] == [] and restored.json()["has_subtitle"]
++    assert restored.json()["definition"] == "1080p"
++    assert nfo.read_bytes() == original_nfo
++    for missing in (
++        await client.get("media/999999/watermarks"),
++        await client.patch("media/999999/watermarks", json={"mode": "auto"}),
++    ):
++        assert missing.status_code == 404 and missing.json()["detail"] == "媒体文件不存在"
+diff --git a/tests/db/test_liu1443452494_watermark_migration.py b/tests/db/test_liu1443452494_watermark_migration.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..70a6e7b9fcf61c0efa7ffcc503ad677884e75876
+--- /dev/null
++++ b/tests/db/test_liu1443452494_watermark_migration.py
+@@ -0,0 +1,40 @@
++"""旧数据库升级保留路径投影, 人工保护默认关闭; 回退不丢失原有媒体记录."""
++
++from pathlib import Path
++
++from alembic import command
++from sqlalchemy import create_engine, inspect, text
++from sqlmodel import Session, select
++
++from amane.db.models import MediaFile
++from amane.parsing import Mosaic, WatermarkMode
++from tests.helpers import alembic_config
++
++
++def test_watermark_migration_preserves_existing_media(tmp_path: Path) -> None:
++    config = alembic_config(tmp_path / "迁移.db")
++    command.upgrade(config, "9054ebacea29")
++    engine = create_engine(f"sqlite:///{tmp_path / '迁移.db'}")
++    with engine.begin() as connection:
++        connection.execute(
++            text(
++                "INSERT INTO media_files (path,status,library_id,created_at,updated_at,mosaic,definition,has_subtitle_in_name,has_external_subtitle) VALUES ('/原目录/SSIS-345-UC-4K.mp4','SCRAPED',1,'2026-10-01','2026-10-01','CRACKED','4K',1,1)"
++            )
++        )
++    command.upgrade(config, "head")
++    with Session(engine) as session:
++        media = session.exec(select(MediaFile)).one()
++        assert media.path == "/原目录/SSIS-345-UC-4K.mp4" and media.mosaic is Mosaic.CRACKED
++        assert media.has_subtitle and media.definition == "4K"
++        assert media.watermark_mode is WatermarkMode.AUTO and media.watermark_subtitle is None
++        assert media.watermark_mosaic is None and not media.watermark_definition_locked
++        assert media.organized_outputs is None
++    command.downgrade(config, "9054ebacea29")
++    with engine.connect() as connection:
++        assert "watermark_mode" not in {column["name"] for column in inspect(connection).get_columns("media_files")}
++        assert connection.execute(text("SELECT path,definition FROM media_files")).one() == (
++            "/原目录/SSIS-345-UC-4K.mp4",
++            "4K",
++        )
++    command.upgrade(config, "head")
++    engine.dispose()
+diff --git a/tests/db/test_liu1443452494_watermarks.py b/tests/db/test_liu1443452494_watermarks.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..57ad3154aa30d3b4bb1d80b07a2d084016498be0
+--- /dev/null
++++ b/tests/db/test_liu1443452494_watermarks.py
+@@ -0,0 +1,151 @@
++"""人工水印的部分更新、否定值、自动恢复及查询一致性."""
++
++import asyncio
++from pathlib import Path
++
++import pytest
++from pydantic import ValidationError
++
++from amane.api.models.media import to_media_file_response
++from amane.db.models import MediaFile
++from amane.db.repository import Repository
++from amane.db.watermarks import WatermarkUpdate, apply_watermark_update, effective_file_info, watermark_state
++from amane.parsing import ContentType, Mosaic, MosaicNature, WatermarkField, WatermarkMode, parse_file_info
++
++
++@pytest.mark.parametrize(
++    ("body", "message"),
++    [
++        ({"mode": "auto", "has_subtitle": False}, "自动模式不能"),
++        ({"mode": "manual", "has_subtitle": None}, "中字必须"),
++        ({"mode": "manual", "has_subtitle": "false"}, "valid boolean"),
++        ({"mode": "manual", "mosaic": None}, "马赛克性质必须"),
++        ({"mode": "manual", "mosaic": "unknown"}, "censored"),
++        ({"mode": "manual", "definition": "未知档位"}, "未知分辨率"),
++        ({"mode": "manual", "title": "不允许修改"}, "Extra inputs"),
++        ({"has_subtitle": True}, "mode"),
++    ],
++)
++def test_watermark_validation(body: dict[str, object], message: str) -> None:
++    with pytest.raises(ValidationError, match=message):
++        WatermarkUpdate.model_validate(body)
++
++
++@pytest.mark.asyncio
++async def test_partial_protection_survives_automatic_updates(repo: Repository, tmp_path: Path) -> None:
++    metadata = await repo.upsert_metadata(number="SSIS-345", title="原题", tags=["剧情"])
++    assert metadata.id is not None
++    media = await repo.create_media_file(
++        1,
++        path=str(tmp_path / "SSIS-345-C.mp4"),
++        metadata_id=metadata.id,
++        has_external_subtitle=True,
++    )
++    assert media.id is not None
++    result = await repo.update_media_watermarks(
++        media.id, WatermarkUpdate(mode=WatermarkMode.MANUAL, has_subtitle=False)
++    )
++    assert result is not None and result.changed
++    original_time = result.media.updated_at
++    duplicate = await repo.update_media_watermarks(
++        media.id, WatermarkUpdate(mode=WatermarkMode.MANUAL, has_subtitle=False)
++    )
++    assert duplicate is not None and not duplicate.changed and duplicate.media.updated_at == original_time
++    assert watermark_state(duplicate.media, metadata.content_type).protected_fields == [WatermarkField.SUBTITLE]
++
++    # 路径回写和字幕复查仍更新自动投影, 但不能覆盖人工否定.
++    refreshed = await repo.update_media_file(
++        media.id, path=str(tmp_path / "SSIS-345-UC-4K.mp4"), has_external_subtitle=True
++    )
++    assert refreshed is not None
++    info = effective_file_info(refreshed, parse_file_info(refreshed.path, has_external_subtitle=True))
++    assert not info.has_subtitle and info.mosaic is Mosaic.CRACKED and info.definition == "4K"
++    assert info.number == "SSIS-345"
++    await repo.upsert_metadata(number="SSIS-345", title="重新刮削的标题", tags=["新标签"])
++    kept = await repo.get_media_file(media.id)
++    assert kept is not None and not kept.has_subtitle
++
++    restored = await repo.update_media_watermarks(
++        media.id, WatermarkUpdate(mode=WatermarkMode.AUTO), has_external_subtitle=False
++    )
++    assert restored is not None and restored.changed
++    state = watermark_state(restored.media, metadata.content_type)
++    assert state.mode is WatermarkMode.AUTO and state.protected_fields == []
++    assert state.has_subtitle and state.mosaic is MosaicNature.CRACKED and state.definition == "4K"
++    assert restored.media.watermark_subtitle is None
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("nature", list(MosaicNature))
++async def test_manual_state_matches_sql_and_aggregate(repo: Repository, tmp_path: Path, nature: MosaicNature) -> None:
++    metadata = await repo.upsert_metadata(number="HEYZO-1234", content_type=ContentType.UNCENSORED)
++    assert metadata.id is not None
++    media = await repo.create_media_file(1, path=str(tmp_path / "HEYZO-1234-C-4K.mp4"), metadata_id=metadata.id)
++    assert media.id is not None
++    # 先设置不同性质, 再设置目标值, 覆盖恢复为原识别值时仍保持保护的路径.
++    first = MosaicNature.CRACKED if nature is not MosaicNature.CRACKED else MosaicNature.CENSORED
++    await repo.update_media_watermarks(media.id, WatermarkUpdate(mode=WatermarkMode.MANUAL, mosaic=first))
++    result = await repo.update_media_watermarks(
++        media.id, WatermarkUpdate(mode=WatermarkMode.MANUAL, has_subtitle=False, mosaic=nature, definition=None)
++    )
++    assert result is not None
++    response = to_media_file_response(result.media, metadata.content_type)
++    assert not response.has_subtitle and response.definition is None
++    assert response.censored is (nature is MosaicNature.CENSORED)
++    assert response.uncensored is (nature is MosaicNature.UNCENSORED)
++    assert await repo.count_media_files(has_subtitle=True) == 0
++    assert await repo.count_media_files(has_subtitle=False) == 1
++    assert await repo.count_media_files(definition="4K") == 0
++    for mosaic in Mosaic:
++        assert await repo.count_media_files(mosaic=mosaic) == int(str(mosaic) == str(nature))
++    for uncensored in (True, False):
++        expected = int(uncensored is (nature is MosaicNature.UNCENSORED))
++        assert await repo.count_media_files(uncensored=uncensored) == expected
++        _, total = await repo.list_metadata(uncensored=uncensored)
++        assert total == expected
++    summary = (await repo.summarize_media_by_metadata([metadata]))[metadata.id].phase
++    assert summary.censored == response.censored and summary.uncensored == response.uncensored
++    assert not summary.has_subtitle and summary.definition is None
++    _, subtitled = await repo.list_metadata(has_subtitle=True)
++    _, high_resolution = await repo.list_metadata(definition="4K")
++    assert subtitled == high_resolution == 0
++
++
++@pytest.mark.asyncio
++async def test_versions_and_concurrent_partial_updates(repo: Repository, tmp_path: Path) -> None:
++    metadata = await repo.upsert_metadata(number="SSIS-345")
++    assert metadata.id is not None
++    files = [
++        await repo.create_media_file(1, path=str(tmp_path / f"版本{index}" / "SSIS-345.mp4"), metadata_id=metadata.id)
++        for index in range(2)
++    ]
++    first, other = files
++    assert first.id is not None and other.id is not None
++    await asyncio.gather(
++        repo.update_media_watermarks(first.id, WatermarkUpdate(mode=WatermarkMode.MANUAL, has_subtitle=True)),
++        repo.update_media_watermarks(first.id, WatermarkUpdate(mode=WatermarkMode.MANUAL, definition="4K")),
++    )
++    updated = await repo.get_media_file(first.id)
++    untouched = await repo.get_media_file(other.id)
++    assert updated is not None and untouched is not None
++    state = watermark_state(updated, metadata.content_type)
++    assert state.has_subtitle and state.definition == "4K"
++    assert set(state.protected_fields) == {WatermarkField.SUBTITLE, WatermarkField.DEFINITION}
++    assert watermark_state(untouched, metadata.content_type).mode is WatermarkMode.AUTO
++    assert not untouched.has_subtitle
++    summary = (await repo.summarize_media_by_metadata([metadata]))[metadata.id]
++    assert summary.file_count == 2 and summary.phase.has_subtitle and summary.phase.definition == "4K"
++
++
++def test_manual_mode_does_not_protect_unchanged_fields() -> None:
++    media = MediaFile(library_id=1, path="SSIS-345.mp4")
++    apply_watermark_update(
++        media,
++        WatermarkUpdate(mode=WatermarkMode.MANUAL, has_subtitle=False, mosaic=MosaicNature.CENSORED, definition=None),
++        ContentType.CENSORED,
++    )
++    state = watermark_state(media, ContentType.CENSORED)
++    assert state.mode is WatermarkMode.MANUAL and state.protected_fields == []
++    media.has_external_subtitle = True
++    media.definition = "8K"
++    assert media.has_subtitle and watermark_state(media, ContentType.CENSORED).definition == "8K"
+diff --git a/tests/handlers/test_liu1443452494_watermarks.py b/tests/handlers/test_liu1443452494_watermarks.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..14caed7eb9b55fe64ce70ddfffd681a8c704bb51
+--- /dev/null
++++ b/tests/handlers/test_liu1443452494_watermarks.py
+@@ -0,0 +1,310 @@
++"""从现有整理结果编辑水印, 验证覆盖、目录替换与失败保护."""
++
++from pathlib import Path
++from typing import NamedTuple, cast
++from xml.etree import ElementTree
++
++import pytest
++import pytest_asyncio
++
++from amane.config import HotSettings, WatermarkConfig
++from amane.db.models import Library, MediaFile, MediaFileStatus, Metadata
++from amane.db.repository import Repository
++from amane.db.watermarks import WatermarkUpdate, effective_file_info
++from amane.enums import LibraryResource
++from amane.handlers import OrganizeHandler, OrganizePayload
++from amane.media import ResourceStore
++from amane.net.http import WebClient
++from amane.organize import ResolvedPaths, resolve_paths
++from amane.organize.watermark_outputs import capture_output_baseline, read_output_snapshot
++from amane.parsing import MosaicNature, WatermarkMode, parse_file_info
++from tests.handlers.test_file_ops import FakeClient
++
++
++class WatermarkCase(NamedTuple):
++    library: Library
++    metadata: Metadata
++    media: MediaFile
++    paths: ResolvedPaths
++    handler: OrganizeHandler
++
++
++@pytest_asyncio.fixture
++async def watermark_case(repo: Repository, resource_store: ResourceStore, tmp_path: Path) -> WatermarkCase:
++    root = tmp_path / "媒体库"
++    root.mkdir()
++    source = root / "SSIS-345.mp4"
++    source.write_bytes(b"video")
++    prefix = "元数据/{number}[-{mosaic?|cracked=U,censored=}{sub?}][-{def?}] {title}/"
++    library = await repo.create_library(
++        name="测试",
++        path=str(root),
++        video_template="{raw_name}.{ext}",
++        copy_resources=list(LibraryResource),
++        nfo_template=prefix + "{number}.nfo",
++        thumb_template=prefix + "thumb.jpg",
++        poster_template=prefix + "poster.jpg",
++        fanart_template=prefix + "fanart.jpg",
++        extrafanart_template=prefix + "extrafanart",
++        trailer_template=prefix + "trailer.mp4",
++    )
++    metadata = await repo.upsert_metadata(
++        number="SSIS-345",
++        title="原有标题",
++        tags=["剧情"],
++        thumb_urls=["https://example.test/thumb.jpg"],
++        poster_urls=["https://example.test/poster.jpg"],
++        trailer_urls=["https://example.test/trailer.mp4"],
++        extrafanart_urls={"test": ["https://example.test/1.jpg", "https://example.test/2.jpg"]},
++    )
++    assert library.id is not None and metadata.id is not None
++    media = await repo.create_media_file(
++        library.id, path=str(source), metadata_id=metadata.id, status=MediaFileStatus.SCRAPED
++    )
++    assert media.id is not None
++    handler = OrganizeHandler(
++        repo,
++        HotSettings(watermark=WatermarkConfig(enabled=True)),
++        resource_store,
++        web_client=cast("WebClient", FakeClient()),
++    )
++    result = await handler.handle(OrganizePayload(library_id=library.id, media_file_ids=[media.id]))
++    assert result.result is not None and result.result.organized == 1
++    paths = resolve_paths(library, metadata, ext="mp4", source_path=source, file_info=parse_file_info(source))
++    return WatermarkCase(library, metadata, media, paths, handler)
++
++
++async def _save(repo: Repository, case: WatermarkCase, update: WatermarkUpdate) -> MediaFile:
++    assert case.media.id is not None
++    current = await repo.get_media_file(case.media.id)
++    assert current is not None and current.id is not None
++    baseline = current.organized_outputs
++    if baseline is None:
++        baseline = await capture_output_baseline(
++            case.library,
++            case.metadata,
++            Path(current.path),
++            effective_file_info(current, parse_file_info(current.path)),
++            safe_dirs=(),
++            actor_genders={},
++        )
++    result = await repo.update_media_watermarks(current.id, update, organized_outputs=baseline)
++    assert result is not None and result.changed
++    return result.media
++
++
++async def _organize(case: WatermarkCase) -> None:
++    assert case.library.id is not None and case.media.id is not None
++    result = await case.handler.handle(OrganizePayload(library_id=case.library.id, media_file_ids=[case.media.id]))
++    assert result.result is not None and result.result.organized == 1 and result.result.failed == 0
++
++
++def _paths(case: WatermarkCase, media: MediaFile) -> ResolvedPaths:
++    return resolve_paths(
++        case.library,
++        case.metadata,
++        ext="mp4",
++        source_path=Path(media.path),
++        file_info=effective_file_info(media, parse_file_info(media.path)),
++    )
++
++
++@pytest.mark.asyncio
++async def test_existing_outputs_are_replaced_then_markers_can_be_removed(
++    repo: Repository, resource_store: ResourceStore, watermark_case: WatermarkCase
++) -> None:
++    case = watermark_case
++    old_nfo = case.paths.nfo.read_bytes()
++    original_poster = case.paths.poster.read_bytes()
++    unrelated = case.paths.nfo.parent / "用户说明.txt"
++    unrelated.write_text("保留用户文件", encoding="utf-8")
++    edited = await _save(
++        repo,
++        case,
++        WatermarkUpdate(mode=WatermarkMode.MANUAL, has_subtitle=True, mosaic=MosaicNature.CRACKED, definition="4K"),
++    )
++    new_paths = _paths(case, edited)
++    assert case.paths.nfo.read_bytes() == old_nfo and not new_paths.nfo.exists()
++    assert len(read_output_snapshot(edited.organized_outputs, case.metadata.number).outputs) == 7
++    await _organize(case)
++    assert new_paths.nfo.is_file() and new_paths.poster.read_bytes() != original_poster
++    assert new_paths.fanart.read_bytes() == original_poster
++    assert not case.paths.nfo.exists() and not case.paths.poster.exists() and not case.paths.extrafanart_dir.exists()
++    assert unrelated.read_text(encoding="utf-8") == "保留用户文件" and Path(edited.path).read_bytes() == b"video"
++    root = ElementTree.parse(new_paths.nfo).getroot()
++    assert [node.text for node in root.findall("tag")] == ["剧情", "中文字幕", "破解", "4K"]
++    assert [node.text for node in root.findall("genre")] == ["剧情", "中文字幕", "破解", "4K"]
++    assert root.findtext("title") == "SSIS-345 原有标题"
++    resource = await resource_store.resolve(case.metadata.poster_urls[0])
++    assert resource is not None and resource.read_bytes() == original_poster
++
++    # 所有角标取消后从缓存原图重建, 不能继续处理上次叠加水印的图片.
++    cleared = await _save(
++        repo,
++        case,
++        WatermarkUpdate(mode=WatermarkMode.MANUAL, has_subtitle=False, mosaic=MosaicNature.CENSORED, definition=None),
++    )
++    await _organize(case)
++    cleared_paths = _paths(case, cleared)
++    assert cleared_paths.poster.read_bytes() == original_poster
++    assert not new_paths.nfo.parent.exists()
++    assert [node.text for node in ElementTree.parse(cleared_paths.nfo).getroot().findall("tag")] == ["剧情", "有码"]
++    assert case.metadata.id is not None
++    metadata = await repo.get_metadata(case.metadata.id)
++    assert metadata is not None and metadata.title == "原有标题" and metadata.tags == ["剧情"]
++    restored = await _save(repo, case, WatermarkUpdate(mode=WatermarkMode.AUTO))
++    await _organize(case)
++    assert restored.watermark_subtitle is None and not restored.watermark_definition_locked
++    assert _paths(case, restored).poster.read_bytes() == original_poster
++
++
++@pytest.mark.asyncio
++async def test_changed_old_files_and_shared_version_outputs_are_kept(
++    repo: Repository, watermark_case: WatermarkCase
++) -> None:
++    case = watermark_case
++    assert case.library.id is not None and case.metadata.id is not None
++    peer_source = Path(case.library.path) / "SSIS-345.mkv"
++    peer_source.write_bytes(b"second-version")
++    await repo.create_media_file(case.library.id, path=str(peer_source), metadata_id=case.metadata.id)
++    edited = await _save(repo, case, WatermarkUpdate(mode=WatermarkMode.MANUAL, has_subtitle=True))
++    await _organize(case)
++    assert case.paths.poster.exists() and case.paths.nfo.exists()
++    assert _paths(case, edited).nfo.exists() and peer_source.read_bytes() == b"second-version"
++    # 用户在整理之后修改旧海报, 后续目录切换不得删除此文件.
++    prior = _paths(case, edited)
++    edited = await _save(repo, case, WatermarkUpdate(mode=WatermarkMode.MANUAL, definition="4K"))
++    prior.poster.write_bytes(b"user-edited-image")
++    await _organize(case)
++    assert prior.poster.read_bytes() == b"user-edited-image"
++    assert not prior.nfo.exists() and _paths(case, edited).nfo.exists()
++
++
++@pytest.mark.asyncio
++async def test_shared_fixed_target_is_reported_before_writing(repo: Repository, watermark_case: WatermarkCase) -> None:
++    case = watermark_case
++    assert case.library.id is not None and case.metadata.id is not None and case.media.id is not None
++    assert case.library.nfo_template is not None and case.library.poster_template is not None
++    peer_source = Path(case.library.path) / "SSIS-345.mkv"
++    peer_source.write_bytes(b"second-version")
++    await repo.create_media_file(case.library.id, path=str(peer_source), metadata_id=case.metadata.id)
++    await repo.update_library(
++        case.library.id,
++        nfo_template=case.library.nfo_template.replace("{sub?}", ""),
++        poster_template=case.library.poster_template.replace("{sub?}", ""),
++    )
++    old_nfo = case.paths.nfo.read_bytes()
++    await _save(repo, case, WatermarkUpdate(mode=WatermarkMode.MANUAL, has_subtitle=True))
++    result = await case.handler.handle(OrganizePayload(library_id=case.library.id, media_file_ids=[case.media.id]))
++    assert result.result is not None and result.result.failed == 1
++    assert case.paths.nfo.read_bytes() == old_nfo and peer_source.read_bytes() == b"second-version"
++
++
++@pytest.mark.asyncio
++async def test_nfo_failure_keeps_previous_outputs(
++    repo: Repository, watermark_case: WatermarkCase, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    case = watermark_case
++    assert case.library.id is not None and case.media.id is not None
++    edited = await _save(repo, case, WatermarkUpdate(mode=WatermarkMode.MANUAL, has_subtitle=True))
++    original_nfo = case.paths.nfo.read_bytes()
++
++    async def failed_write(metadata: Metadata, path: Path, *, file_info: object = None) -> bool:
++        return False
++
++    monkeypatch.setattr("amane.handlers.file.write_nfo_file", failed_write)
++    result = await case.handler.handle(OrganizePayload(library_id=case.library.id, media_file_ids=[case.media.id]))
++    assert result.result is not None and result.result.failed == 1
++    assert case.paths.nfo.read_bytes() == original_nfo and case.paths.poster.exists()
++    assert not _paths(case, edited).nfo.exists()
++
++
++@pytest.mark.asyncio
++async def test_missing_original_does_not_reuse_watermarked_poster(
++    repo: Repository, resource_store: ResourceStore, watermark_case: WatermarkCase
++) -> None:
++    case = watermark_case
++    assert case.library.id is not None and case.media.id is not None and case.metadata.id is not None
++    await _save(repo, case, WatermarkUpdate(mode=WatermarkMode.MANUAL, has_subtitle=True))
++    await _organize(case)
++    current = await repo.get_media_file(case.media.id)
++    assert current is not None
++    old_paths = _paths(case, current)
++    old_poster = old_paths.poster.read_bytes()
++    await repo.upsert_metadata(number=case.metadata.number, poster_urls=[], thumb_urls=[])
++    await _save(repo, case, WatermarkUpdate(mode=WatermarkMode.MANUAL, has_subtitle=False))
++    result = await case.handler.handle(OrganizePayload(library_id=case.library.id, media_file_ids=[case.media.id]))
++    assert result.result is not None and result.result.failed == 1
++    assert old_paths.poster.read_bytes() == old_poster and old_paths.nfo.exists()
++
++
++@pytest.mark.asyncio
++async def test_renamed_video_link_and_separate_subtitle_follow_saved_markers(
++    repo: Repository,
++    resource_store: ResourceStore,
++    tmp_path: Path,
++) -> None:
++    root = tmp_path / "视频"
++    incoming = root / "待整理"
++    incoming.mkdir(parents=True)
++    source = incoming / "SSIS-345-UC-4K.mp4"
++    source.write_bytes(b"video")
++    (incoming / "SSIS-345.chs.srt").write_text("中文字幕文件", encoding="utf-8")
++    metadata_root = tmp_path / "元数据"
++    template = "{number}[-{sub?}][-{def?}]"
++    library = await repo.create_library(
++        name="分开存储",
++        path=str(root),
++        video_template=template + "/" + template + ".{ext}",
++        link_template=metadata_root.as_posix() + "/" + template + "/" + template + ".strm",
++        subtitle_extensions=[".srt"],
++        copy_resources=[],
++    )
++    metadata = await repo.upsert_metadata(number="SSIS-345", title="原题")
++    assert library.id is not None and metadata.id is not None
++    media = await repo.create_media_file(
++        library.id, path=str(source), metadata_id=metadata.id, has_external_subtitle=True
++    )
++    assert media.id is not None
++    handler = OrganizeHandler(repo, HotSettings(), resource_store, safe_dirs=[metadata_root])
++    payload = OrganizePayload(library_id=library.id, media_file_ids=[media.id])
++    first = await handler.handle(payload)
++    assert first.result is not None and first.result.organized == 1
++    media = await repo.get_media_file(media.id)
++    assert media is not None and media.id is not None
++    old_paths = resolve_paths(
++        library,
++        metadata,
++        ext="mp4",
++        source_path=Path(media.path),
++        file_info=parse_file_info(media.path),
++        safe_dirs=[metadata_root],
++    )
++    assert old_paths.link is not None and old_paths.link.exists()
++    old_subtitle = old_paths.nfo.parent / "SSIS-345.chs.srt"
++    assert old_subtitle.read_text(encoding="utf-8") == "中文字幕文件"
++    baseline = await capture_output_baseline(
++        library, metadata, Path(media.path), parse_file_info(media.path), safe_dirs=[metadata_root], actor_genders={}
++    )
++    edited = await repo.update_media_watermarks(
++        media.id,
++        WatermarkUpdate(mode=WatermarkMode.MANUAL, has_subtitle=False, definition=None),
++        organized_outputs=baseline,
++    )
++    assert edited is not None
++    second = await handler.handle(payload)
++    assert second.result is not None and second.result.organized == 1 and second.result.conflicted == 0
++    updated = await repo.get_media_file(media.id)
++    assert updated is not None and not updated.has_subtitle and updated.watermark_definition_locked
++    assert Path(updated.path) == root / "SSIS-345" / "SSIS-345.mp4"
++    current = metadata_root / "SSIS-345"
++    assert (current / "SSIS-345.strm").read_text(encoding="utf-8").strip() == updated.path
++    assert (current / "SSIS-345.chs.srt").read_text(encoding="utf-8") == "中文字幕文件"
++    assert not old_paths.nfo.parent.exists() and not Path(media.path).exists()
++
++    await repo.upsert_metadata(number=metadata.number, title="重新刮削的标题")
++    third = await handler.handle(payload)
++    assert third.result is not None and third.result.organized == 1
++    nfo = ElementTree.parse(current / "SSIS-345.nfo").getroot()
++    assert nfo.findtext("title") == "SSIS-345 重新刮削的标题"
++    assert "中文字幕" not in [node.text for node in nfo.findall("tag")]
+diff --git a/tests/media/test_liu1443452494_watermarks.py b/tests/media/test_liu1443452494_watermarks.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..9fdddff8de4701093db6d970e90f8f446a8f12e6
+--- /dev/null
++++ b/tests/media/test_liu1443452494_watermarks.py
+@@ -0,0 +1,72 @@
++"""人工设置在 NFO 与实际图片角标中保持一致."""
++
++from pathlib import Path
++from xml.etree import ElementTree
++
++import pytest
++from PIL import Image
++
++from amane.db.models import MediaFile, Metadata
++from amane.db.watermarks import effective_file_info
++from amane.media import apply_cover_watermarks_from_info, write_nfo
++from amane.parsing import ContentType, MosaicNature, WatermarkMode, parse_file_info
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("nature", list(MosaicNature))
++async def test_effective_watermarks_replace_conflicting_nfo_labels(tmp_path: Path, nature: MosaicNature) -> None:
++    media = MediaFile(
++        library_id=1,
++        path="HEYZO-1234-C-4K.mp4",
++        watermark_mode=WatermarkMode.MANUAL,
++        watermark_subtitle=False,
++        watermark_mosaic=nature,
++        watermark_definition=None,
++        watermark_definition_locked=True,
++    )
++    metadata = Metadata(
++        number="HEYZO-1234",
++        content_type=ContentType.UNCENSORED,
++        title="保持原题",
++        tags=["剧情", "中文字幕", "无码", "4K", "演员"],
++    )
++    info = effective_file_info(media, parse_file_info(media.path, has_external_subtitle=True))
++    nfo = tmp_path / "影片.nfo"
++    assert await write_nfo(metadata, nfo, file_info=info)
++    label = {
++        MosaicNature.CENSORED: "有码",
++        MosaicNature.UNCENSORED: "无码",
++        MosaicNature.CRACKED: "破解",
++        MosaicNature.LEAKED: "流出",
++    }[nature]
++    root = ElementTree.parse(nfo).getroot()
++    for element in ("tag", "genre"):
++        assert [node.text for node in root.findall(element)] == ["剧情", "演员", label]
++    assert root.findtext("title") == "HEYZO-1234 保持原题"
++    assert metadata.tags == ["剧情", "中文字幕", "无码", "4K", "演员"]
++
++    stamps = tmp_path / "水印"
++    stamps.mkdir()
++    for name, color in (("uncensored", "red"), ("cracked", "green"), ("leaked", "purple")):
++        Image.new("RGBA", (32, 16), color).save(stamps / f"{name}.png")
++    poster = tmp_path / "poster.jpg"
++    Image.new("RGB", (300, 200), "blue").save(poster)
++    original = poster.read_bytes()
++    changed = apply_cover_watermarks_from_info(poster, info, metadata.content_type, watermark_dir=stamps, scale=0.1)
++    assert changed is (nature is not MosaicNature.CENSORED)
++    if nature is MosaicNature.CENSORED:
++        assert poster.read_bytes() == original
++    else:
++        with Image.open(poster) as image:
++            pixel = image.convert("RGB").getpixel((15, 12))
++            assert isinstance(pixel, tuple)
++            red, green, blue = pixel
++            if nature is MosaicNature.CRACKED:
++                assert green > red + 40 and green > blue + 40
++            elif nature is MosaicNature.UNCENSORED:
++                assert red > green + 80 and red > blue + 80
++            else:
++                assert red > green + 40 and blue > green + 40
++            # 人工破解或流出不得额外继承番号的无码水印, 第二个位置保持原背景.
++            second = image.convert("RGB").getpixel((15, 40))
++            assert isinstance(second, tuple) and second[2] > 200 and second[0] < 30
+diff --git a/tests/organize/test_liu1443452494_watermark_outputs.py b/tests/organize/test_liu1443452494_watermark_outputs.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..4fd4718ce212c7aca92f7b9fd705478308644584
+--- /dev/null
++++ b/tests/organize/test_liu1443452494_watermark_outputs.py
+@@ -0,0 +1,106 @@
++"""产物快照只清理可验证的旧文件, 不越过安全目录或删除替换后的文件."""
++
++from pathlib import Path
++
++import pytest
++
++from amane.db.models import Library, Metadata
++from amane.media import write_nfo
++from amane.organize import resolve_paths
++from amane.organize.watermark_outputs import (
++    OutputPath,
++    OutputProtection,
++    capture_output_baseline,
++    finish_output_snapshot,
++    read_output_snapshot,
++)
++from amane.parsing import parse_file_info
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    "condition", ["replace", "outside", "modified", "failed", "wrong_number", "shared", "invalid_snapshot"]
++)
++async def test_output_cleanup_boundaries(tmp_path: Path, condition: str) -> None:
++    library_root = tmp_path / "媒体库"
++    library_root.mkdir()
++    source = library_root / "SSIS-345.mp4"
++    source.write_bytes(b"video")
++    old_dir = tmp_path / "安全目录外" if condition == "outside" else library_root / "旧元数据"
++    old_nfo = old_dir / "SSIS-345.nfo"
++    library = Library(
++        path=str(library_root),
++        name="测试",
++        video_template="{raw_name}.{ext}",
++        nfo_template=old_nfo.as_posix(),
++        copy_resources=[],
++    )
++    metadata = Metadata(number="SSIS-345", title="原题")
++    await write_nfo(metadata, old_nfo)
++    if condition == "wrong_number":
++        await write_nfo(Metadata(number="SSIS-999"), old_nfo)
++    baseline = await capture_output_baseline(
++        library, metadata, source, parse_file_info(source), safe_dirs=None, actor_genders={}
++    )
++    if condition == "invalid_snapshot":
++        baseline = '{"version":99,"number":"SSIS-345","outputs":[]}'
++    previous = read_output_snapshot(baseline, metadata.number)
++    new_nfo = library_root / "新元数据" / "SSIS-345.nfo"
++    await write_nfo(metadata, new_nfo)
++    if condition == "modified":
++        old_nfo.write_text("用户修改后的内容", encoding="utf-8")
++    protection = OutputProtection()
++    if condition == "shared":
++        protection.directories.append(old_dir)
++    result = await finish_output_snapshot(
++        previous,
++        [OutputPath(kind="nfo", path=new_nfo)],
++        library_root=library_root,
++        safe_dirs=(),
++        protection=protection,
++        success=condition != "failed",
++    )
++    assert new_nfo.exists() and source.read_bytes() == b"video"
++    assert old_nfo.exists() is (condition != "replace")
++    assert read_output_snapshot(result, metadata.number).outputs[-1].path == new_nfo
++    if condition == "replace":
++        assert not old_dir.exists() and library_root.is_dir()
++    if condition == "wrong_number":
++        assert previous.outputs == []
++    if condition == "modified":
++        assert old_nfo.read_text(encoding="utf-8") == "用户修改后的内容"
++
++
++@pytest.mark.asyncio
++async def test_changed_parent_is_not_followed_during_cleanup(tmp_path: Path) -> None:
++    source = tmp_path / "SSIS-345.mp4"
++    source.write_bytes(b"video")
++    library = Library(
++        name="测试",
++        path=str(tmp_path),
++        video_template="{raw_name}.{ext}",
++        nfo_template="旧目录/{number}.nfo",
++        copy_resources=[],
++    )
++    metadata = Metadata(number="SSIS-345")
++    paths = resolve_paths(library, metadata, ext="mp4", source_path=source, file_info=parse_file_info(source))
++    await write_nfo(metadata, paths.nfo)
++    baseline = await capture_output_baseline(
++        library, metadata, source, parse_file_info(source), safe_dirs=(), actor_genders={}
++    )
++    moved = tmp_path / "移动后的目录"
++    paths.nfo.parent.rename(moved)
++    paths.nfo.parent.mkdir()
++    paths.nfo.write_text("另一个文件", encoding="utf-8")
++    new_nfo = tmp_path / "新目录" / "SSIS-345.nfo"
++    await write_nfo(metadata, new_nfo)
++    await finish_output_snapshot(
++        read_output_snapshot(baseline, metadata.number),
++        [OutputPath(kind="nfo", path=new_nfo)],
++        library_root=tmp_path,
++        safe_dirs=(),
++        protection=OutputProtection(),
++        success=True,
++    )
++    assert paths.nfo.read_text(encoding="utf-8") == "另一个文件"
++    assert (moved / "SSIS-345.nfo").exists()
+diff --git a/web/src/components/media/watermark-edit-dialog.tsx b/web/src/components/media/watermark-edit-dialog.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..fb9e6fcb3afa5e583358274e924b34a731fdc0ec
+--- /dev/null
++++ b/web/src/components/media/watermark-edit-dialog.tsx
+@@ -0,0 +1,309 @@
++import {
++  Alert,
++  Button,
++  Checkbox,
++  Group,
++  Input,
++  Loader,
++  Modal,
++  Select,
++  Stack,
++  Text,
++  Tooltip,
++} from "@mantine/core";
++import { notifications } from "@mantine/notifications";
++import { IconPencil } from "@tabler/icons-react";
++import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
++import { useState } from "react";
++import { useTranslation } from "react-i18next";
++import {
++  getMediaQueryKey,
++  getMediaWatermarksOptions,
++  getMediaWatermarksQueryKey,
++  getMetadataQueryKey,
++  listMediaQueryKey,
++  listMetadataQueryKey,
++  listTasksQueryKey,
++  submitTaskMutation,
++  updateMediaWatermarksMutation,
++} from "@/client/@tanstack/react-query.gen";
++import type {
++  MediaFileResponse,
++  MediaWatermarkResponse,
++  MediaWatermarkUpdateRequest,
++  MosaicNature,
++} from "@/client/types.gen";
++import { EnumToggle } from "@/components/common/enum-toggle";
++import { extractErrorMessage } from "@/lib/api-error";
++import { confirm } from "@/lib/confirm";
++import { buildWatermarkUpdate, type WatermarkDraft } from "./watermark-edit";
++
++const MODES: readonly MediaWatermarkResponse["mode"][] = ["auto", "manual"];
++// 文案提取器按常量名解析取值, 不与列表筛选的马赛克枚举共用名称.
++const WATERMARK_NATURES: readonly MosaicNature[] = ["censored", "uncensored", "cracked", "leaked"];
++
++interface WatermarkEditButtonProps {
++  metadataId: number;
++  metadataNumber: string;
++  files: MediaFileResponse[];
++}
++
++export function WatermarkEditButton({
++  metadataId,
++  metadataNumber,
++  files,
++}: WatermarkEditButtonProps) {
++  const { t } = useTranslation(["metadata", "common"]);
++  const [opened, setOpened] = useState(false);
++  const queryClient = useQueryClient();
++  const update = useMutation(updateMediaWatermarksMutation());
++  const organize = useMutation(submitTaskMutation());
++  const saving = update.isPending || organize.isPending;
++
++  async function save(media: MediaFileResponse, body: MediaWatermarkUpdateRequest) {
++    try {
++      const result = await update.mutateAsync({ path: { media_id: media.id }, body });
++      queryClient.setQueryData(
++        getMediaWatermarksQueryKey({ path: { media_id: media.id } }),
++        result,
++      );
++      void queryClient.invalidateQueries({
++        queryKey: getMetadataQueryKey({ path: { metadata_id: metadataId } }),
++      });
++      void queryClient.invalidateQueries({ queryKey: listMetadataQueryKey() });
++      void queryClient.invalidateQueries({ queryKey: listMediaQueryKey() });
++      void queryClient.invalidateQueries({
++        queryKey: getMediaQueryKey({ path: { media_id: media.id } }),
++      });
++      setOpened(false);
++      notifications.show({ message: t("watermark.saved"), color: "blue" });
++      if (!result.changed) return;
++
++      const organizeNow = await confirm({
++        title: t("watermark.organizeTitle"),
++        message: (
++          <Stack gap="xs">
++            <Text size="sm">{t("watermark.organizeMessage")}</Text>
++            <Text size="xs" c="dimmed" style={{ overflowWrap: "anywhere" }}>
++              {media.path}
++            </Text>
++          </Stack>
++        ),
++        confirmLabel: t("watermark.organizeNow"),
++        cancelLabel: t("watermark.organizeLater"),
++        danger: false,
++      });
++      if (!organizeNow) return;
++
++      await organize.mutateAsync({
++        body: {
++          type: "organize",
++          library_id: media.library_id,
++          media_file_ids: [media.id],
++        },
++      });
++      void queryClient.invalidateQueries({ queryKey: listTasksQueryKey() });
++      notifications.show({ message: t("common:toast.organizeStarted"), color: "blue" });
++    } catch (error) {
++      notifications.show({
++        message: extractErrorMessage(error, t("common:toast.operationFailed")),
++        color: "red",
++      });
++    }
++  }
++
++  return (
++    <>
++      <Tooltip label={t("watermark.noFiles")} disabled={files.length > 0}>
++        <Button
++          size="xs"
++          variant="light"
++          leftSection={<IconPencil size={14} />}
++          disabled={files.length === 0}
++          loading={saving}
++          onClick={() => setOpened(true)}
++        >
++          {t("watermark.action")}
++        </Button>
++      </Tooltip>
++      {opened && (
++        <WatermarkEditDialog
++          files={files}
++          metadataNumber={metadataNumber}
++          saving={saving}
++          onClose={() => setOpened(false)}
++          onSave={(media, body) => void save(media, body)}
++        />
++      )}
++    </>
++  );
++}
++
++function WatermarkEditDialog({
++  files,
++  metadataNumber,
++  saving,
++  onClose,
++  onSave,
++}: {
++  files: MediaFileResponse[];
++  metadataNumber: string;
++  saving: boolean;
++  onClose: () => void;
++  onSave: (media: MediaFileResponse, body: MediaWatermarkUpdateRequest) => void;
++}) {
++  const { t } = useTranslation(["metadata", "common"]);
++  const [selectedId, setSelectedId] = useState<string | null>(
++    files.length === 1 ? String(files[0].id) : null,
++  );
++  const media = files.find((file) => String(file.id) === selectedId);
++  const settings = useQuery({
++    ...getMediaWatermarksOptions({ path: { media_id: media?.id ?? 0 } }),
++    enabled: media != null,
++    refetchOnMount: "always",
++    refetchOnWindowFocus: false,
++    refetchOnReconnect: false,
++  });
++
++  return (
++    <Modal
++      opened
++      onClose={() => {
++        if (!saving) onClose();
++      }}
++      title={`${t("watermark.action")} — ${metadataNumber}`}
++      size="lg"
++      closeOnEscape={!saving}
++      closeOnClickOutside={!saving}
++      withCloseButton={!saving}
++    >
++      <Stack>
++        {files.length > 1 ? (
++          <Select
++            label={t("watermark.file")}
++            placeholder={t("watermark.selectFile")}
++            data={files.map((file) => ({ value: String(file.id), label: file.path }))}
++            value={selectedId}
++            onChange={setSelectedId}
++            disabled={saving}
++            allowDeselect={false}
++            searchable
++          />
++        ) : (
++          <Text size="sm" style={{ overflowWrap: "anywhere" }}>
++            {media?.path}
++          </Text>
++        )}
++        {!media ? (
++          <Text size="sm" c="dimmed">
++            {files.length === 0 ? t("watermark.noFiles") : t("watermark.selectFile")}
++          </Text>
++        ) : settings.isError ? (
++          <Alert color="red">
++            <Stack gap="xs">
++              <Text size="sm">
++                {extractErrorMessage(settings.error, t("common:toast.operationFailed"))}
++              </Text>
++              <Button variant="light" size="xs" onClick={() => void settings.refetch()}>
++                {t("common:actions.retry")}
++              </Button>
++            </Stack>
++          </Alert>
++        ) : !settings.isFetchedAfterMount || !settings.data ? (
++          <Group gap="xs">
++            <Loader size="sm" />
++            <Text size="sm">{t("common:status.loading")}</Text>
++          </Group>
++        ) : (
++          <WatermarkEditForm
++            key={media.id}
++            initial={settings.data}
++            saving={saving}
++            onClose={onClose}
++            onSave={(body) => onSave(media, body)}
++          />
++        )}
++      </Stack>
++    </Modal>
++  );
++}
++
++function WatermarkEditForm({
++  initial,
++  saving,
++  onClose,
++  onSave,
++}: {
++  initial: MediaWatermarkResponse;
++  saving: boolean;
++  onClose: () => void;
++  onSave: (body: MediaWatermarkUpdateRequest) => void;
++}) {
++  const { t } = useTranslation(["metadata", "common"]);
++  const [draft, setDraft] = useState<WatermarkDraft>(initial);
++  const disabled = saving || draft.mode === "auto";
++  const shown = draft.mode === "auto" ? initial : draft;
++  const update = buildWatermarkUpdate(initial, draft);
++
++  return (
++    <Stack>
++      <Input.Wrapper label={t("watermark.mode")}>
++        <EnumToggle
++          options={MODES}
++          value={draft.mode}
++          onChange={(mode) => setDraft((previous) => ({ ...previous, mode }))}
++          getLabel={(mode) => t(`watermark.${mode}`)}
++          disabled={saving}
++        />
++      </Input.Wrapper>
++      <Text size="sm" c="dimmed">
++        {draft.mode === "auto" ? t("watermark.autoHint") : t("watermark.manualHint")}
++      </Text>
++      <Checkbox
++        label={t("filePhase.subtitle")}
++        checked={shown.has_subtitle}
++        disabled={disabled}
++        onChange={(event) => {
++          const hasSubtitle = event.currentTarget.checked;
++          setDraft((previous) => ({ ...previous, has_subtitle: hasSubtitle }));
++        }}
++      />
++      <Input.Wrapper label={t("watermark.mosaic")}>
++        <EnumToggle
++          options={WATERMARK_NATURES}
++          value={shown.mosaic}
++          onChange={(mosaic) => setDraft((previous) => ({ ...previous, mosaic }))}
++          getLabel={(nature) => t(`filePhase.${nature}`)}
++          disabled={disabled}
++          fullWidth
++        />
++      </Input.Wrapper>
++      <Input.Wrapper label={t("search.definition")}>
++        <EnumToggle
++          options={["", ...initial.definition_options]}
++          value={shown.definition ?? ""}
++          onChange={(definition) =>
++            setDraft((previous) => ({ ...previous, definition: definition || null }))
++          }
++          getLabel={(definition) => definition || t("watermark.noDefinition")}
++          disabled={disabled}
++          fullWidth
++        />
++      </Input.Wrapper>
++      <Group justify="flex-end">
++        <Button variant="default" onClick={onClose} disabled={saving}>
++          {t("common:actions.cancel")}
++        </Button>
++        <Button
++          loading={saving}
++          disabled={update === null}
++          onClick={() => {
++            if (update !== null) onSave(update);
++          }}
++        >
++          {t("common:actions.save")}
++        </Button>
++      </Group>
++    </Stack>
++  );
++}
+diff --git a/web/src/components/media/watermark-edit.ts b/web/src/components/media/watermark-edit.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a07b0e5fc6317630da060654912551fda66e6f39
+--- /dev/null
++++ b/web/src/components/media/watermark-edit.ts
+@@ -0,0 +1,32 @@
++import type { MediaWatermarkResponse, MediaWatermarkUpdateRequest } from "@/client/types.gen";
++
++export type WatermarkDraft = Pick<
++  MediaWatermarkResponse,
++  "mode" | "has_subtitle" | "mosaic" | "definition"
++>;
++
++/** 自动只清除人工设置；手动省略未修改字段，保留明确的 false 与空分辨率。 */
++export function buildWatermarkUpdate(
++  initial: WatermarkDraft,
++  draft: WatermarkDraft,
++): MediaWatermarkUpdateRequest | null {
++  if (draft.mode === "auto") {
++    return initial.mode === "auto" ? null : { mode: "auto" };
++  }
++
++  const update: MediaWatermarkUpdateRequest = { mode: "manual" };
++  let changed = initial.mode !== draft.mode;
++  if (draft.has_subtitle !== initial.has_subtitle) {
++    update.has_subtitle = draft.has_subtitle;
++    changed = true;
++  }
++  if (draft.mosaic !== initial.mosaic && draft.mosaic !== null) {
++    update.mosaic = draft.mosaic;
++    changed = true;
++  }
++  if (draft.definition !== initial.definition) {
++    update.definition = draft.definition;
++    changed = true;
++  }
++  return changed ? update : null;
++}
+diff --git a/web/src/i18n/locales/en/metadata.json b/web/src/i18n/locales/en/metadata.json
+index 8a6e6dc0419c3937bf03687ee2eeb73ef6666685..890fbee0283c98af1bb9383b81481fd62428efbe 100644
+--- a/web/src/i18n/locales/en/metadata.json
++++ b/web/src/i18n/locales/en/metadata.json
+@@ -405,6 +405,24 @@
+     "changedCount_other": "{{count}} field(s) changed",
+     "loadImages": "Load images"
+   },
++  "watermark": {
++    "action": "修改水印",
++    "file": "媒体文件",
++    "selectFile": "请选择需要修改的媒体文件",
++    "noFiles": "没有关联媒体文件，无法修改水印",
++    "mode": "设置方式",
++    "auto": "自动",
++    "manual": "手动设置",
++    "autoHint": "保存后清除人工设置，恢复按当前文件名和目录识别。",
++    "manualHint": "保存后保护修改过的项目，后续扫描和整理继续采用这些设置。",
++    "mosaic": "有码／无码状态",
++    "noDefinition": "不标记",
++    "saved": "水印设置已保存",
++    "organizeTitle": "是否立即整理？",
++    "organizeMessage": "水印设置已保存。整理将覆盖 NFO 和已启用的图片，并按模板更新相关路径。",
++    "organizeNow": "立即整理",
++    "organizeLater": "暂不整理"
++  },
+   "lock": {
+     "manage": "Field Locks",
+     "all": "Lock All",
+diff --git a/web/src/i18n/locales/zh-CN/metadata.json b/web/src/i18n/locales/zh-CN/metadata.json
+index 84eeaaebbec6a776e36c2ba29609872234a27f87..e96d8a87f858412a41d6753b03790dc9c622840e 100644
+--- a/web/src/i18n/locales/zh-CN/metadata.json
++++ b/web/src/i18n/locales/zh-CN/metadata.json
+@@ -382,6 +382,24 @@
+     "noChanges": "无修改",
+     "loadImages": "加载图片"
+   },
++  "watermark": {
++    "action": "修改水印",
++    "file": "媒体文件",
++    "selectFile": "请选择需要修改的媒体文件",
++    "noFiles": "没有关联媒体文件，无法修改水印",
++    "mode": "设置方式",
++    "auto": "自动",
++    "manual": "手动设置",
++    "autoHint": "保存后清除人工设置，恢复按当前文件名和目录识别。",
++    "manualHint": "保存后保护修改过的项目，后续扫描和整理继续采用这些设置。",
++    "mosaic": "有码／无码状态",
++    "noDefinition": "不标记",
++    "saved": "水印设置已保存",
++    "organizeTitle": "是否立即整理？",
++    "organizeMessage": "水印设置已保存。整理将覆盖 NFO 和已启用的图片，并按模板更新相关路径。",
++    "organizeNow": "立即整理",
++    "organizeLater": "暂不整理"
++  },
+   "lock": {
+     "manage": "字段锁定",
+     "all": "全部锁定",
+diff --git a/web/src/routes/meta.$metadataId.tsx b/web/src/routes/meta.$metadataId.tsx
+index 9442824bedfd13b19ac3f612293bcf79c795d79a..13cb22bfd69206e48bffa80b8ac17a4a7056a620 100644
+--- a/web/src/routes/meta.$metadataId.tsx
++++ b/web/src/routes/meta.$metadataId.tsx
+@@ -64,6 +64,7 @@ import { VrBadge } from "@/components/media/vr-badge";
+ import { FanartLightbox, FanartStrip } from "@/components/media/fanart-lightbox";
+ import { FilePhaseBadges, FilePhaseOverlay } from "@/components/media/file-phase-badges";
+ import { PosterCropDialog } from "@/components/media/poster-crop-dialog";
++import { WatermarkEditButton } from "@/components/media/watermark-edit-dialog";
+ import { MergeDialog } from "@/components/metadata/merge-dialog";
+ import { type JSONSchemaObject, resolveSchema } from "@/components/schema-form/schema";
+ import { SchemaForm } from "@/components/schema-form/schema-form";
+@@ -832,6 +833,12 @@ function TitleDetailPage() {
+             >
+               {t("common:actions.edit")}
+             </Button>
++            <WatermarkEditButton
++              key={id}
++              metadataId={id}
++              metadataNumber={item.number}
++              files={data.files}
++            />
+             <Menu shadow="md" position="bottom-start">
+               <Menu.Target>
+                 <Button
+diff --git a/web/tests/watermark-edit.test.mjs b/web/tests/watermark-edit.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4f37218d40bd874a7ea9d75a23ae20063478fb72
+--- /dev/null
++++ b/web/tests/watermark-edit.test.mjs
+@@ -0,0 +1,72 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import { buildWatermarkUpdate } from "../src/components/media/watermark-edit.ts";
++
++const automatic = {
++  mode: "auto",
++  has_subtitle: true,
++  mosaic: "censored",
++  definition: "1080p",
++};
++const manual = { ...automatic, mode: "manual" };
++
++for (const { name, initial, draft, expected } of [
++  {
++    name: "取消已有中字时提交明确的否定值，其他标记不受保护",
++    initial: automatic,
++    draft: { ...automatic, mode: "manual", has_subtitle: false },
++    expected: { mode: "manual", has_subtitle: false },
++  },
++  {
++    name: "清除分辨率时保留显式空值",
++    initial: manual,
++    draft: { ...manual, definition: null },
++    expected: { mode: "manual", definition: null },
++  },
++  {
++    name: "修改马赛克状态时不提交未改动字段",
++    initial: manual,
++    draft: { ...manual, mosaic: "cracked" },
++    expected: { mode: "manual", mosaic: "cracked" },
++  },
++  {
++    name: "已有人工设置切回自动时丢弃尚未保存的字段草稿",
++    initial: manual,
++    draft: { mode: "auto", has_subtitle: false, mosaic: "leaked", definition: "4K" },
++    expected: { mode: "auto" },
++  },
++  {
++    name: "自动切换手动后未修改任何字段时仅保存模式",
++    initial: automatic,
++    draft: manual,
++    expected: { mode: "manual" },
++  },
++  {
++    name: "修改后恢复原值不产生保存请求",
++    initial: manual,
++    draft: { ...manual },
++    expected: null,
++  },
++  {
++    name: "自动模式中的未保存手动草稿不产生保存请求",
++    initial: automatic,
++    draft: { ...automatic, has_subtitle: false, definition: null },
++    expected: null,
++  },
++  {
++    name: "尚未识别的马赛克性质保持省略，不提交非法空值",
++    initial: { ...automatic, mosaic: null },
++    draft: { ...automatic, mode: "manual", mosaic: null, has_subtitle: false },
++    expected: { mode: "manual", has_subtitle: false },
++  },
++  {
++    name: "同时修改多个字段时完整保存本次变化",
++    initial: automatic,
++    draft: { mode: "manual", has_subtitle: false, mosaic: "uncensored", definition: "4K" },
++    expected: { mode: "manual", has_subtitle: false, mosaic: "uncensored", definition: "4K" },
++  },
++]) {
++  test(name, () => {
++    assert.deepEqual(buildWatermarkUpdate(initial, draft), expected);
++  });
++}
