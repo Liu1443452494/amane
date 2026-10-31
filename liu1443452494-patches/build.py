@@ -67,6 +67,7 @@ def prepare(root: Path, directory: Path, version: str) -> None:
         "0010-library-jpeg.patch",
         "0011-library-metadata-directory.patch",
         "0012-watermark-editor.patch",
+        "0013-poster-preview.patch",
     )
     actual = {path.name for path in directory.glob("*.patch")}
     if actual != set(patches):

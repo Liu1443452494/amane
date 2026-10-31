@@ -1,0 +1,101 @@
+diff --git a/docs/dev/frontend.md b/docs/dev/frontend.md
+index aba59bd..d5e8884 100644
+--- a/docs/dev/frontend.md
++++ b/docs/dev/frontend.md
+@@ -97,7 +97,7 @@ OpenAPI 字符串联合若需运行时迭代, 集中放置于 `lib/exhaustive-ma
+
+ 外站图经由 `/api/resources/proxy` (`proxyImageUrl`); 评论正文的图片例外: 直接内联, 懒加载且不发送 Referer, 失败降级为链接 — 代理会写入 `Resource`, 评论 URL 不在清理存活集合内. `<img>` 不能带 Authorization, 鉴权靠 cookie. 裁切基准是源图 (海报 `thumb_urls[0]`, 演员头像 `image_urls[0]`) 对应的 Resource 本地文件; 两者共用 `ImageCropDialog`, 只提交像素坐标, 不上传 blob.
+
+-相位水印是 CSS overlay (`FilePhaseOverlay`), 读列表聚合的 `file_phase`, 不修改 Resource 像素; 表格与文件列表仍用 `FilePhaseBadges`. `FanartLightbox` 必须 Portal 到 `document.body`. 外链图片的并发限流见 `components/media/proxy-image.tsx` 与 `lib/image-loader.ts` 的注释; 代理会下载上游原图并写入 `Resource`, 因此「对比来源」面板 (`components/metadata/merge-dialog.tsx`) 的图先渲染为与缩略图同形的占位块, 点击后才加载 — 展开面板不得触发回源.
++相位水印是 CSS overlay (`FilePhaseOverlay`), 读列表聚合的 `file_phase`, 不修改 Resource 像素; 表格与文件列表仍用 `FilePhaseBadges`. 详情页海报预览经由 `components/media/fanart-lightbox.tsx::FanartLightbox` 按需读取当前海报资源, 不读取整理产物; 查看器必须 Portal 到 `document.body`. 外链图片的并发限流见 `components/media/proxy-image.tsx` 与 `lib/image-loader.ts` 的注释; 代理会下载上游原图并写入 `Resource`, 因此「对比来源」面板 (`components/metadata/merge-dialog.tsx`) 的图先渲染为与缩略图同形的占位块, 点击后才加载 — 展开面板不得触发回源.
+
+ ## `lib/` 分层
+
+diff --git a/web/src/i18n/locales/en/metadata.json b/web/src/i18n/locales/en/metadata.json
+index 890fbee..ded00f0 100644
+--- a/web/src/i18n/locales/en/metadata.json
++++ b/web/src/i18n/locales/en/metadata.json
+@@ -150,6 +150,10 @@
+     "playbackClose": "Close",
+     "playbackMuted": "Muted",
+     "commentSeek": "Seek to {{time}}",
++    "previewPoster": {
++      "action": "查看海报",
++      "empty": "暂无海报"
++    },
+     "cropPoster": {
+       "action": "Crop poster",
+       "title": "Crop poster",
+diff --git a/web/src/i18n/locales/zh-CN/metadata.json b/web/src/i18n/locales/zh-CN/metadata.json
+index e96d8a8..2084a6d 100644
+--- a/web/src/i18n/locales/zh-CN/metadata.json
++++ b/web/src/i18n/locales/zh-CN/metadata.json
+@@ -147,6 +147,10 @@
+     "playbackClose": "关闭",
+     "playbackMuted": "静音",
+     "commentSeek": "跳转到 {{time}}",
++    "previewPoster": {
++      "action": "查看海报",
++      "empty": "暂无海报"
++    },
+     "cropPoster": {
+       "action": "裁切海报",
+       "title": "裁切海报",
+diff --git a/web/src/routes/meta.$metadataId.tsx b/web/src/routes/meta.$metadataId.tsx
+index 13cb22b..a3c0961 100644
+--- a/web/src/routes/meta.$metadataId.tsx
++++ b/web/src/routes/meta.$metadataId.tsx
+@@ -28,6 +28,7 @@ import {
+   IconLock,
+   IconLockOpen,
+   IconPencil,
++  IconPhoto,
+   IconPhotoOff,
+   IconPlayerPlay,
+   IconRefresh,
+@@ -144,6 +145,7 @@ function TitleDetailPage() {
+   const [mergeOpen, setMergeOpen] = useState(false);
+   const [cropOpen, setCropOpen] = useState(false);
+   const [coverLightboxOpen, coverLightbox] = useDisclosure(false);
++  const [posterLightboxOpen, posterLightbox] = useDisclosure(false);
+   const [playingTrailer, setPlayingTrailer] = useState(false);
+   // 播放失败的预告片地址: 只对该地址有效, 记录之外 (条目切换或重新刮削换了地址) 一律不算失败.
+   const [failedTrailerUrl, setFailedTrailerUrl] = useState<string | null>(null);
+@@ -193,6 +195,7 @@ function TitleDetailPage() {
+     setPlayingTrailer(false);
+     setThumbBroken(false);
+     setPosterBroken(false);
++    posterLightbox.close();
+   }
+
+   const { data, isLoading, isError } = useQuery({
+@@ -628,6 +631,19 @@ function TitleDetailPage() {
+                 </Button>
+               </Box>
+             </Tooltip>
++            <Tooltip label={t("detail.previewPoster.empty")} disabled={Boolean(posterSrc)}>
++              <Box display="inline-block">
++                <Button
++                  size="xs"
++                  variant="light"
++                  leftSection={<IconPhoto size={14} />}
++                  disabled={!posterSrc}
++                  onClick={posterLightbox.open}
++                >
++                  {t("detail.previewPoster.action")}
++                </Button>
++              </Box>
++            </Tooltip>
+             <LockChip label={t("detail.fields.thumb")} {...lockProps("thumb_urls")} />
+             <LockChip label={t("detail.fields.poster")} {...lockProps("poster_urls")} />
+             <LockChip label={t("detail.fields.trailer")} {...lockProps("trailer_urls")} />
+@@ -1007,6 +1023,9 @@ function TitleDetailPage() {
+       {coverLightboxOpen && coverSrc && (
+         <FanartLightbox images={[coverSrc]} onClose={coverLightbox.close} />
+       )}
++      {posterLightboxOpen && posterSrc && (
++        <FanartLightbox images={[posterSrc]} onClose={posterLightbox.close} />
++      )}
+     </Stack>
+   );
+ }
