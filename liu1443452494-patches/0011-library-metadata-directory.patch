@@ -1,0 +1,879 @@
+diff --git a/docs/dev/frontend.md b/docs/dev/frontend.md
+index 4dc1a3b6eaa8ae7878736d6b98009976bb3cfe0d..86a29fbe64132fe4bb9895fe2f8f07ec3f805f7a 100644
+--- a/docs/dev/frontend.md
++++ b/docs/dev/frontend.md
+@@ -67,6 +67,8 @@ Settings、任务提交、定时创建、metadata 编辑共用 `components/schem
+ 
+ `SchemaForm` 双模式 `patch` (dirty 门控, 只提交 diff) / `create` (完整值); dirty 保存条用 `affix` 固定于视口底, 编辑弹窗里必须抬到 Modal 之上. 空值编码统一经 `schema-form/encode.ts` (按 Create / 列 schema 判空), `x-frozen-keys` 必须保留全部 key; 不允许对着 PATCH partial schema 编码, 手写 Library / Feed 表单经同一个编码器出 body. 任务与定时提交用 `DiscriminatedSchemaForm`; 短枚举共用 `EnumToggle`, 定时 cron 用 `CronPicker` (产出 5-field, 与后端 croniter 一致).
+ 
++媒体库共同目录仅存在于表单: `web/src/components/library/metadata-directory.ts::collapseMetadataDirectory` 按接口默认模板合并显示, `expandMetadataDirectory` 在提交前还原完整单项; 数据库与 API 不保存共同目录. 编辑入口先取得默认模板, 缺失时不能清空单项或忽略前缀提交.
++
+ ## 对话通道
+ 
+ `/` 的实现边界见 [agent.md](agent.md). 前端四点: 对话经 AG-UI (`@ag-ui/client` + `@assistant-ui/react-ag-ui`), 不经 hey-api 也不经 `/ws`, 且 `@ag-ui/client` 必须停留在 0.0.x —— react-ag-ui 的 peer 依赖为 `^0.0.59`, 1.x 调整了 `Message` 内容部件的类型, 与之不兼容; 请求统一经由 `lib/api-token.ts` 的 `apiFetch` (纯透传, 只把 401 转成登录门); 读 assistant-ui 线程状态的 hook (`useAuiState` / `useAgUi*`) 须在 `AssistantRuntimeProvider` 之内 — 持有 provider 的那个组件读不到, 要另起子组件; 展示只认回放行 — `lib/agent/trace.ts::foldTrace` 的产物直接渲染, 本页发起的回合也跟随 `.../agui/events` (从 `after_seq` 接上, 回合未收尾时重开), 运行时的消息虽同步同一份 fold 但不参与渲染, 因此直播与刷新同形, 决不允许另建一份消息状态.
+diff --git a/web/src/components/library/library-form.tsx b/web/src/components/library/library-form.tsx
+index 4eef9a99f2610ba4dcb753344e72863341601378..956c0355c23db72bf88ae1f0f4421e810bcc3e76 100644
+--- a/web/src/components/library/library-form.tsx
++++ b/web/src/components/library/library-form.tsx
+@@ -42,6 +42,12 @@ import {
+   LINK_MODES,
+ } from "@/lib/exhaustive-maps";
+ import classes from "./library-form.module.css";
++import {
++  collapseMetadataDirectory,
++  expandMetadataDirectory,
++  metadataDirectoryDefault,
++  OPTIONAL_TEMPLATE_KEYS,
++} from "./metadata-directory";
+ import { templateCatalogFromPlaceholders } from "./template-highlight";
+ import { TemplateInput } from "./template-input";
+ 
+@@ -56,16 +62,6 @@ function parseCopyResources(values: string[]): LibraryResource[] {
+   return values.filter(isCopyResource);
+ }
+ 
+-const OPTIONAL_TEMPLATE_KEYS = [
+-  "thumb_template",
+-  "poster_template",
+-  "fanart_template",
+-  "extrafanart_template",
+-  "nfo_template",
+-  "trailer_template",
+-  "subtitle_template",
+-] as const satisfies readonly (keyof OptionalPathTemplateDefaults)[];
+-
+ const MOVE_MODES: readonly LibraryResponse["move_mode"][] = ["move", "copy", "hardlink", "symlink"];
+ 
+ const BYTES_PER_MB = 1024 * 1024;
+@@ -100,6 +96,7 @@ export interface LibraryFormState {
+   min_file_size: number;
+   subtitle_extensions: string;
+   video_template: string;
++  metadata_directory: string;
+   thumb_template: string;
+   poster_template: string;
+   fanart_template: string;
+@@ -134,6 +131,7 @@ export function emptyLibraryForm(schema?: PathTemplateSchemaResponse | null): Li
+       schema?.subtitle_extensions_default ?? [".srt", ".ass", ".ssa", ".vtt", ".sub"]
+     ).join(", "),
+     video_template: schema?.video_default ?? "{studio}/{number}/{number}[-CD{cd?}][-{sub?}].{ext}",
++    metadata_directory: "",
+     thumb_template: defaults?.thumb_template ?? "",
+     poster_template: defaults?.poster_template ?? "",
+     fanart_template: defaults?.fanart_template ?? "",
+@@ -149,7 +147,10 @@ export function emptyLibraryForm(schema?: PathTemplateSchemaResponse | null): Li
+   };
+ }
+ 
+-export function libraryFormFromResponse(lib: LibraryResponse): LibraryFormState {
++export function libraryFormFromResponse(
++  lib: LibraryResponse,
++  defaults?: OptionalPathTemplateDefaults,
++): LibraryFormState {
+   return {
+     name: lib.name,
+     path: lib.path,
+@@ -166,13 +167,7 @@ export function libraryFormFromResponse(lib: LibraryResponse): LibraryFormState
+     min_file_size: lib.min_file_size ?? 0,
+     subtitle_extensions: lib.subtitle_extensions?.join(", ") ?? "",
+     video_template: lib.video_template,
+-    thumb_template: lib.thumb_template ?? "",
+-    poster_template: lib.poster_template ?? "",
+-    fanart_template: lib.fanart_template ?? "",
+-    extrafanart_template: lib.extrafanart_template ?? "",
+-    nfo_template: lib.nfo_template ?? "",
+-    trailer_template: lib.trailer_template ?? "",
+-    subtitle_template: lib.subtitle_template ?? "",
++    ...collapseMetadataDirectory(lib, defaults),
+     automation: lib.automation,
+     auto_organize: lib.auto_organize,
+     ingest: lib.ingest,
+@@ -196,7 +191,10 @@ export function parseBlacklistPatterns(s: string): string[] {
+     .filter(Boolean);
+ }
+ 
+-function libraryFormValues(form: LibraryFormState): Record<string, unknown> {
++function libraryFormValues(
++  form: LibraryFormState,
++  defaults?: OptionalPathTemplateDefaults,
++): Record<string, unknown> {
+   return {
+     name: form.name.trim(),
+     path: form.path.trim(),
+@@ -213,13 +211,7 @@ function libraryFormValues(form: LibraryFormState): Record<string, unknown> {
+     min_file_size: form.min_file_size,
+     subtitle_extensions: parseLibraryPatterns(form.subtitle_extensions),
+     video_template: form.video_template.trim(),
+-    thumb_template: form.thumb_template.trim(),
+-    poster_template: form.poster_template.trim(),
+-    fanart_template: form.fanart_template.trim(),
+-    extrafanart_template: form.extrafanart_template.trim(),
+-    nfo_template: form.nfo_template.trim(),
+-    trailer_template: form.trailer_template.trim(),
+-    subtitle_template: form.subtitle_template.trim(),
++    ...expandMetadataDirectory(form, defaults),
+     automation: form.automation,
+     auto_organize: form.auto_organize,
+     ingest: form.ingest,
+@@ -228,18 +220,27 @@ function libraryFormValues(form: LibraryFormState): Record<string, unknown> {
+ }
+ 
+ /** 创建体: 空值按 LibraryCreateRequest schema 编码 (name 可空 → null; patterns → []). */
+-export function libraryFormToCreateBody(form: LibraryFormState): LibraryCreateRequest {
++export function libraryFormToCreateBody(
++  form: LibraryFormState,
++  defaults?: OptionalPathTemplateDefaults,
++): LibraryCreateRequest {
+   // encodeFormBody 按 OpenAPI 列契约编码, 与生成的 CreateRequest 字段集一致.
+   return encodeFormBody(LibraryCreateRequestSchema, {
+-    ...libraryFormValues(form),
++    ...libraryFormValues(form, defaults),
+     scan: form.scan,
+   }) as LibraryCreateRequest;
+ }
+ 
+ /** 更新体: 空值按 LibraryResponse / 列契约编码 (name/path 非空; patterns → []). 不用 Update schema. */
+-export function libraryFormToUpdateBody(form: LibraryFormState): LibraryUpdateRequest {
++export function libraryFormToUpdateBody(
++  form: LibraryFormState,
++  defaults?: OptionalPathTemplateDefaults,
++): LibraryUpdateRequest {
+   // 故意不用 LibraryUpdateRequestSchema: partial 把非空列标成 T|null, 空 glob 会编成 JSON null.
+-  return encodeFormBody(LibraryResponseSchema, libraryFormValues(form)) as LibraryUpdateRequest;
++  return encodeFormBody(
++    LibraryResponseSchema,
++    libraryFormValues(form, defaults),
++  ) as LibraryUpdateRequest;
+ }
+ 
+ const TPL_I18N = {
+@@ -519,25 +520,38 @@ export function LibraryFormFields({ value, onChange, showCreateOnly }: LibraryFo
+           <Accordion.Control>{t("advancedTemplates")}</Accordion.Control>
+           <Accordion.Panel>
+             <Stack gap="sm">
++              <TemplateInput
++                label={t("metadataDirectory.label")}
++                description={t("metadataDirectory.hint")}
++                catalog={catalog}
++                value={value.metadata_directory}
++                onChange={(e) => onChange({ ...value, metadata_directory: e.currentTarget.value })}
++              />
+               <Text size="xs" c="dimmed">
+                 {t("advancedTemplatesHint")}
+               </Text>
+               <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="sm">
+-                {OPTIONAL_TEMPLATE_KEYS.map((key) => (
+-                  <TemplateInput
+-                    key={key}
+-                    label={t(TPL_I18N[key])}
+-                    description={
+-                      optionalDefaults?.[key]
+-                        ? t("optionalTemplateDefault", { default: optionalDefaults[key] })
+-                        : undefined
+-                    }
+-                    placeholder={optionalDefaults?.[key]}
+-                    catalog={catalog}
+-                    value={value[key]}
+-                    onChange={(e) => onChange({ ...value, [key]: e.currentTarget.value })}
+-                  />
+-                ))}
++                {OPTIONAL_TEMPLATE_KEYS.map((key) => {
++                  const defaultTemplate = metadataDirectoryDefault(
++                    value.metadata_directory,
++                    optionalDefaults?.[key],
++                  );
++                  return (
++                    <TemplateInput
++                      key={key}
++                      label={t(TPL_I18N[key])}
++                      description={
++                        defaultTemplate
++                          ? t("optionalTemplateDefault", { default: defaultTemplate })
++                          : undefined
++                      }
++                      placeholder={defaultTemplate}
++                      catalog={catalog}
++                      value={value[key]}
++                      onChange={(e) => onChange({ ...value, [key]: e.currentTarget.value })}
++                    />
++                  );
++                })}
+               </SimpleGrid>
+             </Stack>
+           </Accordion.Panel>
+diff --git a/web/src/components/library/metadata-directory.ts b/web/src/components/library/metadata-directory.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b8fd7a6113f4d8836f14bd94288c4633a71bbbb7
+--- /dev/null
++++ b/web/src/components/library/metadata-directory.ts
+@@ -0,0 +1,99 @@
++import type { LibraryResponse, OptionalPathTemplateDefaults } from "@/client/types.gen";
++
++export const OPTIONAL_TEMPLATE_KEYS: readonly (keyof OptionalPathTemplateDefaults)[] = [
++  "thumb_template",
++  "poster_template",
++  "fanart_template",
++  "extrafanart_template",
++  "nfo_template",
++  "trailer_template",
++  "subtitle_template",
++];
++
++export interface MetadataDirectoryFields extends OptionalPathTemplateDefaults {
++  metadata_directory: string;
++}
++
++function templateValues(
++  templates: Pick<LibraryResponse, keyof OptionalPathTemplateDefaults>,
++): OptionalPathTemplateDefaults {
++  return {
++    thumb_template: templates.thumb_template ?? "",
++    poster_template: templates.poster_template ?? "",
++    fanart_template: templates.fanart_template ?? "",
++    extrafanart_template: templates.extrafanart_template ?? "",
++    nfo_template: templates.nfo_template ?? "",
++    trailer_template: templates.trailer_template ?? "",
++    subtitle_template: templates.subtitle_template ?? "",
++  };
++}
++
++function templateSuffix(template: string | undefined): string | undefined {
++  const anchor = "{link_dir}";
++  if (!template?.startsWith(anchor)) return undefined;
++  const suffix = template.slice(anchor.length);
++  if (!/^[\\/][^\\/]/.test(suffix)) return undefined;
++  return suffix.slice(1);
++}
++
++/** 保留目录内部写法与已有末尾分隔符，避免改变盘符、共享路径和模板表达式。 */
++export function metadataDirectoryDefault(
++  directory: string,
++  defaultTemplate: string | undefined,
++): string | undefined {
++  const prefix = directory.trim();
++  if (!prefix) return defaultTemplate;
++  const suffix = templateSuffix(defaultTemplate);
++  if (suffix === undefined) return undefined;
++  return `${prefix}${/[\\/]$/.test(prefix) ? "" : "/"}${suffix}`;
++}
++
++/** 仅七项可以无损还原为共同目录和默认名称时合并显示。 */
++export function collapseMetadataDirectory(
++  templates: Pick<LibraryResponse, keyof OptionalPathTemplateDefaults>,
++  defaults?: OptionalPathTemplateDefaults,
++): MetadataDirectoryFields {
++  const result = { metadata_directory: "", ...templateValues(templates) };
++  if (!defaults) return result;
++
++  let directory: string | undefined;
++  for (const key of OPTIONAL_TEMPLATE_KEYS) {
++    const suffix = templateSuffix(defaults[key]);
++    const value = result[key];
++    if (suffix === undefined || !value.endsWith(suffix)) return result;
++    const prefix = value.slice(0, -suffix.length);
++    if (!/[\\/]$/.test(prefix) || prefix.trim() !== prefix) return result;
++    if (directory !== undefined && prefix !== directory) return result;
++    directory = prefix;
++  }
++  if (directory === undefined) return result;
++
++  result.metadata_directory = directory;
++  for (const key of OPTIONAL_TEMPLATE_KEYS) result[key] = "";
++  return result;
++}
++
++/** 请求体只包含原有七项；前缀仅展开留空项，显式单项始终优先。 */
++export function expandMetadataDirectory(
++  form: MetadataDirectoryFields,
++  defaults?: OptionalPathTemplateDefaults,
++): OptionalPathTemplateDefaults {
++  const result = templateValues(form);
++  for (const key of OPTIONAL_TEMPLATE_KEYS) {
++    const value = result[key].trim();
++    if (value || !form.metadata_directory.trim()) {
++      result[key] = value;
++      continue;
++    }
++    const defaultTemplate = defaults?.[key];
++    if (defaultTemplate === undefined) {
++      throw new Error("未能读取附属资源默认模板，请重新打开媒体库配置后重试。");
++    }
++    const expanded = metadataDirectoryDefault(form.metadata_directory, defaultTemplate);
++    if (expanded === undefined) {
++      throw new Error("附属资源默认模板不支持元数据目录前缀，请使用单项完整模板。");
++    }
++    result[key] = expanded;
++  }
++  return result;
++}
+diff --git a/web/src/i18n/locales/en/library.json b/web/src/i18n/locales/en/library.json
+index d1b359366d8d71fbeb9ea5a680c692f46b6ed0e6..099e6297c4823556963089cf54c115c8b9773161 100644
+--- a/web/src/i18n/locales/en/library.json
++++ b/web/src/i18n/locales/en/library.json
+@@ -145,6 +145,10 @@
+   "fieldStrmContentTemplateHint": "Applies when the link mode is STRM. Default writes the video file absolute path",
+   "fieldInitialRefresh": "Refresh on Creation",
+   "advancedTemplates": "Sidecar Templates",
++  "metadataDirectory": {
++    "label": "元数据目录前缀",
++    "hint": "支持路径模板。单项留空时使用此前缀和默认文件名；单独填写时使用完整模板。前缀留空时沿用原有默认路径。"
++  },
+   "advancedTemplatesHint": "Leave empty to use defaults",
+   "optionalTemplateDefault": "Default: {{default}}",
+   "placeholders": {
+diff --git a/web/src/i18n/locales/zh-CN/library.json b/web/src/i18n/locales/zh-CN/library.json
+index 133e7186b56d0247c73a6bcb891329226dc5e328..629286218e852d9764b587347a00eb48aa1b0203 100644
+--- a/web/src/i18n/locales/zh-CN/library.json
++++ b/web/src/i18n/locales/zh-CN/library.json
+@@ -143,6 +143,10 @@
+   "fieldStrmContentTemplateHint": "链接方式为 STRM 时有效. 默认写入视频文件绝对路径",
+   "fieldInitialRefresh": "创建后立即扫描",
+   "advancedTemplates": "附属资源模板",
++  "metadataDirectory": {
++    "label": "元数据目录前缀",
++    "hint": "支持路径模板。单项留空时使用此前缀和默认文件名；单独填写时使用完整模板。前缀留空时沿用原有默认路径。"
++  },
+   "advancedTemplatesHint": "留空使用默认值",
+   "optionalTemplateDefault": "默认: {{default}}",
+   "placeholders": {
+diff --git a/web/src/routes/libraries.$libraryId.tsx b/web/src/routes/libraries.$libraryId.tsx
+index 1ccce8ca5c030bc7d365990a8d69760e209b2d1c..57d3f69f8487bd6441bfeea090c7e274c8aa9d9b 100644
+--- a/web/src/routes/libraries.$libraryId.tsx
++++ b/web/src/routes/libraries.$libraryId.tsx
+@@ -22,6 +22,7 @@ import { useMemo, useRef, useState } from "react";
+ import { useTranslation } from "react-i18next";
+ import { z } from "zod";
+ import {
++  getPathTemplateSchemaOptions,
+   listLibrariesOptions,
+   listLibrariesQueryKey,
+   listMediaOptions,
+@@ -100,6 +101,10 @@ function LibraryDetailPage() {
+   const validId = Number.isInteger(id) && id > 0;
+ 
+   const { data, isLoading } = useQuery({ ...listLibrariesOptions(), enabled: validId });
++  const { data: templateSchema } = useQuery({
++    ...getPathTemplateSchemaOptions(),
++    enabled: validId,
++  });
+   const library = data?.items.find((lib) => lib.id === id);
+ 
+   const [editOpen, setEditOpen] = useState(false);
+@@ -207,17 +212,32 @@ function LibraryDetailPage() {
+     );
+   }
+ 
+-  function openEdit() {
++  async function openEdit(): Promise<void> {
+     if (!library) return;
+-    setEditForm(libraryFormFromResponse(library));
+-    setEditOpen(true);
++    try {
++      const schema = await queryClient.ensureQueryData(getPathTemplateSchemaOptions());
++      setEditForm(libraryFormFromResponse(library, schema.optional_defaults));
++      setEditOpen(true);
++    } catch (err) {
++      notifications.show({
++        message: extractErrorMessage(err, t("common:toast.operationFailed")),
++        color: "red",
++      });
++    }
+   }
+ 
+   function submitEdit() {
+-    updateMutation.mutate({
+-      path: { library_id: id },
+-      body: libraryFormToUpdateBody(editForm),
+-    });
++    try {
++      updateMutation.mutate({
++        path: { library_id: id },
++        body: libraryFormToUpdateBody(editForm, templateSchema?.optional_defaults),
++      });
++    } catch (err) {
++      notifications.show({
++        message: extractErrorMessage(err, t("common:toast.operationFailed")),
++        color: "red",
++      });
++    }
+   }
+ 
+   return (
+@@ -322,7 +342,7 @@ function LibraryDetailPage() {
+           trailing={
+             <LibraryActionButtons
+               library={library}
+-              onConfigure={openEdit}
++              onConfigure={() => void openEdit()}
+               onDeleted={() => void navigate({ to: "/libraries" })}
+             />
+           }
+diff --git a/web/src/routes/libraries.index.tsx b/web/src/routes/libraries.index.tsx
+index 59f2991efc3608abad1f664bd987d5ff0c8734c3..84ff173f6d93799375733b41c1b7bb64a74ac475 100644
+--- a/web/src/routes/libraries.index.tsx
++++ b/web/src/routes/libraries.index.tsx
+@@ -7,6 +7,7 @@ import { useState } from "react";
+ import { useTranslation } from "react-i18next";
+ import {
+   createLibraryMutation,
++  getPathTemplateSchemaOptions,
+   listLibrariesOptions,
+   listLibrariesQueryKey,
+   updateLibraryMutation,
+@@ -73,6 +74,7 @@ function LibrariesPage() {
+   const { t } = useTranslation(["library", "common"]);
+   const queryClient = useQueryClient();
+   const { data, isLoading } = useQuery(listLibrariesOptions());
++  const { data: templateSchema } = useQuery(getPathTemplateSchemaOptions());
+ 
+   const [createOpen, setCreateOpen] = useState(false);
+   const [createForm, setCreateForm] = useState<LibraryFormState>(emptyLibraryForm());
+@@ -110,18 +112,45 @@ function LibrariesPage() {
+       }),
+   });
+ 
++  async function openEdit(lib: LibraryResponse): Promise<void> {
++    try {
++      const schema = await queryClient.ensureQueryData(getPathTemplateSchemaOptions());
++      setEditForm(libraryFormFromResponse(lib, schema.optional_defaults));
++      setEditing(lib);
++    } catch (err) {
++      notifications.show({
++        message: extractErrorMessage(err, t("common:toast.operationFailed")),
++        color: "red",
++      });
++    }
++  }
++
+   function submitCreate() {
+-    createMutation.mutate({
+-      body: libraryFormToCreateBody(createForm),
+-    });
++    try {
++      createMutation.mutate({
++        body: libraryFormToCreateBody(createForm, templateSchema?.optional_defaults),
++      });
++    } catch (err) {
++      notifications.show({
++        message: extractErrorMessage(err, t("common:toast.operationFailed")),
++        color: "red",
++      });
++    }
+   }
+ 
+   function submitEdit() {
+     if (!editing) return;
+-    updateMutation.mutate({
+-      path: { library_id: editing.id },
+-      body: libraryFormToUpdateBody(editForm),
+-    });
++    try {
++      updateMutation.mutate({
++        path: { library_id: editing.id },
++        body: libraryFormToUpdateBody(editForm, templateSchema?.optional_defaults),
++      });
++    } catch (err) {
++      notifications.show({
++        message: extractErrorMessage(err, t("common:toast.operationFailed")),
++        color: "red",
++      });
++    }
+   }
+ 
+   return (
+@@ -141,14 +170,7 @@ function LibrariesPage() {
+ 
+       <Stack gap="sm">
+         {(data?.items ?? []).map((lib) => (
+-          <LibraryCard
+-            key={lib.id}
+-            library={lib}
+-            onEdit={() => {
+-              setEditing(lib);
+-              setEditForm(libraryFormFromResponse(lib));
+-            }}
+-          />
++          <LibraryCard key={lib.id} library={lib} onEdit={() => void openEdit(lib)} />
+         ))}
+       </Stack>
+ 
+diff --git a/web/tests/library-metadata-directory.test.mjs b/web/tests/library-metadata-directory.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..e20f1d06f70603e233508a9ef2090153369cf88b
+--- /dev/null
++++ b/web/tests/library-metadata-directory.test.mjs
+@@ -0,0 +1,374 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import {
++  collapseMetadataDirectory,
++  expandMetadataDirectory,
++} from "../src/components/library/metadata-directory.ts";
++
++const EMPTY_TEMPLATES = Object.freeze({
++  thumb_template: "",
++  poster_template: "",
++  fanart_template: "",
++  extrafanart_template: "",
++  nfo_template: "",
++  trailer_template: "",
++  subtitle_template: "",
++});
++
++const DEFAULTS = Object.freeze({
++  thumb_template: "{link_dir}/thumb.jpg",
++  poster_template: "{link_dir}/poster.jpg",
++  fanart_template: "{link_dir}/fanart.jpg",
++  extrafanart_template: "{link_dir}/extrafanart",
++  nfo_template: "{link_dir}/{video_name}.nfo",
++  trailer_template: "{link_dir}/trailer.mp4",
++  subtitle_template: "{link_dir}/{raw_srt_name}.{ext}",
++});
++
++const USER_DIRECTORY = String.raw`D:\工作文件夹\日本元数据/{actresses}/[[{number}[-{mosaic?|cracked=U,censored=}{sub?}]]] {title}/`;
++const UNC_DIRECTORY = "\\\\媒体服务器\\共享目录\\元数据\\";
++const BACKSLASH_DEFAULTS = Object.freeze(
++  Object.fromEntries(
++    Object.entries(DEFAULTS).map(([key, value]) => [
++      key,
++      value.replace("{link_dir}/", "{link_dir}\\"),
++    ]),
++  ),
++);
++const NESTED_DEFAULTS = Object.freeze({
++  ...DEFAULTS,
++  thumb_template: "{link_dir}/images/thumb.jpg",
++  extrafanart_template: "{link_dir}\\images\\extrafanart",
++});
++
++function templatesIn(directory) {
++  return {
++    thumb_template: `${directory}thumb.jpg`,
++    poster_template: `${directory}poster.jpg`,
++    fanart_template: `${directory}fanart.jpg`,
++    extrafanart_template: `${directory}extrafanart`,
++    nfo_template: `${directory}{video_name}.nfo`,
++    trailer_template: `${directory}trailer.mp4`,
++    subtitle_template: `${directory}{raw_srt_name}.{ext}`,
++  };
++}
++
++function formWith(directory, overrides = {}) {
++  return { ...EMPTY_TEMPLATES, metadata_directory: directory, ...overrides };
++}
++
++function unchangedTemplates(templates) {
++  return {
++    ...Object.fromEntries(Object.keys(EMPTY_TEMPLATES).map((key) => [key, templates[key] ?? ""])),
++    metadata_directory: "",
++  };
++}
++
++const nestedTemplates = {
++  ...templatesIn("D:/元数据/"),
++  thumb_template: "D:/元数据/images/thumb.jpg",
++  extrafanart_template: "D:/元数据/images\\extrafanart",
++};
++
++const explicitTemplates = templatesIn("E:/单独设置/");
++const paddedExplicitTemplates = Object.fromEntries(
++  Object.entries(explicitTemplates).map(([key, value]) => [key, ` \t${value}\r\n`]),
++);
++
++for (const entry of [
++  {
++    name: "完整用户模板保留中文、映射、可选组和占位符",
++    form: formWith(USER_DIRECTORY),
++    defaults: DEFAULTS,
++    expected: templatesIn(USER_DIRECTORY),
++  },
++  {
++    name: "目录末尾缺少分隔符时补充正斜杠",
++    form: formWith("D:\\本地元数据"),
++    defaults: DEFAULTS,
++    expected: templatesIn("D:\\本地元数据/"),
++  },
++  {
++    name: "目录已有正斜杠时不重复追加",
++    form: formWith("D:/本地元数据/"),
++    defaults: DEFAULTS,
++    expected: templatesIn("D:/本地元数据/"),
++  },
++  {
++    name: "目录已有反斜杠时保留原分隔符",
++    form: formWith("D:\\本地元数据\\"),
++    defaults: DEFAULTS,
++    expected: templatesIn("D:\\本地元数据\\"),
++  },
++  {
++    name: "仅清除目录首尾空白并保留内部空格",
++    form: formWith(" \tD:/本地 元数据/\r\n"),
++    defaults: DEFAULTS,
++    expected: templatesIn("D:/本地 元数据/"),
++  },
++  {
++    name: "Windows 盘符根目录保留反斜杠",
++    form: formWith("D:\\"),
++    defaults: DEFAULTS,
++    expected: templatesIn("D:\\"),
++  },
++  {
++    name: "正斜杠根目录保留根路径",
++    form: formWith("/"),
++    defaults: DEFAULTS,
++    expected: templatesIn("/"),
++  },
++  {
++    name: "UNC 目录保留双反斜杠及共享路径",
++    form: formWith(UNC_DIRECTORY),
++    defaults: DEFAULTS,
++    expected: templatesIn(UNC_DIRECTORY),
++  },
++  {
++    name: "混合分隔符及相对目录模板不进行规范化",
++    form: formWith(String.raw`分类/{actresses}\[{number}]`),
++    defaults: DEFAULTS,
++    expected: templatesIn(String.raw`分类/{actresses}\[{number}]/`),
++  },
++  {
++    name: "显式单项清除首尾空白后优先使用",
++    form: formWith(USER_DIRECTORY, {
++      thumb_template: "  E:\\单独目录\\自定义封面.jpg  ",
++      nfo_template: "\tNFO/{number}.nfo\n",
++    }),
++    defaults: DEFAULTS,
++    expected: {
++      ...templatesIn(USER_DIRECTORY),
++      thumb_template: "E:\\单独目录\\自定义封面.jpg",
++      nfo_template: "NFO/{number}.nfo",
++    },
++  },
++  {
++    name: "共同目录为空时允许缺少默认模板且沿用单项修整",
++    form: formWith(" \t ", {
++      thumb_template: " D:/既有/thumb.jpg ",
++      nfo_template: "\t ",
++    }),
++    expected: {
++      ...EMPTY_TEMPLATES,
++      thumb_template: "D:/既有/thumb.jpg",
++    },
++  },
++  {
++    name: "七项均已填写时无需默认模板",
++    form: formWith("D:/共同目录/", paddedExplicitTemplates),
++    expected: explicitTemplates,
++  },
++  {
++    name: "默认模板锚点允许反斜杠",
++    form: formWith("D:/元数据/"),
++    defaults: BACKSLASH_DEFAULTS,
++    expected: templatesIn("D:/元数据/"),
++  },
++  {
++    name: "默认相对子目录与其分隔符完整保留",
++    form: formWith("D:/元数据/"),
++    defaults: NESTED_DEFAULTS,
++    expected: nestedTemplates,
++  },
++  {
++    name: "已有显式值的单项不依赖其默认模板",
++    form: formWith("D:/元数据/", { thumb_template: "E:/封面.jpg" }),
++    defaults: { ...DEFAULTS, thumb_template: "不支持的默认模板" },
++    expected: { ...templatesIn("D:/元数据/"), thumb_template: "E:/封面.jpg" },
++  },
++]) {
++  test(`保存展开：${entry.name}`, () => {
++    assert.deepEqual(expandMetadataDirectory(entry.form, entry.defaults), entry.expected);
++  });
++}
++
++for (const entry of [
++  { name: "默认模板数据缺失", defaults: undefined, missing: true },
++  { name: "单项默认模板缺失", defaults: { ...DEFAULTS, thumb_template: undefined }, missing: true },
++  { name: "默认模板仅有文件名", defaults: { ...DEFAULTS, thumb_template: "thumb.jpg" } },
++  {
++    name: "默认模板引用其他目录占位符",
++    defaults: { ...DEFAULTS, thumb_template: "{video_dir}/thumb.jpg" },
++  },
++  {
++    name: "默认目录锚点未出现在开头",
++    defaults: { ...DEFAULTS, thumb_template: "其他/{link_dir}/thumb.jpg" },
++  },
++  {
++    name: "默认目录锚点缺少路径分隔符",
++    defaults: { ...DEFAULTS, thumb_template: "{link_dir}thumb.jpg" },
++  },
++]) {
++  test(`保存错误：${entry.name}时返回中文错误`, () => {
++    const form = Object.freeze(formWith("D:/元数据/"));
++    assert.throws(
++      () => expandMetadataDirectory(form, entry.defaults),
++      (error) => {
++        assert.ok(error instanceof Error);
++        assert.match(
++          error.message,
++          entry.missing ? /未能读取附属资源默认模板/ : /附属资源默认模板不支持元数据目录前缀/,
++        );
++        return true;
++      },
++    );
++  });
++}
++
++for (const entry of [
++  { name: "完整用户目录模板", directory: USER_DIRECTORY, defaults: DEFAULTS },
++  { name: "Windows 盘符根目录", directory: "D:\\", defaults: DEFAULTS },
++  { name: "正斜杠根目录", directory: "/", defaults: DEFAULTS },
++  { name: "UNC 目录", directory: UNC_DIRECTORY, defaults: DEFAULTS },
++  { name: "末尾反斜杠目录", directory: "D:\\元数据\\", defaults: DEFAULTS },
++  { name: "反斜杠默认锚点", directory: "D:/元数据/", defaults: BACKSLASH_DEFAULTS },
++  {
++    name: "包含完整默认相对子目录",
++    directory: "D:/元数据/",
++    defaults: NESTED_DEFAULTS,
++    templates: nestedTemplates,
++  },
++]) {
++  test(`编辑提取：${entry.name}清空七项且再次保存保持原值`, () => {
++    const templates = entry.templates ?? templatesIn(entry.directory);
++    const collapsed = collapseMetadataDirectory(templates, entry.defaults);
++    assert.deepEqual(collapsed, formWith(entry.directory));
++    assert.deepEqual(expandMetadataDirectory(collapsed, entry.defaults), templates);
++  });
++}
++
++const matchingTemplates = templatesIn("D:/元数据/");
++
++for (const entry of [
++  { name: "默认模板数据缺失", templates: matchingTemplates },
++  { name: "七项均未提供", templates: {}, defaults: DEFAULTS },
++  {
++    name: "空串与空值并存",
++    templates: { ...EMPTY_TEMPLATES, thumb_template: null, nfo_template: undefined },
++    defaults: DEFAULTS,
++  },
++  {
++    name: "其中一项为空值",
++    templates: { ...matchingTemplates, poster_template: null },
++    defaults: DEFAULTS,
++  },
++  {
++    name: "其中一项未提供",
++    templates: { ...matchingTemplates, subtitle_template: undefined },
++    defaults: DEFAULTS,
++  },
++  {
++    name: "其中一项自定义文件名",
++    templates: { ...matchingTemplates, thumb_template: "D:/元数据/自定义封面.jpg" },
++    defaults: DEFAULTS,
++  },
++  {
++    name: "其中一项位于其他目录",
++    templates: { ...matchingTemplates, poster_template: "E:/其他目录/poster.jpg" },
++    defaults: DEFAULTS,
++  },
++  {
++    name: "目录仅大小写不同也不合并",
++    templates: { ...matchingTemplates, thumb_template: "d:/元数据/thumb.jpg" },
++    defaults: DEFAULTS,
++  },
++  {
++    name: "目录分隔符不同也不合并",
++    templates: { ...matchingTemplates, thumb_template: "D:\\元数据\\thumb.jpg" },
++    defaults: DEFAULTS,
++  },
++  {
++    name: "单项包含额外前导空白",
++    templates: { ...matchingTemplates, thumb_template: " D:/元数据/thumb.jpg" },
++    defaults: DEFAULTS,
++  },
++  {
++    name: "单项包含额外末尾空白",
++    templates: { ...matchingTemplates, thumb_template: "D:/元数据/thumb.jpg " },
++    defaults: DEFAULTS,
++  },
++  {
++    name: "共同字符串与默认名称之间缺少目录分隔符",
++    templates: templatesIn("自定义"),
++    defaults: DEFAULTS,
++  },
++  {
++    name: "只有默认名称而没有目录前缀",
++    templates: templatesIn(""),
++    defaults: DEFAULTS,
++  },
++  {
++    name: "NFO 名称已经展开而不再包含默认占位符",
++    templates: { ...matchingTemplates, nfo_template: "D:/元数据/影片名称.nfo" },
++    defaults: DEFAULTS,
++  },
++  {
++    name: "字幕文件名未保持默认后缀",
++    templates: { ...matchingTemplates, subtitle_template: "D:/元数据/{video_name}.{ext}" },
++    defaults: DEFAULTS,
++  },
++  {
++    name: "默认相对子目录不匹配",
++    templates: matchingTemplates,
++    defaults: NESTED_DEFAULTS,
++  },
++  {
++    name: "单项默认模板缺失",
++    templates: matchingTemplates,
++    defaults: { ...DEFAULTS, thumb_template: undefined },
++  },
++  {
++    name: "单项默认模板锚点不支持",
++    templates: matchingTemplates,
++    defaults: { ...DEFAULTS, thumb_template: "{video_dir}/thumb.jpg" },
++  },
++]) {
++  test(`编辑保留：${entry.name}时完整保留各项`, () => {
++    assert.deepEqual(
++      collapseMetadataDirectory(entry.templates, entry.defaults),
++      unchangedTemplates(entry.templates),
++    );
++  });
++}
++
++test("保存输出只包含七项模板且不修改表单或默认值", () => {
++  const form = Object.freeze({
++    ...formWith(USER_DIRECTORY),
++    name: "媒体库名称",
++    path: "Z:/网盘",
++    video_template: "{raw_video_path}",
++    write_nfo: false,
++  });
++  const formBefore = { ...form };
++  const defaultsBefore = { ...DEFAULTS };
++  const expanded = expandMetadataDirectory(form, DEFAULTS);
++  assert.deepEqual(expanded, templatesIn(USER_DIRECTORY));
++  assert.notStrictEqual(expanded, form);
++  assert.deepEqual(form, formBefore);
++  assert.deepEqual(DEFAULTS, defaultsBefore);
++});
++
++test("编辑提取返回新对象且不修改响应或默认值", () => {
++  const response = Object.freeze({ ...templatesIn(USER_DIRECTORY), id: 1, name: "媒体库名称" });
++  const responseBefore = { ...response };
++  const defaultsBefore = { ...DEFAULTS };
++  const collapsed = collapseMetadataDirectory(response, DEFAULTS);
++  assert.deepEqual(collapsed, formWith(USER_DIRECTORY));
++  assert.notStrictEqual(collapsed, response);
++  assert.deepEqual(response, responseBefore);
++  assert.deepEqual(DEFAULTS, defaultsBefore);
++});
++
++test("未发生展开或提取时仍返回新对象并保留输入", () => {
++  const form = Object.freeze(formWith(""));
++  const response = Object.freeze({ ...matchingTemplates, poster_template: null });
++  const expanded = expandMetadataDirectory(form);
++  const collapsed = collapseMetadataDirectory(response, DEFAULTS);
++  assert.deepEqual(expanded, EMPTY_TEMPLATES);
++  assert.deepEqual(collapsed, unchangedTemplates(response));
++  assert.notStrictEqual(expanded, form);
++  assert.notStrictEqual(collapsed, response);
++  assert.equal(response.poster_template, null);
++  assert.equal(form.metadata_directory, "");
++});
