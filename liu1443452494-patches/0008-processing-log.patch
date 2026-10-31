@@ -12,20 +12,20 @@ index c5b8bec..4dc1a3b 100644
  
  | 数据 | 存储位置 |
 diff --git a/docs/dev/observability.md b/docs/dev/observability.md
-index dcc9bce..16151d6 100644
+index dcc9bce..d352837 100644
 --- a/docs/dev/observability.md
 +++ b/docs/dev/observability.md
 @@ -84,6 +84,8 @@ ORGANIZE / REFRESH 全量回放、浏览器 HAR、回放写生产 DB / 移动用
  
  ## 排障速查
  
-+片库详情「处理日志」经 `src/amane/api/routes/liu1443452494_processing_log.py::get_latest_processing_log` 按番号返回最近的 SCRAPE、ORGANIZE；批量整理按该番号实际日志时间比较。`src/amane/observability/liu1443452494_process_events.py::file_processing` 绑定番号与历史路径，线程复制上下文；`src/amane/observability/liu1443452494_processing_log.py::build_report` 仅合并同任务、来源、文件、完整 URL 与方法的请求过程，终态更新首次记录；普通地址改为操作说明，最终图片地址去重，原始日志不变。任务编号复用按开始时间隔离，无归属的旧整理不关联，历史缺项不读取当前资源补值。弹窗打开时查询，读取截断须提示。
++片库详情「处理日志」经 `src/amane/api/routes/liu1443452494_processing_log.py::get_latest_processing_log` 按番号返回最近的 SCRAPE、ORGANIZE；批量整理按该番号日志时间比较。`src/amane/observability/liu1443452494_process_events.py::file_processing` 绑定番号与历史路径；`src/amane/observability/liu1443452494_processing_log.py::build_report` 合并同任务、来源、文件、完整 URL 与方法的请求，终态和日亚统计更新首次记录。统计契约见 `src/amane/observability/liu1443452494_search_stats.py::AmazonSearchStats`：按卡片计数，仅明确无结果页面记零。普通地址改为操作说明，最终图片地址去重；历史缺项不补值，任务编号复用按开始时间隔离，无归属的旧整理不关联。弹窗打开时查询，读取截断须提示。
 +
  | 症状 | 排查 |
  |------|------|
  | 无 task.log | worker 未 claim 或 Recorder 未 begin |
 diff --git a/src/amane/api/routes/__init__.py b/src/amane/api/routes/__init__.py
-index 42ba215..4c4a50a 100644
+index 299081e..c958c20 100644
 --- a/src/amane/api/routes/__init__.py
 +++ b/src/amane/api/routes/__init__.py
 @@ -12,6 +12,7 @@ from .feeds import router as feeds_router
@@ -36,7 +36,7 @@ index 42ba215..4c4a50a 100644
  from .media import router as media_router
  from .metadata import router as metadata_router
  from .network import router as network_router
-@@ -36,6 +37,7 @@ router.include_router(cleanup_router)
+@@ -37,6 +38,7 @@ router.include_router(cleanup_router)
  router.include_router(files_router)
  router.include_router(media_router)
  router.include_router(metadata_router)
@@ -358,10 +358,59 @@ index c0b0149..70a3df3 100644
              return list(dict.fromkeys([*previous, *self._attempts]))
          return [candidate.url for candidate in ranked] + [
 diff --git a/src/amane/media/liu1443452494_posters.py b/src/amane/media/liu1443452494_posters.py
-index 2c5b1b5..f1a5710 100644
+index 2c5b1b5..d0219ea 100644
 --- a/src/amane/media/liu1443452494_posters.py
 +++ b/src/amane/media/liu1443452494_posters.py
-@@ -365,6 +365,7 @@ class PosterResolver:
+@@ -3,7 +3,7 @@
+ import re
+ import unicodedata
+ from collections.abc import Mapping
+-from typing import TYPE_CHECKING
++from typing import TYPE_CHECKING, Literal
+ from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, urlunsplit
+ 
+ import structlog
+@@ -11,7 +11,8 @@ from parsel import Selector
+ from pydantic import BaseModel, Field, TypeAdapter, ValidationError
+ 
+ from ..crawlers.models import MediaMetadata
+-from ..net.errors import FailureReason, classify_block
++from ..net.errors import FailureReason, SourceError, classify_block
++from ..observability.liu1443452494_search_stats import AmazonSearchStats
+ from ..parsing import split_actor_aliases
+ 
+ if TYPE_CHECKING:
+@@ -356,15 +357,37 @@ def _amazon_media(card: Selector, title: str) -> bool:
+     )
+ 
+ 
++def _amazon_no_results(tree: Selector) -> bool:
++    if tree.css('.s-no-results, [data-component-type="s-no-results"]'):
++        return True
++    # 只检查页面可见标题，脚本中的通用空结果文案不能证明本次搜索为空。
++    headings = tree.css("h2").xpath("string(.)").getall()
++    markers = (
++        "検索クエリに一致する結果はありません",
++        "検索に一致する商品はありません",
++        "検索結果はありません",
++        "一致する検索結果がありません",
++        "no results for",
++    )
++    return any(marker in " ".join(heading.split()).casefold() for heading in headings for marker in markers)
++
++
++def _record_search_stats(url: str, stats: AmazonSearchStats) -> None:
++    structlog.get_logger().info("日亚搜索结果统计", url=url, stats=stats.model_dump(mode="json"))
++
++
+ class PosterResolver:
+     def __init__(self, client: WebClient, images: ImagePool) -> None:
+         self._client = client
+         self._images = images
+         self._pages: dict[str, PosterPage | None] = {}
++        self._page_failures: dict[str, str] = {}
++        self._product_failures: dict[str, Literal["unavailable", "identity"]] = {}
+ 
      async def _html(self, url: str) -> PosterPage | None:
          if url not in self._pages:
              self._pages[url] = None
@@ -369,17 +418,29 @@ index 2c5b1b5..f1a5710 100644
              try:
                  response = await self._client.request("GET", url, headers={"Accept-Language": "ja-JP,ja;q=0.9"})
                  response.encoding = "utf-8"
-@@ -379,6 +380,9 @@ class PosterResolver:
+@@ -376,10 +399,16 @@ class PosterResolver:
+                     and _safe_url(str(response.url), {"www.amazon.co.jp", "amazon.co.jp"})
+                 )
+                 if (reason is not None and not eligibility) or "validateCaptcha" in html:
++                    self._page_failures[url] = reason.value if reason else "captcha"
                      structlog.get_logger().warning("高清海报页面不可用", url=url, reason=reason or "验证码")
                  else:
++                    self._page_failures.pop(url, None)
                      self._pages[url] = PosterPage(url=str(response.url), html=html)
 +                    structlog.get_logger().info(
 +                        "高清海报页面获取成功", url=url, final_url=str(response.url), status=response.status_code
 +                    )
              except Exception as exc:
++                self._page_failures[url] = exc.reason.value if isinstance(exc, SourceError) else str(exc)
                  structlog.get_logger().warning("高清海报页面获取失败", url=url, error=str(exc))
          return self._pages[url]
-@@ -399,7 +403,9 @@ class PosterResolver:
+ 
+@@ -396,10 +425,14 @@ class PosterResolver:
+                 {"returnUrl": target}
+             )
+             page = await self._html(eligibility)
++            if page is None:
++                self._page_failures[url] = self._page_failures.get(eligibility, "年龄确认未完成")
          return page
  
      async def _tenhow(self, query: PosterQuery) -> list[TenhowMatch]:
@@ -389,7 +450,7 @@ index 2c5b1b5..f1a5710 100644
              return []
          index = await self._html("https://www.tenhow.net/mokuji.html")
          if index is None or not _safe_url(index.url, {"www.tenhow.net", "tenhow.net"}):
-@@ -428,18 +434,39 @@ class PosterResolver:
+@@ -428,30 +461,86 @@ class PosterResolver:
                  for match in tenhow_matches(page.html, query):
                      matches[match.asin] = match
          if len(matches) > 1:
@@ -415,6 +476,10 @@ index 2c5b1b5..f1a5710 100644
 +            structlog.get_logger().info("日亚 ASIN 查询", asin=asin, url=url)
 +        page = await self._amazon_page(url)
 +        product = amazon_product(page, asin) if page else None
++        if product is None:
++            self._product_failures[asin] = "unavailable" if page is None else "identity"
++        else:
++            self._product_failures.pop(asin, None)
 +        if not cached:
 +            structlog.get_logger().info(
 +                "日亚商品主图解析结果",
@@ -425,22 +490,98 @@ index 2c5b1b5..f1a5710 100644
 +        return product
  
      async def _search_title(
-         self, query: PosterQuery, trusted_asins: set[str], title: str, matched_asins: set[str]
+-        self, query: PosterQuery, trusted_asins: set[str], title: str, matched_asins: set[str]
++        self,
++        query: PosterQuery,
++        trusted_asins: set[str],
++        title: str,
++        matched_asins: set[str],
++        *,
++        search_kind: Literal["full", "short"] = "full",
      ) -> bool | None:
          url = "https://www.amazon.co.jp/s?" + urlencode({"k": title})
-+        structlog.get_logger().info("日亚原始标题搜索", search_title=title, url=url)
++        stats = AmazonSearchStats.empty(search_kind)
++        structlog.get_logger().info("日亚原始标题搜索", search_title=title, url=url, search_kind=search_kind)
          page = await self._amazon_page(url)
          if page is None or not _safe_url(page.url, {"www.amazon.co.jp", "amazon.co.jp"}):
++            if page is None:
++                stats.failure_reason = self._page_failures.get(url) or "搜索页面不可用"
++            else:
++                stats.page_status = "unexpected_redirect"
++                stats.failure_reason = "页面跳转至日亚以外的站点"
++            _record_search_stats(url, stats)
              return None
-@@ -473,6 +500,7 @@ class PosterResolver:
++        tree = Selector(text=page.html)
++        cards = tree.css('[data-component-type="s-search-result"]')
++        if not cards:
++            if _amazon_no_results(tree):
++                stats.page_status = "no_results"
++                stats.result_count = 0
++            elif "black-curtain" in page.html:
++                stats.failure_reason = "年龄确认未完成"
++            else:
++                stats.page_status = "unrecognized"
++                stats.failure_reason = "页面未识别出商品列表，也未明确提示无结果"
++            _record_search_stats(url, stats)
++            return False
++        stats.page_status = "results"
++        stats.result_count = len(cards)
+         success = False
+-        for card in Selector(text=page.html).css('[data-component-type="s-search-result"][data-asin]'):
++        for card in cards:
+             asin = card.attrib.get("data-asin", "")
+             if re.fullmatch(r"[A-Z0-9]{10}", asin) is None:
++                stats.invalid_asin_count += 1
+                 continue
+             title = card.css("h2").xpath("string(.)").get() or card.css("img.s-image::attr(alt)").get() or ""
+             if asin not in trusted_asins and not _amazon_media(card, title):
++                stats.unsupported_media_count += 1
+                 continue
+             if asin not in trusted_asins and not _title_matches(title, query):
++                stats.title_mismatch_count += 1
+                 continue
+             # 搜索卡片的 ASIN 与商品链接必须一致；查询串不能用作演员匹配证据。
+             linked = {
+@@ -460,6 +549,7 @@ class PosterResolver:
+             }
+             linked.discard(None)
+             if linked != {asin}:
++                stats.link_mismatch_count += 1
+                 continue
+             card_matches = asin in trusted_asins or _actors_match(card.xpath("string(.)").get() or "", query)
+             product = await self._amazon_asin(asin)
+@@ -471,29 +561,67 @@ class PosterResolver:
+                 )
+             )
              if not card_matches and not detail_matches:
++                if product is None:
++                    if self._product_failures.get(asin) == "identity":
++                        stats.detail_identity_count += 1
++                    else:
++                        stats.detail_unavailable_count += 1
++                elif not _title_matches(product.title, query):
++                    stats.detail_title_count += 1
++                else:
++                    stats.actor_mismatch_count += 1
                  continue
              matched_asins.add(asin)
++            stats.matched_count += 1
 +            structlog.get_logger().info("日亚搜索商品匹配成功", asin=asin, title=title)
              images: list[str] = []
              if product is not None and detail_matches:
                  images.extend(product.image_urls)
-@@ -482,18 +510,35 @@ class PosterResolver:
+             for src in card.css("img.s-image::attr(src)").getall():
+                 images.extend(amazon_image_urls(src))
+-            success = await self._images.acquire(images) or success
++            acquired = await self._images.acquire(images)
++            success = acquired or success
++            if acquired:
++                stats.image_count += 1
++            elif not images:
++                stats.missing_image_count += 1
++            else:
++                stats.failed_image_count += 1
++        _record_search_stats(url, stats)
          return success
  
      async def _search(self, query: PosterQuery, trusted_asins: set[str]) -> bool:
@@ -450,9 +591,12 @@ index 2c5b1b5..f1a5710 100644
 +            return False
          matched_asins: set[str] = set()
 -        for title in poster_search_titles(query):
+-            success = await self._search_title(query, trusted_asins, title, matched_asins)
 +        success: bool | None = False
-+        for title in titles:
-             success = await self._search_title(query, trusted_asins, title, matched_asins)
++        for index, title in enumerate(titles):
++            success = await self._search_title(
++                query, trusted_asins, title, matched_asins, search_kind="short" if index else "full"
++            )
              if success:
                  return True
              if success is None:
@@ -477,7 +621,7 @@ index 2c5b1b5..f1a5710 100644
          matches = await self._tenhow(query)
          await self._images.acquire([match.image_url for match in matches])
          success = False
-@@ -502,4 +547,7 @@ class PosterResolver:
+@@ -502,4 +630,7 @@ class PosterResolver:
              if product is not None:
                  success = await self._images.acquire(product.image_urls) or success
          if not success:
@@ -622,10 +766,10 @@ index 0000000..6c95739
 +        current().warning("资源已复制但大小读取失败", source_path=str(source), target_path=str(target), error=str(exc))
 diff --git a/src/amane/observability/liu1443452494_processing_log.py b/src/amane/observability/liu1443452494_processing_log.py
 new file mode 100644
-index 0000000..288a660
+index 0000000..9d592f9
 --- /dev/null
 +++ b/src/amane/observability/liu1443452494_processing_log.py
-@@ -0,0 +1,844 @@
+@@ -0,0 +1,946 @@
 +"""按任务读取本地 JSON 日志并生成中文说明；历史数据缺失时不查询现有图片补值。"""
 +
 +import json
@@ -641,6 +785,7 @@ index 0000000..288a660
 +
 +from ..db.models import Task, TaskStatus, TaskType
 +from ..utils.threads import in_thread
++from .liu1443452494_search_stats import AmazonSearchStats
 +from .models import SiteOutcomeRecord, TaskSnapshot, TaskSummary
 +from .recorder import task_dir_for
 +
@@ -713,6 +858,8 @@ index 0000000..288a660
 +    retries: int = 0
 +    finished: bool = False
 +    exchange_seen: bool = False
++    search_started: bool = False
++    statistics_seen: bool = False
 +
 +
 +type RequestKey = tuple[str, str, str, str, str, int | None, int | None]
@@ -981,6 +1128,9 @@ index 0000000..288a660
 +    )
 +    if source == "日亚" and path.rstrip("/") == "/s":
 +        target.operation = "搜索作品"
++        search_kind = {"full": "完整标题", "short": "缩短标题"}.get(event.text("search_kind") or "")
++        if search_kind:
++            target.details.append(f"检索方式：{search_kind}")
 +        search_title = event.text("search_title") or params.get("k")
 +        if search_title:
 +            target.details.append(f"搜索词：{_clean_text(search_title)}")
@@ -1011,6 +1161,7 @@ index 0000000..288a660
 +        "高清海报页面获取失败",
 +        "高清海报页面不可用",
 +        "日亚原始标题搜索",
++        "日亚搜索结果统计",
 +        "日亚 ASIN 查询",
 +    } or not (url := event.text("url")):
 +        return None
@@ -1030,10 +1181,89 @@ index 0000000..288a660
 +    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 +
 +
++def _update_search_statistics(progress: RequestProgress, event: LogEvent) -> None:
++    entry = progress.entry
++    progress.finished = True
++    progress.statistics_seen = True
++    labels = {"检索方式", "搜索统计", "搜索结果", "未通过原因", "图片未取得", "等待重试"}
++    entry.details = [item for item in entry.details if item.partition("：")[0] not in labels]
++    entry.details.extend(item for item in _request_target(event).details if item not in entry.details)
++    try:
++        stats = AmazonSearchStats.model_validate(event.value("stats"))
++    except ValidationError:
++        entry.message = "搜索作品：统计记录不完整"
++        entry.level = "warning"
++        entry.details.append("搜索结果：数量未记录，统计字段缺失或无效")
++        return
++    entry.details.append(f"检索方式：{'完整标题' if stats.search_kind == 'full' else '缩短标题'}")
++    entry.message = {
++        "no_results": "搜索作品：站点返回无结果",
++        "unrecognized": "搜索作品：未识别到商品列表",
++        "unavailable": "搜索作品：搜索页面不可用",
++        "unexpected_redirect": "搜索作品：返回页面不符合搜索要求",
++    }.get(stats.page_status, "搜索作品：未找到匹配作品")
++    entry.level = "warning"
++    if stats.result_count is None:
++        entry.details.append("搜索结果：数量未知")
++    else:
++        # 请求成功只能说明页面已取得；匹配与图片结果以完整统计为准。
++        entry.details = [item for item in entry.details if item.partition("：")[0] not in {"原因", "HTTP 状态码"}]
++        entry.details.append(
++            f"搜索结果：本页识别 {stats.result_count} 条，匹配 {stats.matched_count} 条，"
++            f"其中 {stats.image_count} 条取得有效图片"
++        )
++        if stats.matched_count:
++            entry.message = "搜索作品：已匹配，未取得有效图片"
++        if stats.image_count:
++            entry.message = "搜索作品：已匹配，取得有效图片"
++            entry.level = "info"
++    rejected = [
++        f"{label} {count} 条"
++        for label, count in (
++            ("商品编号无效", stats.invalid_asin_count),
++            ("商品类型未识别", stats.unsupported_media_count),
++            ("标题未通过", stats.title_mismatch_count),
++            ("商品链接不一致", stats.link_mismatch_count),
++            ("详情获取失败", stats.detail_unavailable_count),
++            ("商品身份未通过", stats.detail_identity_count),
++            ("详情标题未通过", stats.detail_title_count),
++            ("演员信息未通过", stats.actor_mismatch_count),
++        )
++        if count
++    ]
++    if rejected:
++        entry.details.append("未通过原因：" + "；".join(rejected))
++    images = [
++        f"{label} {count} 条"
++        for label, count in (
++            ("无可用图片地址", stats.missing_image_count),
++            ("下载或校验失败", stats.failed_image_count),
++        )
++        if count
++    ]
++    if images:
++        entry.details.append("图片未取得：" + "；".join(images))
++    if stats.failure_reason:
++        reason = (
++            "页面响应异常，具体原因见原始任务记录"
++            if re.search(r"<[/!a-zA-Z][^>]*>|Traceback|^\s*[\[{]", stats.failure_reason)
++            else _short_reason(stats.failure_reason)
++        )
++        entry.details.append(f"原因：{reason}")
++
++
 +def _update_request(progress: RequestProgress, event: LogEvent, task: Task) -> None:
 +    entry = progress.entry
 +    target = _request_target(event)
 +    entry.source_label = _source_label(event) or entry.source_label
++    progress.search_started |= event.event == "日亚原始标题搜索"
++    if event.event == "日亚搜索结果统计":
++        _update_search_statistics(progress, event)
++        return
++    if progress.statistics_seen:
++        # 统计完成后，迟到的请求包装事件不得覆盖匹配结果与排除原因。
++        progress.exchange_seen |= event.event == "http exchange"
++        return
 +    # 同一请求保留最初位置和标识，终态覆盖重试状态；不把不同 URL 或方法合并。
 +    terminal = event.event in {
 +        "request failed",
@@ -1087,6 +1317,16 @@ index 0000000..288a660
 +    entry.details.extend(item for item in details if item not in entry.details)
 +    if not progress.finished and task.status in {TaskStatus.DONE, TaskStatus.FAILED}:
 +        entry.message = f"{target.operation}：未记录最终结果"
++    if target.operation == "搜索作品":
++        if entry.message == "搜索作品：成功":
++            entry.message = "搜索作品：网页已取得"
++        note = (
++            "搜索统计：结果数量与匹配结果未记录"
++            if task.status in {TaskStatus.DONE, TaskStatus.FAILED}
++            else "搜索统计：等待结果统计，数量尚未记录"
++        )
++        entry.details = [item for item in entry.details if not item.startswith("搜索统计：")]
++        entry.details.append(note)
 +
 +
 +def _event_title(event: str) -> str:
@@ -1374,9 +1614,14 @@ index 0000000..288a660
 +        if (
 +            key is not None
 +            and progress is not None
-+            and not progress.finished
-+            and event.event == "request retry"
-+            and _integer(event, "attempt") <= progress.retries
++            and (
++                (
++                    not progress.finished
++                    and event.event == "request retry"
++                    and _integer(event, "attempt") <= progress.retries
++                )
++                or (event.event == "日亚原始标题搜索" and progress.search_started and not progress.statistics_seen)
++            )
 +        ):
 +            # 历史日志缺少请求标识，并行访问同一地址时不得猜测终态归属。
 +            ambiguous.add(key)
@@ -1389,6 +1634,7 @@ index 0000000..288a660
 +            )
 +            or (progress.exchange_seen and event.event == "http exchange")
 +            or (event.event == "request retry" and _integer(event, "attempt") <= progress.retries)
++            or (progress.statistics_seen and event.event == "日亚搜索结果统计")
 +        ):
 +            progress = None
 +        if progress is None:
@@ -1398,10 +1644,10 @@ index 0000000..288a660
 +            identifiers[digest] = ordinal + 1
 +            entry.entry_id = f"{digest}:{ordinal}"
 +            report.entries.append(entry)
-+            if key:
++            if key or event.event == "日亚搜索结果统计":
 +                entry.details = []
 +                progress = RequestProgress(entry=entry)
-+                if key not in ambiguous:
++                if key is not None and key not in ambiguous:
 +                    requests[key] = progress
 +        if progress is not None:
 +            _update_request(progress, event, task)
@@ -1470,6 +1716,81 @@ index 0000000..288a660
 +                details.append(detail)
 +        entry.details = details
 +    return report
+diff --git a/src/amane/observability/liu1443452494_search_stats.py b/src/amane/observability/liu1443452494_search_stats.py
+new file mode 100644
+index 0000000..f24fdbd
+--- /dev/null
++++ b/src/amane/observability/liu1443452494_search_stats.py
+@@ -0,0 +1,69 @@
++"""日亚搜索统计契约；商品按结果卡片计数，缺失列表不推断为零条。"""
++
++from typing import Literal, Self
++
++from pydantic import BaseModel, ConfigDict, Field, model_validator
++
++
++class AmazonSearchStats(BaseModel):
++    model_config = ConfigDict(strict=True, extra="forbid")
++
++    search_kind: Literal["full", "short"]
++    page_status: Literal["results", "no_results", "unrecognized", "unavailable", "unexpected_redirect"]
++    result_count: int | None = Field(ge=0)
++    matched_count: int = Field(ge=0)
++    image_count: int = Field(ge=0)
++    invalid_asin_count: int = Field(ge=0)
++    unsupported_media_count: int = Field(ge=0)
++    title_mismatch_count: int = Field(ge=0)
++    link_mismatch_count: int = Field(ge=0)
++    detail_unavailable_count: int = Field(ge=0)
++    detail_identity_count: int = Field(ge=0)
++    detail_title_count: int = Field(ge=0)
++    actor_mismatch_count: int = Field(ge=0)
++    missing_image_count: int = Field(ge=0)
++    failed_image_count: int = Field(ge=0)
++    failure_reason: str = ""
++
++    @classmethod
++    def empty(cls, search_kind: Literal["full", "short"]) -> Self:
++        return cls(
++            search_kind=search_kind,
++            page_status="unavailable",
++            result_count=None,
++            matched_count=0,
++            image_count=0,
++            invalid_asin_count=0,
++            unsupported_media_count=0,
++            title_mismatch_count=0,
++            link_mismatch_count=0,
++            detail_unavailable_count=0,
++            detail_identity_count=0,
++            detail_title_count=0,
++            actor_mismatch_count=0,
++            missing_image_count=0,
++            failed_image_count=0,
++        )
++
++    @model_validator(mode="after")
++    def validate_counts(self) -> Self:
++        rejected = (
++            self.invalid_asin_count
++            + self.unsupported_media_count
++            + self.title_mismatch_count
++            + self.link_mismatch_count
++            + self.detail_unavailable_count
++            + self.detail_identity_count
++            + self.detail_title_count
++            + self.actor_mismatch_count
++        )
++        if self.image_count + self.missing_image_count + self.failed_image_count != self.matched_count:
++            raise ValueError("图片结果数量与匹配数量不一致")
++        if self.page_status in {"results", "no_results"}:
++            if self.result_count is None or self.matched_count + rejected != self.result_count:
++                raise ValueError("商品结果数量与匹配、排除数量不一致")
++            if (self.page_status == "no_results") != (self.result_count == 0):
++                raise ValueError("页面结果状态与商品数量不一致")
++        elif self.result_count is not None or self.matched_count or rejected:
++            raise ValueError("未取得结果列表时不能推断商品数量")
++        return self
 diff --git a/tests/api/test_liu1443452494_processing_log.py b/tests/api/test_liu1443452494_processing_log.py
 new file mode 100644
 index 0000000..c1b2e22
@@ -1808,12 +2129,308 @@ index 0000000..6300f54
 +        assert any(entry.message == "NFO 已写入" for entry in report.entries)
 +        other = next(value for value in numbers if value != number)
 +        assert str(library_root / f"{other}.mp4") not in report.model_dump_json()
+diff --git a/tests/media/test_liu1443452494_search_stats.py b/tests/media/test_liu1443452494_search_stats.py
+new file mode 100644
+index 0000000..0d0a673
+--- /dev/null
++++ b/tests/media/test_liu1443452494_search_stats.py
+@@ -0,0 +1,290 @@
++"""日亚搜索统计与实际匹配、请求分支的一致性。"""
++
++from collections.abc import Mapping, Sequence
++from typing import cast
++from urllib.parse import urlencode
++
++import pytest
++from curl_cffi.requests import Response
++from curl_cffi.requests.session import HttpMethod
++from structlog.testing import capture_logs
++
++from amane.media import ResourceStore
++from amane.media.liu1443452494_image_quality import ImagePool
++from amane.media.liu1443452494_posters import PosterQuery, PosterResolver
++from amane.net.errors import FailureKind, RequestError, RequestFailure
++from amane.net.http import WebClient
++from amane.observability.liu1443452494_search_stats import AmazonSearchStats
++from tests.media.test_liu1443452494_image_quality import (
++    PosterClient,
++    image_bytes,
++    poster_query,
++    product_html,
++    search_card,
++    search_url,
++)
++
++
++def search_statistics(events: Sequence[Mapping[str, object]]) -> list[AmazonSearchStats]:
++    return [
++        AmazonSearchStats.model_validate(event["stats"]) for event in events if event["event"] == "日亚搜索结果统计"
++    ]
++
++
++@pytest.mark.asyncio
++async def test_search_counts_cards_without_changing_actor_fallback_or_image_selection(
++    resource_store: ResourceStore,
++) -> None:
++    first = "https://m.media-amazon.com/images/I/81First.jpg"
++    second = "https://m.media-amazon.com/images/I/81Second.jpg"
++    first_card = search_card(first)
++    cards = (
++        first_card
++        + first_card
++        + search_card(second, "B000000002", title="原題の長い物語")
++        + search_card(first, "B000000003", title="別の作品 楓カレン")
++        + search_card(first, "B000000004").replace('href="/dp/B000000004"', 'href="/dp/B000000099"')
++    )
++    client = PosterClient(
++        pages={
++            search_url(): cards,
++            "https://www.amazon.co.jp/dp/B000000002": product_html(second, "B000000002", title="原題の長い物語")
++            + '<div id="bylineInfo">楓カレン</div>',
++        },
++        images={first: image_bytes(minimum_bytes=3000), second: image_bytes(minimum_bytes=6000)},
++    )
++    pool = ImagePool(resource_store, cast("WebClient", client))
++    resolver = PosterResolver(cast("WebClient", client), pool)
++    matched: set[str] = set()
++    with capture_logs() as events:
++        assert await resolver._search_title(poster_query(), set(), "原題の長い物語", matched) is True
++    (stats,) = search_statistics(events)
++    assert (stats.result_count, stats.matched_count, stats.image_count) == (5, 3, 3)
++    assert stats.title_mismatch_count == stats.link_mismatch_count == 1
++    assert stats.detail_unavailable_count == stats.actor_mismatch_count == 0
++    assert matched == {"B000000001", "B000000002"}
++    assert client.page_requests == [
++        search_url(),
++        "https://www.amazon.co.jp/dp/B000000001",
++        "https://www.amazon.co.jp/dp/B000000002",
++    ]
++    assert client.downloaded == [first, second]
++    assert pool.best is not None and pool.best.url == second
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    ("case", "reason"),
++    [
++        ("missing_asin", "invalid_asin_count"),
++        ("invalid_asin", "invalid_asin_count"),
++        ("media", "unsupported_media_count"),
++        ("title", "title_mismatch_count"),
++        ("link", "link_mismatch_count"),
++        ("detail_missing", "detail_unavailable_count"),
++        ("detail_identity", "detail_identity_count"),
++        ("detail_title", "detail_title_count"),
++        ("actor", "actor_mismatch_count"),
++    ],
++)
++async def test_rejected_card_records_its_first_failed_condition(
++    resource_store: ResourceStore, case: str, reason: str
++) -> None:
++    image = "https://m.media-amazon.com/images/I/81Rejected.jpg"
++    card = search_card(image)
++    detail: str | None = product_html(image)
++    if case == "missing_asin":
++        card = card.replace(' data-asin="B000000001"', "")
++    elif case == "invalid_asin":
++        card = card.replace('data-asin="B000000001"', 'data-asin="invalid"')
++    elif case == "media":
++        card = card.replace(" [DVD]", " [Kindle版]")
++    elif case == "title":
++        card = search_card(image, title="別の作品 楓カレン")
++    elif case == "link":
++        card = card.replace('href="/dp/B000000001"', 'href="/dp/B000000002"')
++    else:
++        card = search_card(image, title="原題の長い物語")
++        if case == "detail_missing":
++            detail = None
++        elif case == "detail_identity":
++            detail = product_html(image, "B000000002")
++        elif case == "detail_title":
++            detail = product_html(image, title="別の作品 楓カレン")
++        else:
++            detail = product_html(image, title="原題の長い物語")
++    client = PosterClient(
++        pages={search_url(): card, "https://www.amazon.co.jp/dp/B000000001": detail},
++        images={image: image_bytes()},
++    )
++    resolver = PosterResolver(cast("WebClient", client), ImagePool(resource_store, cast("WebClient", client)))
++    matched: set[str] = set()
++    with capture_logs() as events:
++        assert await resolver._search_title(poster_query(), set(), "原題の長い物語", matched) is False
++    (stats,) = search_statistics(events)
++    assert stats.result_count == 1 and stats.matched_count == stats.image_count == 0
++    assert stats.model_dump()[reason] == 1
++    assert not matched and not client.downloaded
++    if case in {"missing_asin", "invalid_asin", "media", "title", "link"}:
++        assert client.page_requests == [search_url()]
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("image_state", ["no_address", "unavailable", "invalid_content"])
++async def test_matched_cards_explain_missing_or_invalid_images(resource_store: ResourceStore, image_state: str) -> None:
++    image = "" if image_state == "no_address" else "https://m.media-amazon.com/images/I/81Missing.jpg"
++    client = PosterClient(
++        pages={search_url(): search_card(image), "https://www.amazon.co.jp/dp/B000000001": product_html(image)},
++        images={image: b"<html>invalid image</html>" if image_state == "invalid_content" else None},
++    )
++    resolver = PosterResolver(cast("WebClient", client), ImagePool(resource_store, cast("WebClient", client)))
++    matched: set[str] = set()
++    with capture_logs() as events:
++        assert await resolver._search_title(poster_query(), set(), "原題の長い物語", matched) is False
++    (stats,) = search_statistics(events)
++    assert (stats.result_count, stats.matched_count, stats.image_count) == (1, 1, 0)
++    assert stats.missing_image_count == int(image_state == "no_address")
++    assert stats.failed_image_count == int(image_state != "no_address")
++    assert matched == {"B000000001"}
++    assert client.downloaded == ([] if image_state == "no_address" else [image])
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    ("html", "redirect", "page_status", "count", "result", "reason"),
++    [
++        (
++            '<div class="s-no-outline"><h2><span>検索クエリに一致する結果はありません。</span></h2></div>',
++            None,
++            "no_results",
++            0,
++            False,
++            "",
++        ),
++        ('<div class="s-no-results">No results for the query</div>', None, "no_results", 0, False, ""),
++        (
++            '<script>const text = "no results for";</script><h2>ホーム</h2>',
++            None,
++            "unrecognized",
++            None,
++            False,
++            "页面未识别出商品列表",
++        ),
++        (
++            '<div data-asin="B000000001" class="unknown-layout">商品</div>',
++            None,
++            "unrecognized",
++            None,
++            False,
++            "页面未识别出商品列表",
++        ),
++        ('<form action="/errors/validateCaptcha">確認</form>', None, "unavailable", None, None, "captcha"),
++        ("<h2>年齢認証</h2>", None, "unavailable", None, None, "age_verification"),
++        (None, None, "unavailable", None, None, "测试页面无法访问"),
++        ("", None, "unavailable", None, None, "empty_response"),
++        (
++            "<h2>別のページ</h2>",
++            "https://other.test/search",
++            "unexpected_redirect",
++            None,
++            None,
++            "页面跳转至日亚以外的站点",
++        ),
++    ],
++)
++async def test_search_distinguishes_explicit_empty_results_from_unknown_or_unavailable_pages(
++    resource_store: ResourceStore,
++    html: str | None,
++    redirect: str | None,
++    page_status: str,
++    count: int | None,
++    result: bool | None,
++    reason: str,
++) -> None:
++    client = PosterClient(pages={search_url(): html}, redirects={search_url(): redirect} if redirect else None)
++    resolver = PosterResolver(cast("WebClient", client), ImagePool(resource_store, cast("WebClient", client)))
++    with capture_logs() as events:
++        assert await resolver._search_title(poster_query(), set(), "原題の長い物語", set()) is result
++    (stats,) = search_statistics(events)
++    assert stats.page_status == page_status and stats.result_count == count
++    assert stats.matched_count == stats.image_count == 0
++    assert reason in stats.failure_reason
++    assert client.page_requests == [search_url()] and not client.downloaded
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("confirmation", ["success", "unavailable", "still_required"])
++async def test_age_confirmation_statistics_belong_to_original_search(
++    resource_store: ResourceStore, confirmation: str
++) -> None:
++    search = search_url()
++    eligibility = "https://www.amazon.co.jp/black-curtain/save-eligibility/black-curtain?" + urlencode(
++        {"returnUrl": search.removeprefix("https://www.amazon.co.jp")}
++    )
++    age_page = '<form action="/black-curtain/save-eligibility/black-curtain">年齢認証</form>'
++    image = "https://m.media-amazon.com/images/I/81Confirmed.jpg"
++    confirmation_page = search_card(image) + age_page if confirmation == "success" else age_page
++    client = PosterClient(
++        pages={search: age_page, eligibility: None if confirmation == "unavailable" else confirmation_page},
++        redirects={eligibility: search},
++        images={image: image_bytes()},
++    )
++    resolver = PosterResolver(cast("WebClient", client), ImagePool(resource_store, cast("WebClient", client)))
++    with capture_logs() as events:
++        result = await resolver._search_title(poster_query(), set(), "原題の長い物語", set())
++    (stats,) = search_statistics(events)
++    summary = next(event for event in events if event["event"] == "日亚搜索结果统计")
++    assert summary["url"] == search and client.page_requests[:2] == [search, eligibility]
++    if confirmation == "success":
++        assert result is True and (stats.result_count, stats.matched_count, stats.image_count) == (1, 1, 1)
++    else:
++        assert result is (None if confirmation == "unavailable" else False)
++        assert stats.result_count is None and stats.page_status == "unavailable"
++        assert stats.failure_reason == ("测试页面无法访问" if confirmation == "unavailable" else "年龄确认未完成")
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("network_failure", [False, True])
++async def test_full_and_short_search_statistics_preserve_request_limits(
++    resource_store: ResourceStore, network_failure: bool
++) -> None:
++    title = "長い作品名の検索に必要な前半部分。元の作品だけに含まれる後半の内容"
++    shortened = "長い作品名の検索に必要な前半部分"
++    query = PosterQuery(number="IPZZ-396", title=f"{title} 楓カレン", actors=["楓カレン"])
++    image = "https://m.media-amazon.com/images/I/81Shortened.jpg"
++    client = PosterClient(
++        pages={
++            search_url(title): None if network_failure else "<h2>検索クエリに一致する結果はありません。</h2>",
++            search_url(shortened): search_card(image, title=f"{title} 楓カレン"),
++        },
++        images={image: image_bytes()},
++    )
++    resolver = PosterResolver(cast("WebClient", client), ImagePool(resource_store, cast("WebClient", client)))
++    with capture_logs() as events:
++        assert await resolver._search(query, set()) is not network_failure
++    statistics = search_statistics(events)
++    assert [stats.search_kind for stats in statistics] == (["full"] if network_failure else ["full", "short"])
++    assert statistics[0].result_count == (None if network_failure else 0)
++    if not network_failure:
++        assert (statistics[1].result_count, statistics[1].matched_count, statistics[1].image_count) == (1, 1, 1)
++    assert [url for url in client.page_requests if "/s?" in url] == (
++        [search_url(title)] if network_failure else [search_url(title), search_url(shortened)]
++    )
++
++
++@pytest.mark.asyncio
++async def test_request_error_keeps_structured_reason_without_raw_url_or_code(
++    resource_store: ResourceStore, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    client = PosterClient()
++
++    async def rejected_request(method: HttpMethod, url: str, **kwargs: object) -> Response:
++        raise RequestError(url, RequestFailure(kind=FailureKind.HTTP_STATUS, status=429, message="raw private error"))
++
++    monkeypatch.setattr(client, "request", rejected_request)
++    resolver = PosterResolver(cast("WebClient", client), ImagePool(resource_store, cast("WebClient", client)))
++    with capture_logs() as events:
++        assert await resolver._search_title(poster_query(), set(), "原題の長い物語", set()) is None
++    (stats,) = search_statistics(events)
++    assert stats.result_count is None and stats.failure_reason == "rate_limited"
++    assert "raw private error" not in stats.model_dump_json()
 diff --git a/tests/observability/test_liu1443452494_processing_log.py b/tests/observability/test_liu1443452494_processing_log.py
 new file mode 100644
-index 0000000..dc15d58
+index 0000000..868405b
 --- /dev/null
 +++ b/tests/observability/test_liu1443452494_processing_log.py
-@@ -0,0 +1,386 @@
+@@ -0,0 +1,679 @@
 +"""历史日志的归属、中文内容、缺失信息与异常输入。"""
 +
 +import json
@@ -1829,6 +2446,7 @@ index 0000000..dc15d58
 +from amane.db.models import Task, TaskStatus, TaskType
 +from amane.net.errors import FailureReason
 +from amane.observability.liu1443452494_processing_log import LogEvent, LogRead, build_report, read_log
++from amane.observability.liu1443452494_search_stats import AmazonSearchStats
 +from amane.observability.models import SiteOutcomeKind, SiteOutcomeRecord
 +from amane.observability.recorder import task_dir_for
 +from tests.helpers import make_junction
@@ -2086,7 +2704,7 @@ index 0000000..dc15d58
 +    entry = report.entries[0]
 +    assert entry.entry_id == pending.entries[0].entry_id
 +    assert entry.source_label == "日亚"
-+    assert entry.message == ("搜索作品：成功" if status == 200 else "搜索作品：失败")
++    assert entry.message == ("搜索作品：网页已取得" if status == 200 else "搜索作品：失败")
 +    assert entry.level == ("info" if status == 200 else "warning")
 +    assert entry.details.count(f"搜索词：{title}") == 1
 +    assert "已重试：2 次" in entry.details and "耗时：7.0 秒" in entry.details
@@ -2126,7 +2744,8 @@ index 0000000..dc15d58
 +    assert report is not None and len(report.entries) == 2
 +    first, second = report.entries
 +    assert first.message.endswith("失败") and "已重试：2 次" in first.details
-+    assert second.message.endswith("成功") and "已重试：1 次" in second.details
++    expected = "网页已取得" if field == "url" and "amazon.co.jp/s?" in right else "成功"
++    assert second.message.endswith(expected) and "已重试：1 次" in second.details
 +    assert first.entry_id != second.entry_id
 +
 +
@@ -2200,6 +2819,297 @@ index 0000000..dc15d58
 +    summary = next(entry for entry in report.entries if entry.stage == "来源汇总")
 +    assert summary.source_label == "AVBase" and summary.message == "未取得可用数据"
 +    assert summary.details == ["原因：未找到资源"]
++
++
++def search_statistics(url: str, **values: JsonValue) -> LogEvent:
++    stats = AmazonSearchStats.empty("full").model_dump(mode="json")
++    stats.update(values)
++    return request_event("日亚搜索结果统计", url, stats=stats)
++
++
++@pytest.mark.parametrize(
++    ("values", "message", "details"),
++    [
++        (
++            {
++                "page_status": "results",
++                "result_count": 5,
++                "matched_count": 3,
++                "image_count": 3,
++                "title_mismatch_count": 2,
++            },
++            "已匹配，取得有效图片",
++            ["本页识别 5 条，匹配 3 条，其中 3 条取得有效图片", "未通过原因：标题未通过 2 条"],
++        ),
++        (
++            {"page_status": "results", "result_count": 5, "unsupported_media_count": 2, "title_mismatch_count": 3},
++            "未找到匹配作品",
++            ["本页识别 5 条，匹配 0 条", "商品类型未识别 2 条；标题未通过 3 条"],
++        ),
++        (
++            {"page_status": "no_results", "result_count": 0},
++            "站点返回无结果",
++            ["本页识别 0 条，匹配 0 条"],
++        ),
++        (
++            {"page_status": "unrecognized"},
++            "未识别到商品列表",
++            ["搜索结果：数量未知"],
++        ),
++        (
++            {"page_status": "unavailable", "failure_reason": "timeout"},
++            "搜索页面不可用",
++            ["搜索结果：数量未知", "原因：请求超时"],
++        ),
++        (
++            {"page_status": "unexpected_redirect", "failure_reason": "返回了其他站点"},
++            "返回页面不符合搜索要求",
++            ["搜索结果：数量未知", "原因：返回了其他站点"],
++        ),
++        (
++            {
++                "page_status": "results",
++                "result_count": 2,
++                "matched_count": 2,
++                "missing_image_count": 1,
++                "failed_image_count": 1,
++            },
++            "已匹配，未取得有效图片",
++            ["本页识别 2 条，匹配 2 条，其中 0 条取得有效图片", "无可用图片地址 1 条；下载或校验失败 1 条"],
++        ),
++        (
++            {
++                "page_status": "results",
++                "result_count": 8,
++                "invalid_asin_count": 1,
++                "unsupported_media_count": 1,
++                "title_mismatch_count": 1,
++                "link_mismatch_count": 1,
++                "detail_unavailable_count": 1,
++                "detail_identity_count": 1,
++                "detail_title_count": 1,
++                "actor_mismatch_count": 1,
++            },
++            "未找到匹配作品",
++            [
++                "商品编号无效 1 条",
++                "商品类型未识别 1 条",
++                "标题未通过 1 条",
++                "商品链接不一致 1 条",
++                "详情获取失败 1 条",
++                "商品身份未通过 1 条",
++                "详情标题未通过 1 条",
++                "演员信息未通过 1 条",
++            ],
++        ),
++    ],
++)
++def test_amazon_statistics_explain_results_without_product_rows(
++    values: dict[str, JsonValue], message: str, details: list[str]
++) -> None:
++    url = "https://www.amazon.co.jp/s?" + urlencode({"k": "日本語の原題", "token": "private-token"})
++    events = [
++        request_event("日亚原始标题搜索", url, search_kind="full"),
++        request_event("http exchange", url, status=200),
++        search_statistics(url, **values),
++        request_event("高清海报页面获取成功", url, status=200),
++    ]
++    report = build_report(Task(id=31, type=TaskType.SCRAPE, status=TaskStatus.DONE), LogRead(events=events))
++    assert report is not None and len(report.entries) == 1
++    entry = report.entries[0]
++    assert entry.message == f"搜索作品：{message}"
++    assert entry.source_label == "日亚"
++    assert entry.level == ("info" if values.get("image_count") else "warning")
++    assert "检索方式：完整标题" in entry.details
++    text = "\n".join(entry.details)
++    assert all(detail in text for detail in details)
++    assert all(
++        value not in report.model_dump_json() for value in ("https://", "private-token", "stats", "result_count")
++    )
++    assert not any(item.startswith("搜索统计：") for item in entry.details)
++    if values.get("result_count") is None:
++        assert "0 条" not in text
++
++
++def test_amazon_statistics_keep_request_identity_and_retry_summary() -> None:
++    url = "https://www.amazon.co.jp/s?k=original"
++    task = Task(id=32, type=TaskType.SCRAPE, status=TaskStatus.RUNNING)
++    events = [
++        request_event("日亚原始标题搜索", url, search_kind="full"),
++        request_event("访问高清海报页面", url),
++        request_event("request retry", url, attempt=1, error="timeout", retry_in=2),
++        request_event("request retry", url, attempt=2, error="timeout", retry_in=4),
++    ]
++    before = build_report(task, LogRead(events=events))
++    assert before is not None and len(before.entries) == 1
++    events.extend(
++        [
++            request_event("http exchange", url, status=200, attempts=3, elapsed_ms=7000),
++            request_event("高清海报页面获取成功", url, status=200),
++            search_statistics(url, page_status="results", result_count=5, title_mismatch_count=5),
++        ]
++    )
++    after = build_report(task, LogRead(events=events))
++    assert after is not None and len(after.entries) == 1
++    entry = after.entries[0]
++    assert entry.entry_id == before.entries[0].entry_id
++    assert entry.message == "搜索作品：未找到匹配作品"
++    assert "已重试：2 次" in entry.details and "耗时：7.0 秒" in entry.details
++    assert not any(item.startswith(("等待重试：", "原因：", "搜索统计：")) for item in entry.details)
++
++
++def test_amazon_statistics_keep_full_and_short_searches_separate() -> None:
++    full = "https://www.amazon.co.jp/s?k=full"
++    short = "https://www.amazon.co.jp/s?k=short"
++    events = [
++        request_event("日亚原始标题搜索", full, search_kind="full"),
++        search_statistics(full, page_status="results", result_count=5, title_mismatch_count=5),
++        request_event("日亚原始标题搜索", short, search_kind="short"),
++        search_statistics(
++            short,
++            search_kind="short",
++            page_status="results",
++            result_count=3,
++            matched_count=1,
++            image_count=1,
++            title_mismatch_count=2,
++        ),
++    ]
++    report = build_report(Task(id=33, type=TaskType.SCRAPE), LogRead(events=events))
++    assert report is not None and len(report.entries) == 2
++    first, second = report.entries
++    assert "检索方式：完整标题" in first.details and "检索方式：缩短标题" in second.details
++    assert "本页识别 5 条，匹配 0 条" in "\n".join(first.details)
++    assert "本页识别 3 条，匹配 1 条" in "\n".join(second.details)
++
++
++def test_amazon_statistics_do_not_merge_later_search_to_same_url() -> None:
++    url = "https://www.amazon.co.jp/s?k=original"
++    events = [
++        request_event("日亚原始标题搜索", url, search_kind="full"),
++        search_statistics(url, page_status="no_results", result_count=0),
++        request_event("日亚原始标题搜索", url, search_kind="full"),
++        search_statistics(url, page_status="results", result_count=1, matched_count=1, image_count=1),
++    ]
++    report = build_report(Task(id=34, type=TaskType.SCRAPE), LogRead(events=events))
++    assert report is not None and len(report.entries) == 2
++    assert [entry.message for entry in report.entries] == ["搜索作品：站点返回无结果", "搜索作品：已匹配，取得有效图片"]
++    assert report.entries[0].entry_id != report.entries[1].entry_id
++
++
++def test_amazon_overlapping_searches_do_not_guess_statistics_ownership() -> None:
++    url = "https://www.amazon.co.jp/s?k=original"
++    events = [
++        request_event("日亚原始标题搜索", url, search_kind="full"),
++        request_event("http exchange", url, status=200),
++        request_event("日亚原始标题搜索", url, search_kind="full"),
++        search_statistics(url, page_status="results", result_count=5, title_mismatch_count=5),
++    ]
++    report = build_report(Task(id=35, type=TaskType.SCRAPE, status=TaskStatus.DONE), LogRead(events=events))
++    assert report is not None and len(report.entries) == 3
++    assert all("本页识别" not in "\n".join(entry.details) for entry in report.entries[:2])
++    assert "本页识别 5 条" in "\n".join(report.entries[2].details)
++
++
++def test_amazon_statistics_are_not_replaced_by_late_http_result() -> None:
++    url = "https://www.amazon.co.jp/s?k=original"
++    events = [
++        request_event("日亚原始标题搜索", url, search_kind="full"),
++        search_statistics(url, page_status="results", result_count=5, title_mismatch_count=5),
++        request_event("http exchange", url, status=200),
++        request_event("高清海报页面获取成功", url, status=200),
++    ]
++    report = build_report(Task(id=36, type=TaskType.SCRAPE), LogRead(events=events))
++    assert report is not None and len(report.entries) == 1
++    assert report.entries[0].message == "搜索作品：未找到匹配作品"
++    assert "未通过原因：标题未通过 5 条" in report.entries[0].details
++
++
++@pytest.mark.parametrize("status", [TaskStatus.RUNNING, TaskStatus.DONE, TaskStatus.FAILED])
++def test_amazon_old_search_logs_do_not_invent_counts(status: TaskStatus) -> None:
++    url = "https://www.amazon.co.jp/s?k=original"
++    report = build_report(
++        Task(id=37, type=TaskType.SCRAPE, status=status),
++        LogRead(events=[request_event("http exchange", url, status=200)]),
++    )
++    assert report is not None and len(report.entries) == 1
++    entry = report.entries[0]
++    assert entry.message == "搜索作品：网页已取得"
++    assert any("等待结果统计" in item if status is TaskStatus.RUNNING else "未记录" in item for item in entry.details)
++    assert "0 条" not in "\n".join(entry.details)
++
++
++@pytest.mark.parametrize("invalid", [None, {}, [], {"result_count": 5}])
++def test_amazon_missing_statistics_are_not_defaulted_to_zero(invalid: JsonValue) -> None:
++    url = "https://www.amazon.co.jp/s?k=original"
++    report = build_report(
++        Task(id=38, type=TaskType.SCRAPE),
++        LogRead(events=[request_event("日亚搜索结果统计", url, stats=invalid)]),
++    )
++    assert report is not None and len(report.entries) == 1
++    entry = report.entries[0]
++    assert entry.message == "搜索作品：统计记录不完整"
++    assert "搜索结果：数量未记录，统计字段缺失或无效" in entry.details
++    assert "0 条" not in "\n".join(entry.details)
++
++
++@pytest.mark.parametrize(
++    ("field", "invalid"),
++    [
++        ("result_count", -1),
++        ("result_count", True),
++        ("result_count", "5"),
++        ("result_count", None),
++        ("matched_count", 7),
++        ("image_count", 5),
++        ("title_mismatch_count", None),
++        ("title_mismatch_count", 1),
++        ("page_status", "unrecognized"),
++    ],
++)
++def test_amazon_invalid_statistics_do_not_report_misleading_counts(field: str, invalid: JsonValue) -> None:
++    url = "https://www.amazon.co.jp/s?k=original"
++    values: dict[str, JsonValue] = {
++        "page_status": "results",
++        "result_count": 5,
++        "matched_count": 3,
++        "image_count": 3,
++        "title_mismatch_count": 2,
++    }
++    values[field] = invalid
++    report = build_report(Task(id=39, type=TaskType.SCRAPE), LogRead(events=[search_statistics(url, **values)]))
++    assert report is not None and len(report.entries) == 1
++    assert report.entries[0].message == "搜索作品：统计记录不完整"
++    assert "本页识别" not in "\n".join(report.entries[0].details)
++
++
++@pytest.mark.parametrize(
++    ("reason", "expected"),
++    [
++        ("captcha", "遇到验证码"),
++        ("age_verification", "需要年龄确认"),
++        ("连接失败 https://example.test/a?token=private-token", "连接失败"),
++        ('<script>异常代码("private-token")</script>', "页面响应异常"),
++        ('Traceback: {"异常": "private-token"}', "页面响应异常"),
++    ],
++)
++def test_amazon_failure_statistics_hide_urls_and_raw_code(reason: str, expected: str) -> None:
++    url = "https://www.amazon.co.jp/s?k=original"
++    report = build_report(
++        Task(id=40, type=TaskType.SCRAPE, status=TaskStatus.DONE),
++        LogRead(
++            events=[
++                request_event("http exchange", url, status=403),
++                search_statistics(url, failure_reason=reason),
++            ]
++        ),
++    )
++    assert report is not None and len(report.entries) == 1
++    entry = report.entries[0]
++    text = "\n".join(entry.details)
++    assert entry.message == "搜索作品：搜索页面不可用"
++    assert "HTTP 状态码：403" in entry.details and expected in text
++    assert all(value not in text for value in ("https://", "private-token", "<script>", "Traceback", "0 条"))
 diff --git a/web/src/components/media/liu1443452494-processing-log.module.css b/web/src/components/media/liu1443452494-processing-log.module.css
 new file mode 100644
 index 0000000..37eed14

@@ -129,6 +129,7 @@ def run_tests(root: Path) -> None:
         "tests/media/test_liu1443452494_nfo.py",
         "tests/media/test_liu1443452494_image_quality.py",
         "tests/media/test_liu1443452494_posters.py",
+        "tests/media/test_liu1443452494_search_stats.py",
         "tests/crawlers/test_liu1443452494_freejavbt.py",
         "tests/crawlers/test_parsing.py",
         "tests/media/test_pipeline.py",
