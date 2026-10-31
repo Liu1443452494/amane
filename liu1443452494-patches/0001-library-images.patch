@@ -285,19 +285,19 @@ index 9b25b63f9e219186d4801dd63f0974a6d75357d8..852b8976bb1d98faf4b65bc02205a0a9
          if extrafanart_by_site:
              priority = list(extrafanart_by_site.keys())
 diff --git a/src/amane/handlers/models.py b/src/amane/handlers/models.py
-index f5690e242b8a79bfad33fb3f1dc548ead406218e..2cb84d2990aec9392f6a129024f6cded978ace1e 100644
+index 4864530b1f49022dc40bcb37230976317505374a..a4e9b60e537f2498fff7490c2e21cc6db4551345 100644
 --- a/src/amane/handlers/models.py
 +++ b/src/amane/handlers/models.py
-@@ -9,7 +9,7 @@ from starlette.status import HTTP_403_FORBIDDEN
- 
+@@ -10,7 +10,7 @@ from starlette.status import HTTP_403_FORBIDDEN
  from ..db import Library, MediaFileStatus, Repository
+ from ..db.embeddings import EmbeddingKind
  from ..db.models import TaskType
 -from ..enums import DownloadableResource
 +from ..enums import LibraryResource
  from ..observability.models import OrganizeConflict, SiteOutcomeRecord
  from ..parsing import ContentType, infer_content_type
  from ..utils.path import is_descendant, is_resolved_path, resolved_path
-@@ -146,7 +146,7 @@ class OrganizePayload(LibraryBase):
+@@ -147,7 +147,7 @@ class OrganizePayload(LibraryBase):
      """
  
      write_nfo: bool | None = Field(default=None, description="覆盖 Library.write_nfo; None 沿用库设置")
@@ -306,7 +306,7 @@ index f5690e242b8a79bfad33fb3f1dc548ead406218e..2cb84d2990aec9392f6a129024f6cded
          default=None, description="覆盖 Library.copy_resources; None 沿用库设置"
      )
      media_file_ids: list[int] | None = Field(
-@@ -172,7 +172,7 @@ class OrganizePayload(LibraryBase):
+@@ -173,7 +173,7 @@ class OrganizePayload(LibraryBase):
              self.write_nfo = lib.write_nfo
          if self.copy_resources is None:
              # JSON 列读回是 str; Pydantic dump 要 enum, 否则 UnexpectedValue 警告.
