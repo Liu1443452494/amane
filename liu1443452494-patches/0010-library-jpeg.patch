@@ -1,20 +1,20 @@
 diff --git a/docs/dev/task-system.md b/docs/dev/task-system.md
-index c50ad84..be5d6e6 100644
+index 9c1cfb7..42016e6 100644
 --- a/docs/dev/task-system.md
 +++ b/docs/dev/task-system.md
-@@ -93,8 +93,8 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
+@@ -95,8 +95,8 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
  
  `execute_file_operations` 是落盘执行单元, 仅 ORGANIZE 经 `apply_file_operations` 调用. 不变量:
  
 -- **整理 = 复制到库路径**: 优先用 Resource 已有文件, 缺失才现场 `acquire`; 复制哪些类型由 `Library.copy_resources` (或 payload 覆盖) 决定 (见 [data-model.md](data-model.md)). 目标路径上已有的产物一律按本次内容覆盖, NFO 同理, 不判断是否已存在; fanart 没有刮削来源, 内容取 thumb, 因此随 thumb 一同重写, 该路径上的自备背景图会被覆盖, 也没有单独的关闭途径.
 -- **封面角标**: `watermark.enabled` 时 poster / thumb 副本按源文件 FileInfo 与条目类型叠 PNG; Resource 原图与 fanart 不修改.
-+- **整理图片**: 优先用 Resource 原图, 缺失才 `acquire`; `Library.copy_resources` 或 payload 决定写出类型, 选中产物按本次内容覆盖. fanart 独立选择并复用 thumb 原图. `src/amane/handlers/file.py::_copy_library_image` 按实际格式处理 JPG 输出: JPEG 直接复制, 其余仅转换库路径副本; 刮削缓存和候选排序不参与转换.
++- **整理图片**: 优先用 Resource 原图, 缺失才 `acquire`; `Library.copy_resources` 或 payload 决定写出类型并覆盖选中产物. fanart 独立选择并复用 thumb 原图. `src/amane/handlers/file.py::_copy_library_image` 对 JPG 输出复制 JPEG, 其余仅转换库路径副本, 与角标共用刮削质量设置; 刮削缓存和候选排序不参与转换.
 +- **封面角标**: `watermark.enabled` 时 poster / thumb 按 FileInfo 与条目类型叠 PNG; 非 JPEG 转换与角标合并编码, 保留颜色配置和显示方向. `src/amane/media/images.py::_save_jpeg` 的整理参数不影响裁剪等既有调用; Resource 原图与 fanart 不叠角标.
  - **海报缺失**: 按 `scraping.crop_poster` 从已落盘 thumb 裁剪兜底.
  - **目标占用**: 判定分为四态: 空闲 / 已就位 / 被占用 / 无法判定. 源与目标已是同一文件 (含硬链同一 inode) 时视为就位, 只跳过视频落盘, 附属文件照常重写; 被占用时跳过该文件, 不改名、不覆盖、不移动, 视频与字幕一视同仁, 由调用方按冲突记账, 冲突条目 (源路径 + 被占用的目标路径; 字幕冲突的 `path` 记字幕源路径, 不记视频源路径) 写进任务结果供界面显示, 且 `conflicts` 恒为 `conflicted` 条数的前缀 (差额只留在任务日志里), 冲突不自动解决, 未落盘的行留在源路径, 由用户自行处理. 无法判定 (stat 失败, 或两者在两次读取之间被替换) 按失败记账并带上 stat 的错误说明, 不得计入冲突或放宽为空闲. 存在性与占用判定都经 `existing_disk_path` (跟随符号链接; 读不出状态时按不存在处理, 不抛异常): 目标位置是断链符号链接时按空闲处理, MOVE 会替换它, SYMLINK 因 EEXIST 记失败. 判定与落盘之间还有窗口, MOVE / COPY 期间目标被外部写入仍会覆盖, 这条保证是尽力而为.
  - **链接**: `link_template` 非空时视频就位后在库外写 STRM 或符号链接, 指向这次整理后的路径; `MediaFile.path` 仍是真实视频. 链接写入失败时, 目标路径仍在本库内则回写 path, 任务记失败以便重试补链接.
 diff --git a/src/amane/handlers/file.py b/src/amane/handlers/file.py
-index 3cc76ad..7738871 100644
+index 3cc76ad..edf7d0e 100644
 --- a/src/amane/handlers/file.py
 +++ b/src/amane/handlers/file.py
 @@ -3,8 +3,10 @@ from collections.abc import Sequence
@@ -45,7 +45,7 @@ index 3cc76ad..7738871 100644
      """复制到媒体库, 元数据复制失败不算失败.
  
      成功路径保持 copy2 的全部行为 (Windows 的 CopyFile2 与其余平台的 copyfile + copystat).
-@@ -317,7 +320,65 @@ def _copy_into_library(src: Path, dst: Path) -> None:
+@@ -317,7 +320,66 @@ def _copy_into_library(src: Path, dst: Path) -> None:
              shutil.copystat(src, dst)
          except OSError as exc:
              logger.debug("copy metadata skipped", src=str(src), dst=str(dst), error=str(exc))
@@ -81,6 +81,7 @@ index 3cc76ad..7738871 100644
 +    temporary = dst.with_name(f".{dst.stem}.{uuid4().hex}.jpg")
 +    try:
 +        marked = False
++        jpeg_quality = config.scraping.jpeg_quality if config is not None else 95
 +        wm = config.watermark if config is not None else WatermarkConfig()
 +        if wm.enabled and file_info is not None and content_type is not None:
 +            # 先在原始格式的副本叠加角标，合并为一次 JPEG 编码。
@@ -89,7 +90,7 @@ index 3cc76ad..7738871 100644
 +                temporary,
 +                file_info,
 +                content_type,
-+                jpeg_quality=100,
++                jpeg_quality=jpeg_quality,
 +                watermark_dir=watermark_dir,
 +                scale=wm.scale,
 +                corners=wm.corners,
@@ -97,7 +98,7 @@ index 3cc76ad..7738871 100644
 +            )
 +        if not marked:
 +            with Image.open(src) as image:
-+                _save_jpeg(image, temporary, 100, preserve_details=True)
++                _save_jpeg(image, temporary, jpeg_quality, preserve_details=True)
 +        with Image.open(temporary) as image:
 +            image.load()
 +            if image.format != "JPEG":
@@ -111,7 +112,7 @@ index 3cc76ad..7738871 100644
  
  
  @in_thread
-@@ -336,18 +397,34 @@ def _place_library_images(
+@@ -336,18 +398,34 @@ def _place_library_images(
  ) -> None:
      # 复制封面 / 海报 / 预告片 / extrafanart 到库路径, 不判断目标上是否已有产物.
      # fanart 与封面独立选择，共用资源目录中的封面原图。
@@ -132,7 +133,7 @@ index 3cc76ad..7738871 100644
          if LibraryResource.fanart in kinds:
              paths.fanart.parent.mkdir(parents=True, exist_ok=True)
 -            _copy_into_library(thumb_local, paths.fanart)
-+            _copy_library_image(thumb_local, paths.fanart)
++            _copy_library_image(thumb_local, paths.fanart, config=config)
  
      if LibraryResource.poster in kinds:
          if poster_local is not None:
@@ -149,12 +150,12 @@ index 3cc76ad..7738871 100644
          elif thumb_local is not None and config is not None and config.scraping.crop_poster:
              paths.poster.parent.mkdir(parents=True, exist_ok=True)
              crop_poster(
-@@ -364,13 +441,13 @@ def _place_library_images(
+@@ -364,13 +442,13 @@ def _place_library_images(
      if extrafanart and LibraryResource.extrafanart in kinds:
          paths.extrafanart_dir.mkdir(parents=True, exist_ok=True)
          for i, p in enumerate(extrafanart):
 -            _copy_into_library(p, paths.extrafanart_dir / f"{i + 1}.jpg")
-+            _copy_library_image(p, paths.extrafanart_dir / f"{i + 1}.jpg")
++            _copy_library_image(p, paths.extrafanart_dir / f"{i + 1}.jpg", config=config)
  
      # 叠加水印 (thumb / poster).
      wm = config.watermark if config is not None else WatermarkConfig()
@@ -165,7 +166,7 @@ index 3cc76ad..7738871 100644
              apply_cover_watermarks_from_info(
                  paths.thumb,
                  file_info,
-@@ -380,7 +457,7 @@ def _place_library_images(
+@@ -380,7 +458,7 @@ def _place_library_images(
                  scale=wm.scale,
                  corners=wm.corners,
              )
@@ -251,12 +252,13 @@ index 0eb7c4a..0630bc4 100644
      )
 diff --git a/tests/handlers/test_liu1443452494_library_jpeg.py b/tests/handlers/test_liu1443452494_library_jpeg.py
 new file mode 100644
-index 0000000..3b0c052
+index 0000000..7a159cf
 --- /dev/null
 +++ b/tests/handlers/test_liu1443452494_library_jpeg.py
-@@ -0,0 +1,286 @@
+@@ -0,0 +1,335 @@
 +"""整理图片的真实格式、原图保留与单次 JPEG 编码。"""
 +
++from io import BytesIO
 +from pathlib import Path
 +from typing import cast
 +
@@ -321,7 +323,6 @@ index 0000000..3b0c052
 +                if image_format != "JPEG":
 +                    assert isinstance(image, JpegImagePlugin.JpegImageFile)
 +                    assert JpegImagePlugin.get_sampling(image) == 0
-+                    assert max(value for table in image.quantization.values() for value in table) == 1
 +            data = output.read_bytes()
 +            if image_format == "JPEG":
 +                assert data == original
@@ -331,6 +332,55 @@ index 0000000..3b0c052
 +                first.append(data)
 +        assert source.read_bytes() == original
 +        assert paths.trailer.read_bytes() == trailer.read_bytes()
++
++
++@pytest.mark.parametrize("quality", [None, 50, 68, 95, 100])
++def test_conversion_uses_configured_quality_and_limits_watermarks(tmp_path: Path, quality: int | None) -> None:
++    source = tmp_path / "缓存原图.webp"
++    Image.new("RGB", (400, 240), "blue").save(source, format="WEBP")
++    original = source.read_bytes()
++    stamps = tmp_path / "角标"
++    stamps.mkdir()
++    Image.new("RGBA", (40, 20), (255, 0, 0, 255)).save(stamps / "subtitle.png")
++    config = (
++        HotSettings(
++            scraping=ScrapingConfig(jpeg_quality=quality),
++            watermark=WatermarkConfig(enabled=True, scale=0.2),
++        )
++        if quality is not None
++        else None
++    )
++    paths = _paths(tmp_path / "整理")
++    _place_library_images.sync(
++        paths,
++        thumb_local=source,
++        poster_local=source,
++        trailer_local=None,
++        extrafanart=[source],
++        kinds={LibraryResource.thumb, LibraryResource.poster, LibraryResource.fanart, LibraryResource.extrafanart},
++        config=config,
++        file_info=parse_file_info("MIDV-123-C.mp4") if config is not None else None,
++        content_type=ContentType.CENSORED,
++        watermark_dir=stamps,
++    )
++    # 核对真实 JPEG 量化表，避免仅验证质量参数被传递。
++    encoded = BytesIO()
++    with Image.open(source) as image:
++        image.convert("RGB").save(encoded, format="JPEG", quality=quality if quality is not None else 95, subsampling=0)
++    with Image.open(encoded) as expected:
++        assert isinstance(expected, JpegImagePlugin.JpegImageFile)
++        background = expected.getpixel((20, 20))
++        for output_path in (paths.thumb, paths.poster, paths.fanart, paths.extrafanart_dir / "1.jpg"):
++            with Image.open(output_path) as output:
++                assert isinstance(output, JpegImagePlugin.JpegImageFile)
++                assert output.size == (400, 240)
++                assert JpegImagePlugin.get_sampling(output) == 0
++                assert output.quantization == expected.quantization
++                if config is not None and output_path in (paths.thumb, paths.poster):
++                    assert output.getpixel((20, 20)) != background
++                else:
++                    assert output.getpixel((20, 20)) == background
++    assert source.read_bytes() == original
 +
 +
 +def test_conversion_preserves_orientation_color_profile_and_transparency(tmp_path: Path) -> None:
