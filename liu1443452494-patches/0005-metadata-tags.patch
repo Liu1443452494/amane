@@ -15,7 +15,7 @@ index 2a88e70c71880f71311cf53e43c849eeb280b6a0..ac2eba10a8d1ae23ca95523352904174
  
  影片刮削在写入前经 `src/amane/liu1443452494_actor_mapping.py::map_actor_names` 读取数据目录的 `mapping_actor.xml`; 唯一匹配转换为标准名, 原名交给现有别名解析. 歧义与未匹配保留原始输入, raw 快照不变; 每次读取支持用户更新文件.
  
-+自用刮削在 `src/amane/db/repos/metadata.py::MetadataRepoMixin.upsert_metadata` 启用 `enrich_tags`: 演员姓名归一后、分类规则与投影同步前, 经 `src/amane/liu1443452494_metadata_tags.py::build_metadata_tags` 将原始标签转简体并追加最终演员姓名. 标签锁定时跳过, 不转换演员姓名或修改 raw, 不依赖 LLM; 手动编辑不触发, 存量标签在下次刮削写入时更新.
++自用刮削在 `src/amane/db/repos/metadata.py::MetadataRepoMixin.upsert_metadata` 启用 `enrich_tags`: 演员姓名归一后、分类规则与投影同步前, 经 `src/amane/liu1443452494_metadata_tags.py::build_metadata_tags` 将原始标签转简体并追加最终演员姓名. 标签锁定时跳过, 不转换演员姓名或修改 raw, 不依赖 LLM; 手动编辑不触发, 存量标签在下次刮削写入时更新. 通用简体固定使用外部 `zhconv 1.4.3` 的 `zh-hans`; 桌面打包必须收集其词表.
 +
  写入时先清洗 `Metadata.actors` 的 `name(alias1, alias2)` 形式: 展示名留真值, 别名并入对应演员的 `ActorAlias` 行. 每个名字经 `resolve_actor_by_name` 解析 (展示名精确命中 → 别名唯一命中 → 歧义 / 无命中以名字本身为展示名新建实体), 因此站点给的**裸别名**会折到已认定演员, 不再另建重复实体; block 判定在解析前后各执行一次. 影片名单顺序由第一成功源锁定, 其后已抓源按展示名填空性别. 写入时若带 `FilmActor.gender`, 只对 `Actor.gender == unknown` 且 gender 未锁的行填空, 不覆盖已有值, 不写入 `field_sources`. `Metadata.actors` 存库始终是展示名, 站点 `raw` 快照保留原始带括号形式.
  
@@ -375,3 +375,72 @@ index 4388787bd99447d3a3d4f02df0c9c62cb28e01af..fb5e8e239f9cd9318b7592b4d5f81463
 +        assert grouped == ["tag"] * len(expected) + ["genre"] * len(expected)
 +    stored = await repo.get_metadata(metadata.id)
 +    assert stored is not None and stored.tags == ["单体作品", "明里䌷"]
+diff --git a/pyproject.toml b/pyproject.toml
+index 4d5a3ce50e346c66e9e47d952e59e44a8b86fe70..35f589ee0c7a3a3fc93e92e362dd5888e6b8a98e 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -35,6 +35,7 @@ dependencies = [
+     "onnxruntime>=1.31.0; sys_platform != 'darwin'",
+     "tokenizers>=0.23.0",
+     "pyobjc-framework-CoreML>=12.2.0; sys_platform == 'darwin'",
++    "zhconv==1.4.3",
+ ]
+
+ [project.optional-dependencies]
+diff --git a/scripts/build_macos_app.sh b/scripts/build_macos_app.sh
+index 2c3290b7960658b37af412dccd6f6466ed7e325a..4cc8c023a4a8f2415b2c5d3cb749c11ee5ad8ec4 100644
+--- a/scripts/build_macos_app.sh
++++ b/scripts/build_macos_app.sh
+@@ -68,6 +68,7 @@ done < <(.venv/bin/python scripts/stdlib_modules.py)
+   --collect-all pydantic_ai \
+   --collect-all pydantic_graph \
+   --collect-all genai_prices \
++  --collect-data zhconv \
+   --hidden-import socksio \
+   "${STDLIB_ARGS[@]}" \
+   --copy-metadata genai_prices \
+diff --git a/scripts/build_windows_app.ps1 b/scripts/build_windows_app.ps1
+index d884104688575545997ae9a03ef6999c50cba5b3..fd6f8c9454c093a1d2537dc2bbcd50829c922441 100644
+--- a/scripts/build_windows_app.ps1
++++ b/scripts/build_windows_app.ps1
+@@ -70,6 +70,7 @@ $StdlibArgs = @()
+     --collect-all pydantic_ai `
+     --collect-all pydantic_graph `
+     --collect-all genai_prices `
++    --collect-data zhconv `
+     --hidden-import socksio `
+     @StdlibArgs `
+     --copy-metadata genai_prices `
+diff --git a/uv.lock b/uv.lock
+index 45b6b01be82961f9c058a66277bb204f071e0bcf..abff387f2d633fc2b8e33a1ce9c832d549321f34 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -95,6 +95,7 @@ dependencies = [
+     { name = "tomli-w" },
+     { name = "uvicorn", extra = ["standard"] },
+     { name = "watchdog" },
++    { name = "zhconv" },
+ ]
+
+ [package.optional-dependencies]
+@@ -152,6 +153,7 @@ requires-dist = [
+     { name = "tomli-w", specifier = ">=1.2.0" },
+     { name = "uvicorn", extras = ["standard"], specifier = ">=0.46.0" },
+     { name = "watchdog", specifier = ">=6.0.0,<7" },
++    { name = "zhconv", specifier = "==1.4.3" },
+ ]
+ provides-extras = ["browser"]
+
+@@ -3371,6 +3373,12 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/cb/e9/c362d47ed2b1928d65d61888c1419fae8ef69417fba2067d2fd3da1d400b/xmod-1.10.0-py3-none-any.whl", hash = "sha256:bebf8493b7ac63097401590a329c9ed20da224de0583a522e7ccb634af122f5a", size = 4661, upload-time = "2026-05-09T13:46:45.776Z" },
+ ]
+
++[[package]]
++name = "zhconv"
++version = "1.4.3"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/25/47/c8ae2d5d4025e253211ff3d8c163f457db1da94976cb582337a5ab76cb87/zhconv-1.4.3.tar.gz", hash = "sha256:ad42d9057ca0605f8e41d62b67ca797f879f58193ee6840562c51459b2698c45", size = 211571, upload-time = "2021-10-31T05:59:44.096Z" }
++
+ [[package]]
+ name = "zstandard"
+ version = "0.25.0"
