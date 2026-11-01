@@ -1,18 +1,80 @@
 diff --git a/docs/dev/frontend.md b/docs/dev/frontend.md
-index aba59bd..d5e8884 100644
+index e791fc0a7bc6c950e4555cfd2bb043eafbf86639..faa35646e34db9a0985669992a7e855e32d12251 100644
 --- a/docs/dev/frontend.md
 +++ b/docs/dev/frontend.md
-@@ -97,7 +97,7 @@ OpenAPI 字符串联合若需运行时迭代, 集中放置于 `lib/exhaustive-ma
+@@ -77,6 +77,8 @@ Settings、任务提交、定时创建、metadata 编辑共用 `components/schem
 
- 外站图经由 `/api/resources/proxy` (`proxyImageUrl`); 评论正文的图片例外: 直接内联, 懒加载且不发送 Referer, 失败降级为链接 — 代理会写入 `Resource`, 评论 URL 不在清理存活集合内. `<img>` 不能带 Authorization, 鉴权靠 cookie. 裁切基准是源图 (海报 `thumb_urls[0]`, 演员头像 `image_urls[0]`) 对应的 Resource 本地文件; 两者共用 `ImageCropDialog`, 只提交像素坐标, 不上传 blob.
+ ## 实时与状态
 
--相位水印是 CSS overlay (`FilePhaseOverlay`), 读列表聚合的 `file_phase`, 不修改 Resource 像素; 表格与文件列表仍用 `FilePhaseBadges`. `FanartLightbox` 必须 Portal 到 `document.body`. 外链图片的并发限流见 `components/media/proxy-image.tsx` 与 `lib/image-loader.ts` 的注释; 代理会下载上游原图并写入 `Resource`, 因此「对比来源」面板 (`components/metadata/merge-dialog.tsx`) 的图先渲染为与缩略图同形的占位块, 点击后才加载 — 展开面板不得触发回源.
-+相位水印是 CSS overlay (`FilePhaseOverlay`), 读列表聚合的 `file_phase`, 不修改 Resource 像素; 表格与文件列表仍用 `FilePhaseBadges`. 详情页海报预览经由 `components/media/fanart-lightbox.tsx::FanartLightbox` 按需读取当前海报资源, 不读取整理产物; 查看器必须 Portal 到 `document.body`. 外链图片的并发限流见 `components/media/proxy-image.tsx` 与 `lib/image-loader.ts` 的注释; 代理会下载上游原图并写入 `Resource`, 因此「对比来源」面板 (`components/metadata/merge-dialog.tsx`) 的图先渲染为与缩略图同形的占位块, 点击后才加载 — 展开面板不得触发回源.
++影片详情个人入口经 `web/src/components/media/liu1443452494-detail-actions.tsx::DetailActions` 集中于关联文件下方, 复用日志与水印组件; 海报预览复用 `web/src/components/media/fanart-lightbox.tsx::FanartLightbox`, 只读取当前海报资源, 不读取整理产物. 切换影片时重置水印与预览, 日志保留自身状态.
++
+ 影片详情处理日志见 `web/src/components/media/liu1443452494-processing-log.tsx::ProcessingLogButton`；来源结果与过程共用滚动区，合并记录沿用首次标识。读取与归属见 [observability.md](observability.md)。
 
- ## `lib/` 分层
-
+ 影片详情水印编辑见 `web/src/components/media/watermark-edit-dialog.tsx::WatermarkEditButton`, 按媒体文件选择并读取当前状态; 自动模式禁用字段, 手动只提交实际修改. 保存后刷新详情与列表, 存在变化才询问是否提交原有 ORGANIZE 单文件任务; 取消提示不影响已保存设置. 持久化与保护口径见 [data-model.md](data-model.md).
+diff --git a/web/src/components/media/liu1443452494-detail-actions.tsx b/web/src/components/media/liu1443452494-detail-actions.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..0a6ea4c2ce613cdc3d9e06a4062dc029bb6e3544
+--- /dev/null
++++ b/web/src/components/media/liu1443452494-detail-actions.tsx
+@@ -0,0 +1,56 @@
++import { Box, Button, Group, Tooltip } from "@mantine/core";
++import { useDisclosure } from "@mantine/hooks";
++import { IconPhoto } from "@tabler/icons-react";
++import type { ComponentProps } from "react";
++import { useTranslation } from "react-i18next";
++import { FanartLightbox } from "@/components/media/fanart-lightbox";
++import { ProcessingLogButton } from "@/components/media/liu1443452494-processing-log";
++import { WatermarkEditButton } from "@/components/media/watermark-edit-dialog";
++
++type DetailActionsProps = ComponentProps<typeof WatermarkEditButton> & {
++  posterSrc: string | null;
++};
++
++export function DetailActions({
++  metadataId,
++  metadataNumber,
++  files,
++  posterSrc,
++}: DetailActionsProps) {
++  return (
++    <Group gap="xs" wrap="wrap">
++      <ProcessingLogButton metadataId={metadataId} />
++      <WatermarkEditButton
++        key={`watermark-${metadataId}`}
++        metadataId={metadataId}
++        metadataNumber={metadataNumber}
++        files={files}
++      />
++      <PosterPreviewButton key={`poster-${metadataId}`} posterSrc={posterSrc} />
++    </Group>
++  );
++}
++
++function PosterPreviewButton({ posterSrc }: { posterSrc: string | null }) {
++  const { t } = useTranslation("metadata");
++  const [opened, preview] = useDisclosure(false);
++
++  return (
++    <>
++      <Tooltip label={t("detail.previewPoster.empty")} disabled={Boolean(posterSrc)}>
++        <Box display="inline-block">
++          <Button
++            size="xs"
++            variant="light"
++            leftSection={<IconPhoto size={14} />}
++            disabled={!posterSrc}
++            onClick={preview.open}
++          >
++            {t("detail.previewPoster.action")}
++          </Button>
++        </Box>
++      </Tooltip>
++      {opened && posterSrc && <FanartLightbox images={[posterSrc]} onClose={preview.close} />}
++    </>
++  );
++}
 diff --git a/web/src/i18n/locales/en/metadata.json b/web/src/i18n/locales/en/metadata.json
-index 890fbee..ded00f0 100644
+index a77a45fbbc195cd31259c2ddfe5090c1645a3ea3..de18db106369e0abbf031ea66b5381c91b093160 100644
 --- a/web/src/i18n/locales/en/metadata.json
 +++ b/web/src/i18n/locales/en/metadata.json
 @@ -150,6 +150,10 @@
@@ -27,7 +89,7 @@ index 890fbee..ded00f0 100644
        "action": "Crop poster",
        "title": "Crop poster",
 diff --git a/web/src/i18n/locales/zh-CN/metadata.json b/web/src/i18n/locales/zh-CN/metadata.json
-index e96d8a8..2084a6d 100644
+index a83ed3c816d3d4f07faca810facc922c1eb839e6..83fb50dbee616b956d1b3ead0f686dd0e1aebc49 100644
 --- a/web/src/i18n/locales/zh-CN/metadata.json
 +++ b/web/src/i18n/locales/zh-CN/metadata.json
 @@ -147,6 +147,10 @@
@@ -42,60 +104,140 @@ index e96d8a8..2084a6d 100644
        "action": "裁切海报",
        "title": "裁切海报",
 diff --git a/web/src/routes/meta.$metadataId.tsx b/web/src/routes/meta.$metadataId.tsx
-index 13cb22b..a3c0961 100644
+index 13cb22bfd69206e48bffa80b8ac17a4a7056a620..9af00dd7a7339693642f20ece16f64a6bf6251cb 100644
 --- a/web/src/routes/meta.$metadataId.tsx
 +++ b/web/src/routes/meta.$metadataId.tsx
-@@ -28,6 +28,7 @@ import {
-   IconLock,
-   IconLockOpen,
-   IconPencil,
-+  IconPhoto,
-   IconPhotoOff,
-   IconPlayerPlay,
-   IconRefresh,
-@@ -144,6 +145,7 @@ function TitleDetailPage() {
-   const [mergeOpen, setMergeOpen] = useState(false);
-   const [cropOpen, setCropOpen] = useState(false);
-   const [coverLightboxOpen, coverLightbox] = useDisclosure(false);
-+  const [posterLightboxOpen, posterLightbox] = useDisclosure(false);
-   const [playingTrailer, setPlayingTrailer] = useState(false);
-   // 播放失败的预告片地址: 只对该地址有效, 记录之外 (条目切换或重新刮削换了地址) 一律不算失败.
-   const [failedTrailerUrl, setFailedTrailerUrl] = useState<string | null>(null);
-@@ -193,6 +195,7 @@ function TitleDetailPage() {
-     setPlayingTrailer(false);
-     setThumbBroken(false);
-     setPosterBroken(false);
-+    posterLightbox.close();
-   }
+@@ -57,14 +57,13 @@ import {
+ import { getMetadataSchema } from "@/client/sdk.gen";
+ import type { MetadataField, MetadataResponse } from "@/client/types.gen";
+ import { FacetBadge } from "@/components/media/facet-badge";
+-import { ProcessingLogButton } from "@/components/media/liu1443452494-processing-log";
++import { DetailActions } from "@/components/media/liu1443452494-detail-actions";
+ import { LockChip, LockToggle, type LockProps } from "@/components/media/field-lock";
+ import { UserTagActions } from "@/components/media/user-tag-add";
+ import { VrBadge } from "@/components/media/vr-badge";
+ import { FanartLightbox, FanartStrip } from "@/components/media/fanart-lightbox";
+ import { FilePhaseBadges, FilePhaseOverlay } from "@/components/media/file-phase-badges";
+ import { PosterCropDialog } from "@/components/media/poster-crop-dialog";
+-import { WatermarkEditButton } from "@/components/media/watermark-edit-dialog";
+ import { MergeDialog } from "@/components/metadata/merge-dialog";
+ import { type JSONSchemaObject, resolveSchema } from "@/components/schema-form/schema";
+ import { SchemaForm } from "@/components/schema-form/schema-form";
+@@ -788,7 +787,6 @@ function TitleDetailPage() {
+           )}
 
-   const { data, isLoading, isError } = useQuery({
-@@ -628,6 +631,19 @@ function TitleDetailPage() {
-                 </Button>
-               </Box>
-             </Tooltip>
-+            <Tooltip label={t("detail.previewPoster.empty")} disabled={Boolean(posterSrc)}>
-+              <Box display="inline-block">
-+                <Button
-+                  size="xs"
-+                  variant="light"
-+                  leftSection={<IconPhoto size={14} />}
-+                  disabled={!posterSrc}
-+                  onClick={posterLightbox.open}
-+                >
-+                  {t("detail.previewPoster.action")}
-+                </Button>
-+              </Box>
-+            </Tooltip>
-             <LockChip label={t("detail.fields.thumb")} {...lockProps("thumb_urls")} />
-             <LockChip label={t("detail.fields.poster")} {...lockProps("poster_urls")} />
-             <LockChip label={t("detail.fields.trailer")} {...lockProps("trailer_urls")} />
-@@ -1007,6 +1023,9 @@ function TitleDetailPage() {
-       {coverLightboxOpen && coverSrc && (
-         <FanartLightbox images={[coverSrc]} onClose={coverLightbox.close} />
-       )}
-+      {posterLightboxOpen && posterSrc && (
-+        <FanartLightbox images={[posterSrc]} onClose={posterLightbox.close} />
-+      )}
-     </Stack>
-   );
- }
+           <Group gap="xs" pt="xs">
+-            <ProcessingLogButton metadataId={id} />
+             <Menu shadow="md" position="bottom-start">
+               <Menu.Target>
+                 <Button
+@@ -833,12 +831,6 @@ function TitleDetailPage() {
+             >
+               {t("common:actions.edit")}
+             </Button>
+-            <WatermarkEditButton
+-              key={id}
+-              metadataId={id}
+-              metadataNumber={item.number}
+-              files={data.files}
+-            />
+             <Menu shadow="md" position="bottom-start">
+               <Menu.Target>
+                 <Button
+@@ -902,47 +894,55 @@ function TitleDetailPage() {
+
+       {/* 宽屏下并排, 窄屏落回上下叠放; 各自保持自然高度, 拉平会把空白挪进较短的一栏. */}
+       <SimpleGrid cols={{ base: 1, lg: 2 }} spacing="md" style={{ alignItems: "start" }}>
+-        <Card withBorder radius="md" p="md">
+-          <Title order={5} mb="sm">
+-            {t("detail.connections")}
+-          </Title>
+-          {data.files.length === 0 ? (
+-            <Text size="sm" c="dimmed">
+-              {t("detail.noFiles")}
+-            </Text>
+-          ) : (
+-            <Stack gap={6}>
+-              {data.files.map((f) => (
+-                <Group key={f.id} justify="space-between" gap="xs" wrap="nowrap">
+-                  <Stack gap={4} style={{ minWidth: 0, flex: 1 }}>
+-                    <Text size="sm" truncate="end" ff="monospace">
+-                      {f.path}
+-                    </Text>
+-                    <FilePhaseBadges phase={f} />
+-                  </Stack>
+-                  <Badge size="sm" variant="light">
+-                    {f.status}
+-                  </Badge>
+-                  {/* 逐文件的删除只在媒体库详情页做: 这里只把人送过去, 并按该文件的路径过滤列表. */}
+-                  <ActionIcon
+-                    variant="subtle"
+-                    size="sm"
+-                    aria-label={t("detail.openInLibrary")}
+-                    onClick={() =>
+-                      void navigate({
+-                        to: "/libraries/$libraryId",
+-                        params: { libraryId: String(f.library_id) },
+-                        search: { q: f.path },
+-                      })
+-                    }
+-                  >
+-                    <IconFolders size={16} />
+-                  </ActionIcon>
+-                </Group>
+-              ))}
+-            </Stack>
+-          )}
+-        </Card>
++        <Stack gap="md">
++          <Card withBorder radius="md" p="md">
++            <Title order={5} mb="sm">
++              {t("detail.connections")}
++            </Title>
++            {data.files.length === 0 ? (
++              <Text size="sm" c="dimmed">
++                {t("detail.noFiles")}
++              </Text>
++            ) : (
++              <Stack gap={6}>
++                {data.files.map((f) => (
++                  <Group key={f.id} justify="space-between" gap="xs" wrap="nowrap">
++                    <Stack gap={4} style={{ minWidth: 0, flex: 1 }}>
++                      <Text size="sm" truncate="end" ff="monospace">
++                        {f.path}
++                      </Text>
++                      <FilePhaseBadges phase={f} />
++                    </Stack>
++                    <Badge size="sm" variant="light">
++                      {f.status}
++                    </Badge>
++                    {/* 逐文件的删除只在媒体库详情页做: 这里只把人送过去, 并按该文件的路径过滤列表. */}
++                    <ActionIcon
++                      variant="subtle"
++                      size="sm"
++                      aria-label={t("detail.openInLibrary")}
++                      onClick={() =>
++                        void navigate({
++                          to: "/libraries/$libraryId",
++                          params: { libraryId: String(f.library_id) },
++                          search: { q: f.path },
++                        })
++                      }
++                    >
++                      <IconFolders size={16} />
++                    </ActionIcon>
++                  </Group>
++                ))}
++              </Stack>
++            )}
++          </Card>
++          <DetailActions
++            metadataId={id}
++            metadataNumber={item.number}
++            files={data.files}
++            posterSrc={posterSrc}
++          />
++        </Stack>
+
+         <CommentSection
+           metadataId={id}

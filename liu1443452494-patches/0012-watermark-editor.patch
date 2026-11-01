@@ -2907,12 +2907,12 @@ index 0000000000000000000000000000000000000000..a07b0e5fc6317630da060654912551fd
 +  return changed ? update : null;
 +}
 diff --git a/web/src/i18n/locales/en/metadata.json b/web/src/i18n/locales/en/metadata.json
-index 8a6e6dc0419c3937bf03687ee2eeb73ef6666685..890fbee0283c98af1bb9383b81481fd62428efbe 100644
+index 9c5f7fb568a52d94e2a6f2cae8834c5a6f4d675b..a77a45fbbc195cd31259c2ddfe5090c1645a3ea3 100644
 --- a/web/src/i18n/locales/en/metadata.json
 +++ b/web/src/i18n/locales/en/metadata.json
-@@ -405,6 +405,24 @@
-     "changedCount_other": "{{count}} field(s) changed",
-     "loadImages": "Load images"
+@@ -406,6 +406,24 @@
+     "loadImages": "Load images",
+     "loadAllImages": "Load all images"
    },
 +  "watermark": {
 +    "action": "修改水印",
@@ -2936,12 +2936,12 @@ index 8a6e6dc0419c3937bf03687ee2eeb73ef6666685..890fbee0283c98af1bb9383b81481fd6
      "manage": "Field Locks",
      "all": "Lock All",
 diff --git a/web/src/i18n/locales/zh-CN/metadata.json b/web/src/i18n/locales/zh-CN/metadata.json
-index 84eeaaebbec6a776e36c2ba29609872234a27f87..e96d8a87f858412a41d6753b03790dc9c622840e 100644
+index f9542a965c8d5ffe141d2b1849275aed1d32005f..a83ed3c816d3d4f07faca810facc922c1eb839e6 100644
 --- a/web/src/i18n/locales/zh-CN/metadata.json
 +++ b/web/src/i18n/locales/zh-CN/metadata.json
-@@ -382,6 +382,24 @@
-     "noChanges": "无修改",
-     "loadImages": "加载图片"
+@@ -383,6 +383,24 @@
+     "loadImages": "加载图片",
+     "loadAllImages": "加载全部图片"
    },
 +  "watermark": {
 +    "action": "修改水印",
