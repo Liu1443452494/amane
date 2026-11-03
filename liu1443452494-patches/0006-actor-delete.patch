@@ -419,24 +419,24 @@ index b16307953addde4b049038a8f121bf2bc1cd87de..479e4f18735000a96a18282ad2e01f24
          title: t("common:actions.delete"),
          message,
 diff --git a/web/src/i18n/locales/en/metadata.json b/web/src/i18n/locales/en/metadata.json
-index 04e391594e12ee589bc622c3cc4c42cb99e61c01..fd89b6b091780642f13097ff519311418916b735 100644
+index 1f416cfc51fe64d5dcf600db6ba3fd63a33bbb46..edf63aba8829bc19060ec924d70a1b676426f630 100644
 --- a/web/src/i18n/locales/en/metadata.json
 +++ b/web/src/i18n/locales/en/metadata.json
-@@ -365,6 +365,7 @@
-     "mergeConfirmBody_one": "Merge {{count}} source into the target",
-     "mergeConfirmBody_other": "Merge {{count}} sources into the target",
+@@ -394,6 +394,7 @@
+     "mergeActorTags": "Source actor user tags move to the target",
+     "mergeActorDelete": "Source actors are deleted",
      "deleteFacetBody": "Remove \"{{name}}\" from all titles and add it to the drop list; later scrapes will drop it",
 +    "deleteActorBody": "将删除演员「{{name}}」及其资料，并从所有影片中移除该演员。后续刮削可重新创建，不会自动加入剔除名单。",
      "deleteUserTagBody": "Permanently delete user tag \"{{name}}\"? It will be removed from all titles",
      "rulesTitle": "Facet rules",
      "rulesHint": "Scrapes rename by alias and drop excluded names. Removing a rule does not change existing titles",
 diff --git a/web/src/i18n/locales/zh-CN/metadata.json b/web/src/i18n/locales/zh-CN/metadata.json
-index f64f359185c2c2c25f700f99d97c9b5f5b13e531..994714ea985c63b07b262c7ec70dfe1194255490 100644
+index ae3ca360b8d880b031faf247aedbdce58bd5c94c..f35c6ad32bd0db0ca286767aff0e37a78594cd2d 100644
 --- a/web/src/i18n/locales/zh-CN/metadata.json
 +++ b/web/src/i18n/locales/zh-CN/metadata.json
-@@ -344,6 +344,7 @@
-     "mergeConfirm": "确认合并",
-     "mergeConfirmBody": "将把 {{count}} 个来源合并到目标项",
+@@ -369,6 +369,7 @@
+     "mergeActorTags": "来源演员的用户标签转移到目标",
+     "mergeActorDelete": "来源演员会被删除",
      "deleteFacetBody": "将从所有影片中移除「{{name}}」, 并加入剔除名单, 后续刮削时自动剔除",
 +    "deleteActorBody": "将删除演员「{{name}}」及其资料，并从所有影片中移除该演员。后续刮削可重新创建，不会自动加入剔除名单。",
      "deleteUserTagBody": "确定永久删除用户标签 「{{name}}」？将从所有影片上移除该标签",
