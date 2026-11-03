@@ -34,6 +34,19 @@ index 21f50a34c7f9d44d35d07f490d0dbe40cfcdea42..22c4d76202f5814cdc243df6806e5c7d
  
  ## Library 归属
  
+diff --git a/docs/dev/database.md b/docs/dev/database.md
+index 9fd9c134307bfdea7a0506ef81291af9da75e728..0aa9d83a0cf7c2052e457cacdd245fb2d8ff200f 100644
+--- a/docs/dev/database.md
++++ b/docs/dev/database.md
+@@ -42,6 +42,8 @@ pysqlite 只在 DML 之前发出 `BEGIN`, 纯 SELECT 落在事务之外 (SQLAlch
+ 2. **落后 head**: 先用 sqlite3 **online backup API** 写 `{db}.pre-migrate-{oldrev}-{utc}.bak` (含 WAL 一致快照; 同目录保留最近 5 份), 再升级.
+ 3. **迁移连接**单独 `autocommit=False` + Alembic `transactional_ddl=True`: 单次 revision 内 DDL 与 `alembic_version` 同事务, 失败则回滚, 避免「表已创建但版本未升」的半成品. 业务连接不修改事务模式, 仍只开 WAL + FK.
+ 
++自用水印与上游迁移通过 `src/amane/db/migrations/versions/610da6db7500_合并水印与上游数据库升级.py::down_revision` 合并为单一终点; 已发布迁移的标识与父版本保持稳定, 保证既有数据库补齐尚未执行的分支.
++
+ 迁移内不允许文件系统 I/O 与其它无界等待: 整条链共用一个事务, 中止即整体回滚、重试仍从零开始, 而网盘挂载点上逐目录列举会把启动阻塞数分钟以上且没有可见进度. 需要遍历磁盘的回填由运行期承担 (如 `REFRESH` 库扫描). 迁移内也不允许中途 `commit()`: DDL 会随之提前落盘, 而 `alembic_version` 在 revision 返回后才推进, 失败后重跑报 `duplicate column name`.
+ 
+ CLI (`uv run alembic …`) 使用同一套 `env.py` 事务性 DDL, 但**不会**自动备份 — 依赖启动路径或手工 backup. `env.py` 自行创建的引擎在 upgrade 结束后必须 `dispose()`, 否则同一进程内多次升级 (测试) 会留下未关闭的连接.
 diff --git a/docs/dev/frontend.md b/docs/dev/frontend.md
 index 86a29fbe64132fe4bb9895fe2f8f07ec3f805f7a..aba59bd8f8a4b0f63268d78701564a1b8ae742c5 100644
 --- a/docs/dev/frontend.md
@@ -298,6 +311,32 @@ index 0000000000000000000000000000000000000000..0139c516e13bd7298b61a9c739d03e46
 +    op.drop_column("media_files", "watermark_mosaic")
 +    op.drop_column("media_files", "watermark_subtitle")
 +    op.drop_column("media_files", "watermark_mode")
+diff --git a/src/amane/db/migrations/versions/610da6db7500_合并水印与上游数据库升级.py b/src/amane/db/migrations/versions/610da6db7500_合并水印与上游数据库升级.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b55c1290c332a9fd9f6bbd3c3a7490e60d681fe5
+--- /dev/null
++++ b/src/amane/db/migrations/versions/610da6db7500_合并水印与上游数据库升级.py
+@@ -0,0 +1,20 @@
++"""合并水印与上游数据库升级。
++
++仅合并版本关系，由各父迁移分别完成字段与数据更新。
++"""
++
++from collections.abc import Sequence
++
++# Alembic 使用的迁移标识。
++revision: str = "610da6db7500"
++down_revision: tuple[str, str] = ("6940e4cf8a80", "2016f33e04dd")
++branch_labels: str | Sequence[str] | None = None
++depends_on: str | Sequence[str] | None = None
++
++
++def upgrade() -> None:
++    pass
++
++
++def downgrade() -> None:
++    pass
 diff --git a/src/amane/db/models.py b/src/amane/db/models.py
 index ac3ab2c58692787d69207eda4c74ce36b58e266a..04568a1414b03836f2d0329c54bf18b134ceaef8 100644
 --- a/src/amane/db/models.py
@@ -611,18 +650,10 @@ index 757c84a23c2d94951cdbfacb9680e96be3672c95..49cabcc611b30a3fd22406250e7d6c39
          async with self._session() as session:
              media = await session.get(MediaFile, media_id)
 diff --git a/src/amane/db/repos/metadata.py b/src/amane/db/repos/metadata.py
-index d1132eefd3d3e392f045c1d2a2e0c786971b4c99..449df6b577a3997dfd9dd07bea2ef0eb4e4a2e60 100644
+index 791ada146b9b579619c91bcc3b0adb56814a6015..5ebc00408c4ae1e339ffd7fb7b2024ef0bf1c883 100644
 --- a/src/amane/db/repos/metadata.py
 +++ b/src/amane/db/repos/metadata.py
-@@ -14,7 +14,6 @@ from ...parsing import ContentType, Mosaic, infer_content_type
- from ...utils.collections import unique_ids
- from ...utils.text import normalize_long_text
- from ..models import (
--    MediaFile,
-     Metadata,
-     MetadataActor,
-     MetadataDirector,
-@@ -26,6 +25,8 @@ from ..models import (
+@@ -28,6 +28,8 @@ from ..models import (
      SortOrder,
      Studio,
      has_subtitle_predicate,
@@ -631,7 +662,7 @@ index d1132eefd3d3e392f045c1d2a2e0c786971b4c99..449df6b577a3997dfd9dd07bea2ef0eb
      metadata_number_predicate,
      metadata_vr_predicate,
  )
-@@ -202,12 +203,12 @@ class MetadataRepoMixin(RepositoryMixinBase):
+@@ -216,12 +218,12 @@ class MetadataRepoMixin(RepositoryMixinBase):
          elif has_subtitle is False:
              conditions.append(~_metadata_linked_file_exists(has_subtitle_predicate()))
          if mosaic is not None:
@@ -1846,20 +1877,24 @@ index 0000000000000000000000000000000000000000..91d6f015a68b34734d156fe95e08df16
 +        assert missing.status_code == 404 and missing.json()["detail"] == "媒体文件不存在"
 diff --git a/tests/db/test_liu1443452494_watermark_migration.py b/tests/db/test_liu1443452494_watermark_migration.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..70a6e7b9fcf61c0efa7ffcc503ad677884e75876
+index 0000000000000000000000000000000000000000..bc77436209caef87bfb309b2ceccf19381d86e23
 --- /dev/null
 +++ b/tests/db/test_liu1443452494_watermark_migration.py
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,109 @@
 +"""旧数据库升级保留路径投影, 人工保护默认关闭; 回退不丢失原有媒体记录."""
 +
 +from pathlib import Path
 +
++import pytest
 +from alembic import command
++from alembic.script import ScriptDirectory
 +from sqlalchemy import create_engine, inspect, text
 +from sqlmodel import Session, select
 +
 +from amane.db.models import MediaFile
-+from amane.parsing import Mosaic, WatermarkMode
++from amane.db.sqlite_migrate import upgrade_sqlite_database
++from amane.db.watermarks import watermark_state
++from amane.parsing import ContentType, Mosaic, MosaicNature, WatermarkMode
 +from tests.helpers import alembic_config
 +
 +
@@ -1890,6 +1925,71 @@ index 0000000000000000000000000000000000000000..70a6e7b9fcf61c0efa7ffcc503ad6778
 +        )
 +    command.upgrade(config, "head")
 +    engine.dispose()
++
++
++@pytest.mark.parametrize(
++    ("starting_revision", "initial_mosaic", "has_watermarks"),
++    [
++        ("9054ebacea29", Mosaic.UNCENSORED, False),
++        ("6940e4cf8a80", Mosaic.CRACKED, False),
++        ("2016f33e04dd", Mosaic.UNCENSORED, True),
++    ],
++    ids=["旧上游", "新上游", "旧自用"],
++)
++def test_watermark_migration_merges_upgrade_paths(
++    tmp_path: Path, starting_revision: str, initial_mosaic: Mosaic, has_watermarks: bool
++) -> None:
++    """各升级入口补齐另一分支，修正路径识别并保留已保存的人工取消项。"""
++    db_path = tmp_path / "分支升级.db"
++    config = alembic_config(db_path)
++    command.upgrade(config, starting_revision)
++    media_path = "/原目录/SSIS-345-LTX-4K.mp4"
++    saved_outputs = '{"version":1,"number":"SSIS-345","outputs":[]}'
++    engine = create_engine(f"sqlite:///{db_path}")
++    try:
++        with engine.begin() as connection:
++            connection.execute(
++                text(
++                    "INSERT INTO media_files "
++                    "(path,status,library_id,created_at,updated_at,mosaic,definition,"
++                    "has_subtitle_in_name,has_external_subtitle) "
++                    "VALUES (:path,'SCRAPED',1,'2026-10-01','2026-10-01',:mosaic,'4K',1,1)"
++                ),
++                {"path": media_path, "mosaic": initial_mosaic.name},
++            )
++            if has_watermarks:
++                connection.execute(
++                    text(
++                        "UPDATE media_files SET watermark_mode='MANUAL',watermark_subtitle=0,"
++                        "watermark_mosaic='LEAKED',watermark_definition=NULL,"
++                        "watermark_definition_locked=1,organized_outputs=:outputs"
++                    ),
++                    {"outputs": saved_outputs},
++                )
++
++        backup = upgrade_sqlite_database(db_path)
++        assert backup is not None and backup.is_file()
++        heads = ScriptDirectory.from_config(config).get_heads()
++        assert len(heads) == 1
++        with engine.connect() as connection:
++            assert connection.execute(text("SELECT version_num FROM alembic_version")).scalars().all() == heads
++        with Session(engine) as session:
++            media = session.exec(select(MediaFile)).one()
++            assert media.path == media_path and media.mosaic is Mosaic.CRACKED
++            assert media.definition == "4K" and media.has_subtitle_in_name and media.has_external_subtitle
++            state = watermark_state(media, ContentType.CENSORED)
++            if has_watermarks:
++                assert state.mode is WatermarkMode.MANUAL
++                assert state.mosaic is MosaicNature.LEAKED and not state.has_subtitle
++                assert state.definition is None and media.watermark_definition_locked
++                assert media.organized_outputs == saved_outputs
++            else:
++                assert state.mode is WatermarkMode.AUTO
++                assert state.mosaic is MosaicNature.CRACKED and state.has_subtitle
++                assert state.definition == "4K"
++        assert upgrade_sqlite_database(db_path) is None
++    finally:
++        engine.dispose()
 diff --git a/tests/db/test_liu1443452494_watermarks.py b/tests/db/test_liu1443452494_watermarks.py
 new file mode 100644
 index 0000000000000000000000000000000000000000..57ad3154aa30d3b4bb1d80b07a2d084016498be0
