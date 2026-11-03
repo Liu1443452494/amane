@@ -1,0 +1,197 @@
+diff --git a/docs/dev/frontend.md b/docs/dev/frontend.md
+index faa35646e34db9a0985669992a7e855e32d12251..11b80744a5dd1de06a2e51f459726885201cdd30 100644
+--- a/docs/dev/frontend.md
++++ b/docs/dev/frontend.md
+@@ -77,7 +77,7 @@ Settings、任务提交、定时创建、metadata 编辑共用 `components/schem
+ 
+ ## 实时与状态
+ 
+-影片详情个人入口经 `web/src/components/media/liu1443452494-detail-actions.tsx::DetailActions` 集中于关联文件下方, 复用日志与水印组件; 海报预览复用 `web/src/components/media/fanart-lightbox.tsx::FanartLightbox`, 只读取当前海报资源, 不读取整理产物. 切换影片时重置水印与预览, 日志保留自身状态.
++影片详情个人入口经 `web/src/components/media/liu1443452494-detail-actions.tsx::DetailActions` 集中于关联文件下方；单文件整理见 `web/src/components/media/reorganize-button.tsx::ReorganizeButton`，任务仅含选定文件且独立于水印。海报预览复用 `web/src/components/media/fanart-lightbox.tsx::FanartLightbox`，只读取当前海报资源。切换影片重置水印、整理选择与预览，日志保留自身状态。
+ 
+ 影片详情处理日志见 `web/src/components/media/liu1443452494-processing-log.tsx::ProcessingLogButton`；来源结果与过程共用滚动区，合并记录沿用首次标识。读取与归属见 [observability.md](observability.md)。
+ 
+diff --git a/web/src/components/media/liu1443452494-detail-actions.tsx b/web/src/components/media/liu1443452494-detail-actions.tsx
+index 0a6ea4c2ce613cdc3d9e06a4062dc029bb6e3544..d8c5c906f7b38b3bf4fd78acc2824959e45f48a5 100644
+--- a/web/src/components/media/liu1443452494-detail-actions.tsx
++++ b/web/src/components/media/liu1443452494-detail-actions.tsx
+@@ -5,6 +5,7 @@ import type { ComponentProps } from "react";
+ import { useTranslation } from "react-i18next";
+ import { FanartLightbox } from "@/components/media/fanart-lightbox";
+ import { ProcessingLogButton } from "@/components/media/liu1443452494-processing-log";
++import { ReorganizeButton } from "@/components/media/reorganize-button";
+ import { WatermarkEditButton } from "@/components/media/watermark-edit-dialog";
+ 
+ type DetailActionsProps = ComponentProps<typeof WatermarkEditButton> & {
+@@ -20,6 +21,11 @@ export function DetailActions({
+   return (
+     <Group gap="xs" wrap="wrap">
+       <ProcessingLogButton metadataId={metadataId} />
++      <ReorganizeButton
++        key={`organize-${metadataId}`}
++        metadataNumber={metadataNumber}
++        files={files}
++      />
+       <WatermarkEditButton
+         key={`watermark-${metadataId}`}
+         metadataId={metadataId}
+diff --git a/web/src/components/media/reorganize-button.tsx b/web/src/components/media/reorganize-button.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..6fc3d4a82603075cb15eca4e7da0a163b95f02d0
+--- /dev/null
++++ b/web/src/components/media/reorganize-button.tsx
+@@ -0,0 +1,122 @@
++import { Box, Button, Group, Modal, Select, Stack, Text, Tooltip } from "@mantine/core";
++import { notifications } from "@mantine/notifications";
++import { IconFolderDown } from "@tabler/icons-react";
++import { useMutation, useQueryClient } from "@tanstack/react-query";
++import { useState } from "react";
++import { useTranslation } from "react-i18next";
++import { listTasksQueryKey, submitTaskMutation } from "@/client/@tanstack/react-query.gen";
++import type { MediaFileResponse } from "@/client/types.gen";
++import { extractErrorMessage } from "@/lib/api-error";
++
++interface ReorganizeButtonProps {
++  metadataNumber: string;
++  files: MediaFileResponse[];
++}
++
++export function ReorganizeButton({ metadataNumber, files }: ReorganizeButtonProps) {
++  const { t } = useTranslation(["metadata", "common"]);
++  const queryClient = useQueryClient();
++  const [opened, setOpened] = useState(false);
++  const [selectedId, setSelectedId] = useState<string | null>(null);
++  const selected = files.find((file) => String(file.id) === selectedId);
++  const organize = useMutation({
++    ...submitTaskMutation(),
++    onSuccess: () => {
++      setOpened(false);
++      setSelectedId(null);
++      void queryClient.invalidateQueries({ queryKey: listTasksQueryKey() });
++      notifications.show({ message: t("common:toast.organizeStarted"), color: "blue" });
++    },
++    onError: (error) =>
++      notifications.show({
++        message: extractErrorMessage(error, t("common:toast.operationFailed")),
++        color: "red",
++      }),
++  });
++  const saving = organize.isPending;
++
++  function submit(media: MediaFileResponse) {
++    if (saving) return;
++    organize.mutate({
++      body: {
++        type: "organize",
++        library_id: media.library_id,
++        media_file_ids: [media.id],
++      },
++    });
++  }
++
++  function start() {
++    if (saving) return;
++    if (files.length === 1) {
++      submit(files[0]);
++    } else if (files.length > 1) {
++      setSelectedId(null);
++      setOpened(true);
++    }
++  }
++
++  return (
++    <>
++      <Tooltip label={t("detail.noFiles")} disabled={files.length > 0}>
++        <Box display="inline-block">
++          <Button
++            size="xs"
++            variant="light"
++            leftSection={<IconFolderDown size={14} />}
++            disabled={files.length === 0}
++            loading={saving}
++            onClick={start}
++          >
++            {t("detail.reorganize.action")}
++          </Button>
++        </Box>
++      </Tooltip>
++      {opened && (
++        <Modal
++          opened
++          onClose={() => {
++            if (!saving) setOpened(false);
++          }}
++          title={`${t("detail.reorganize.action")} — ${metadataNumber}`}
++          size="lg"
++          closeOnEscape={!saving}
++          closeOnClickOutside={!saving}
++          withCloseButton={!saving}
++        >
++          <Stack>
++            <Select
++              label={t("detail.reorganize.file")}
++              placeholder={t("detail.reorganize.selectFile")}
++              data={files.map((file) => ({ value: String(file.id), label: file.path }))}
++              value={selectedId}
++              onChange={setSelectedId}
++              disabled={saving}
++              allowDeselect={false}
++              searchable
++            />
++            {selected && (
++              <Text size="sm" style={{ overflowWrap: "anywhere" }}>
++                {selected.path}
++              </Text>
++            )}
++            <Group justify="flex-end">
++              <Button variant="default" onClick={() => setOpened(false)} disabled={saving}>
++                {t("common:actions.cancel")}
++              </Button>
++              <Button
++                loading={saving}
++                disabled={!selected}
++                onClick={() => {
++                  if (selected) submit(selected);
++                }}
++              >
++                {t("detail.reorganize.action")}
++              </Button>
++            </Group>
++          </Stack>
++        </Modal>
++      )}
++    </>
++  );
++}
+diff --git a/web/src/i18n/locales/en/metadata.json b/web/src/i18n/locales/en/metadata.json
+index d446261e4d5bc86d8249814b99b57f793b908644..b9318e45a1fa481b203f47ac465b68d7c80e6ed4 100644
+--- a/web/src/i18n/locales/en/metadata.json
++++ b/web/src/i18n/locales/en/metadata.json
+@@ -150,6 +150,11 @@
+     "playbackClose": "Close",
+     "playbackMuted": "Muted",
+     "commentSeek": "Seek to {{time}}",
++    "reorganize": {
++      "action": "重新整理",
++      "file": "媒体文件",
++      "selectFile": "选择需要重新整理的媒体文件"
++    },
+     "previewPoster": {
+       "action": "查看海报",
+       "empty": "暂无海报"
+diff --git a/web/src/i18n/locales/zh-CN/metadata.json b/web/src/i18n/locales/zh-CN/metadata.json
+index 919e2929d69c832858a154c3242c8f99e8dede37..8af2cd406c14bca83dd8c129d08fc0bec296e4f4 100644
+--- a/web/src/i18n/locales/zh-CN/metadata.json
++++ b/web/src/i18n/locales/zh-CN/metadata.json
+@@ -147,6 +147,11 @@
+     "playbackClose": "关闭",
+     "playbackMuted": "静音",
+     "commentSeek": "跳转到 {{time}}",
++    "reorganize": {
++      "action": "重新整理",
++      "file": "媒体文件",
++      "selectFile": "选择需要重新整理的媒体文件"
++    },
+     "previewPoster": {
+       "action": "查看海报",
+       "empty": "暂无海报"
