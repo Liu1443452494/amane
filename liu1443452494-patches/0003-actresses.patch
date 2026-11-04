@@ -1,43 +1,312 @@
 diff --git a/docs/dev/data-model.md b/docs/dev/data-model.md
-index 096372468e8a8e35b766d369a43a5fe02f15882f..a43cf1391a7e379399fc5ad167cb12b18fbea46e 100644
+index b07792c3dae0ffe4a8878a67195316f408c426de..da1a797c007776b6d1d146e8cd0a86c720ea59d0 100644
 --- a/docs/dev/data-model.md
 +++ b/docs/dev/data-model.md
-@@ -122,7 +122,7 @@ PATCH 三态: **省略键** = 不更新 (`exclude_unset`); **显式值** = 写
- 
+@@ -123,7 +123,7 @@
+
  `link_template` 为空则不创建链接, 非空时 ORGANIZE 在视频就位后按该模板写一条指向真实视频的链接 (`link_mode=strm` 写 `.strm`, `symlink` 做符号链接). 链接必须在库外, 否则 REFRESH 会把链接再扫描为媒体. `.strm` 正文由库级 `strm_content_template` 决定 (空则写一行视频绝对路径); 模板引用 `{video_relpath}` 且整理后路径不在本库内时失败, 不写出错误正文. 默认附属模板用 `{link_dir}`, 因此填链接模板后 NFO / 海报自动跟随链接.
- 
+
 -模板语言在 `organize/template.py`, 只约束以下几点: 占位符分相位注入 (`metadata` → file 相位 → `apply_video` → `apply_link`), file 相位未检出是**空串**不是 `Unknown`; 渲染时把 `{title}` / `{actor}` 等分量截到 200 UTF-8 字节 (不切开多字节字符), 但不截断渲染后的路径分量; 可选组 `[...]` 内直接占位符全空则整段丢弃, 有一个非空时其余输出空串. 普通占位符缺失回退 `Unknown`. **段名按 Windows 创建结果对齐**: 每个路径段去掉段尾的 `.` 与空格, 控制字符替换为空格 — 创建与 `os.path.abspath` 对段尾字符的处理不同, 不对齐会让索引记录磁盘上不存在的名字; `.` / `..` 原样保留给逃逸检查. **逃逸防护**: 校验对渲染结果做 realpath (跟随符号链接), 相对模板的真实写出路径必须在本库内 (`ALLOW_ALL` 也不例外), 绝对模板必须位于本库或 `safe_dirs` 内, 否则 `ValueError`; 多盘分存要求目标盘在 `safe_dirs` 内. 细则见 `organize/path_templates.py`.
-+模板语言在 `organize/template.py`; `actresses` 按性别筛选后超过三人输出「多人作品」, 不截减 Metadata 的演员名单. 其它约束: 占位符分相位注入 (`metadata` → file 相位 → `apply_video` → `apply_link`), file 相位未检出是**空串**不是 `Unknown`; 渲染时把 `{title}` / `{actor}` 等分量截到 200 UTF-8 字节 (不切开多字节字符), 但不截断渲染后的路径分量; 可选组 `[...]` 内直接占位符全空则整段丢弃, 有一个非空时其余输出空串. 普通占位符缺失回退 `Unknown`. **段名按 Windows 创建结果对齐**: 每个路径段去掉段尾的 `.` 与空格, 控制字符替换为空格 — 创建与 `os.path.abspath` 对段尾字符的处理不同, 不对齐会让索引记录磁盘上不存在的名字; `.` / `..` 原样保留给逃逸检查. **逃逸防护**: 校验对渲染结果做 realpath (跟随符号链接), 相对模板的真实写出路径必须在本库内 (`ALLOW_ALL` 也不例外), 绝对模板必须位于本库或 `safe_dirs` 内, 否则 `ValueError`; 多盘分存要求目标盘在 `safe_dirs` 内. 细则见 `organize/path_templates.py`.
- 
++模板语言见 `src/amane/organize/template.py::PathEngine`; `TemplateContext` 保留完整名单, 筛选后超过三人且目录段仅有 `actresses` 占位符时才替换姓名. 调用方区分文件与目录产物, STRM 正文不替换姓名. 其余约束: 占位符分相位注入 (`metadata` → file 相位 → `apply_video` → `apply_link`), file 相位未检出是**空串**不是 `Unknown`; 渲染时把 `{title}` / `{actor}` 等分量截到 200 UTF-8 字节 (不切开多字节字符), 但不截断渲染后的路径分量; 可选组 `[...]` 内直接占位符全空则整段丢弃, 有一个非空时其余输出空串. 普通占位符缺失回退 `Unknown`. **段名按 Windows 创建结果对齐**: 每个路径段去掉段尾的 `.` 与空格, 控制字符替换为空格 — 创建与 `os.path.abspath` 对段尾字符的处理不同, 不对齐会让索引记录磁盘上不存在的名字; `.` / `..` 原样保留给逃逸检查. **逃逸防护**: 校验对渲染结果做 realpath (跟随符号链接), 相对模板的真实写出路径必须在本库内 (`ALLOW_ALL` 也不例外), 绝对模板必须位于本库或 `safe_dirs` 内, 否则 `ValueError`; 多盘分存要求目标盘在 `safe_dirs` 内. 细则见 `organize/path_templates.py`.
+
  ## Resource (一等存储, 非缓存)
- 
+
+diff --git a/src/amane/organize/path_templates.py b/src/amane/organize/path_templates.py
+index d77bd7d5ae2c5f3b692c705a25e2bd3a62c734ac..3ef81c25d25109a312ebc60230810bc55f69c1c3 100644
+--- a/src/amane/organize/path_templates.py
++++ b/src/amane/organize/path_templates.py
+@@ -96,9 +96,9 @@
+     thumb = PathEngine(library.thumb_template or THUMB_TEMPLATE_DEFAULT).resolve(ctx, base_path, safe_dirs)
+     poster = PathEngine(library.poster_template or POSTER_TEMPLATE_DEFAULT).resolve(ctx, base_path, safe_dirs)
+     fanart = PathEngine(library.fanart_template or FANART_TEMPLATE_DEFAULT).resolve(ctx, base_path, safe_dirs)
+-    extrafanart_dir = PathEngine(library.extrafanart_template or EXTRAFANART_TEMPLATE_DEFAULT).resolve(
+-        ctx, base_path, safe_dirs
+-    )
++    extrafanart_dir = PathEngine(
++        library.extrafanart_template or EXTRAFANART_TEMPLATE_DEFAULT, is_directory=True
++    ).resolve(ctx, base_path, safe_dirs)
+     nfo = PathEngine(library.nfo_template or NFO_TEMPLATE_DEFAULT).resolve(ctx, base_path, safe_dirs)
+     trailer = PathEngine(library.trailer_template or TRAILER_TEMPLATE_DEFAULT).resolve(ctx, base_path, safe_dirs)
+
 diff --git a/src/amane/organize/template.py b/src/amane/organize/template.py
-index 0d1f2f89bed82ed5344e8e64047e9e7d091a3bdf..408e5769345b4ac419186056d4773ad51de966ed 100644
+index 45dbe0a398048bde1b0066eed7dd80b1db5e557a..781409c0ca400ac24e755354f0808b0978a2d371 100644
 --- a/src/amane/organize/template.py
 +++ b/src/amane/organize/template.py
-@@ -330,7 +330,7 @@ def _build_variables(
-         "actor": _safe(actor) or _UNKNOWN,
-         "actors": ",".join(metadata.actors) if metadata.actors else _UNKNOWN,
-         "actress": _safe(actress) or _UNKNOWN,
--        "actresses": ",".join(actresses) if actresses else _UNKNOWN,
-+        "actresses": "多人作品" if len(actresses) > 3 else ",".join(actresses) if actresses else _UNKNOWN,
-         "studio": _safe(metadata.studio) or _UNKNOWN,
-         "publisher": _safe(metadata.publisher) or _UNKNOWN,
-         "series": _safe(metadata.series) or _UNKNOWN,
+@@ -85,6 +85,7 @@
+ class _Placeholder:
+     name: str
+     mapping: tuple[tuple[str, str], ...] = ()
++    value_override: str | None = None
+
+
+ @dataclass(frozen=True, slots=True)
+@@ -203,7 +204,7 @@
+
+ def _resolve(node: _Placeholder, variables: dict[str, str]) -> str:
+     """查出值后按映射改写. 空源只在写出 `{name|=缺省}` 时变成非空, 否则仍为空, 可选组省略."""
+-    raw = _lookup(node.name, variables)
++    raw = node.value_override if node.value_override is not None else _lookup(node.name, variables)
+     mapped = dict(node.mapping)
+     return mapped.get(raw, raw)
+
+@@ -316,7 +317,7 @@
+     cd: int | None = None,
+     actor_genders: Mapping[str, ActorGender] | None = None,
+     library_root: Path | None = None,
+-) -> TemplateVariables:
++) -> tuple[TemplateVariables, int]:
+     year = metadata.release[:4] if metadata.release and len(metadata.release) >= 4 else None
+     actor = metadata.actors[0] if metadata.actors else None
+     actresses = actress_names(metadata.actors, actor_genders)
+@@ -328,7 +329,7 @@
+         cd = file_info.cd
+     prefix, suffix = split_number(metadata.number) if metadata.number else ("", "")
+
+-    return {
++    variables: TemplateVariables = {
+         "number": metadata.number,
+         "prefix": prefix,
+         "suffix": suffix,
+@@ -360,6 +361,7 @@
+         "link_name": _UNKNOWN,
+         "raw_srt_name": _UNKNOWN,
+     }
++    return variables, len(actresses)
+
+
+ @dataclass
+@@ -369,6 +371,7 @@
+     variables: dict[str, str]
+     library_root: Path | None = None
+     dest: Path | None = None
++    actress_count: int = 0
+
+     @classmethod
+     def from_mapping(cls, variables: dict[str, str]) -> TemplateContext:
+@@ -386,11 +389,11 @@
+         actor_genders: Mapping[str, ActorGender] | None = None,
+         library_root: Path | None = None,
+     ) -> TemplateContext:
+-        built = _build_variables(metadata, ext, source_path, file_info, cd, actor_genders, library_root)
++        built, actress_count = _build_variables(metadata, ext, source_path, file_info, cd, actor_genders, library_root)
+         variables = cast(dict[str, str], {**built})
+         # {dir} 是 {raw_dir} 的别名, 不下发 schema.
+         variables["dir"] = built["raw_dir"]
+-        return cls(variables=variables, library_root=library_root)
++        return cls(variables=variables, library_root=library_root, actress_count=actress_count)
+
+     def apply_video(self, dest: Path, library_root: Path) -> None:
+         self.dest = dest
+@@ -473,12 +476,56 @@
+         return self.clean(self.fill(ctx), ctx)
+
+
++def _actress_directory_tree(nodes: Sequence[_Node], *, is_directory: bool) -> tuple[_Node, ...]:
++    """按模板目录段替换演员占位符；可选组中的其他占位符即使为空也阻止替换。"""
++    segments: list[list[_Placeholder]] = [[]]
++
++    def collect(items: Sequence[_Node]) -> None:
++        for node in items:
++            if isinstance(node, _Literal):
++                if "/" in node.text or "\\" in node.text:
++                    segments.append([])
++            elif isinstance(node, _Placeholder):
++                segments[-1].append(node)
++            else:
++                collect(node.children)
++
++    collect(nodes)
++    # 同名占位符可以出现在不同目录，替换仅针对当前出现位置。
++    selected = {
++        id(node)
++        for segment in (segments if is_directory else segments[:-1])
++        if all(slot.name == "actresses" for slot in segment)
++        for node in segment
++    }
++
++    def replace_nodes(items: Sequence[_Node]) -> tuple[_Node, ...]:
++        result: list[_Node] = []
++        for node in items:
++            if isinstance(node, _Placeholder) and id(node) in selected:
++                result.append(_Placeholder(node.name, node.mapping, value_override="多人作品"))
++            elif isinstance(node, _Group):
++                result.append(_Group(replace_nodes(node.children), node.wrap))
++            else:
++                result.append(node)
++        return tuple(result)
++
++    return replace_nodes(nodes)
++
++
+ class PathEngine(TemplateEngine):
+     """路径输出: 填值时截断 title / actor / actors / actress / actresses, 按 Windows 创建结果规范化每个路径段, 再按库根目录 / safe_dirs 写成字面绝对路径."""
+
++    def __init__(self, source: str, *, is_directory: bool = False) -> None:
++        super().__init__(source)
++        self.is_directory = is_directory
++
+     def fill(self, ctx: TemplateContext) -> str:
+         variables = {name: _clip_field(value) if name in _CLIP_KEYS else value for name, value in ctx.variables.items()}
+-        return _render_nodes(self.tree, variables)
++        tree = (
++            _actress_directory_tree(self.tree, is_directory=self.is_directory) if ctx.actress_count > 3 else self.tree
++        )
++        return _render_nodes(tree, variables)
+
+     def clean(self, filled: str, ctx: TemplateContext) -> str:
+         return _normalize_path_segments(filled, keep_absolute=_template_keeps_absolute(self.source, ctx.variables))
 diff --git a/tests/organize/test_path_templates.py b/tests/organize/test_path_templates.py
-index 7f4db10e699ae624ba3a54fbbed50e71dc1639dc..0b32aa7fd7b5caed169f9cb11f45554dfe14683f 100644
+index 034007311ac5b93fd5e460fb2e65b01c793a4061..455f54b3e91060d3d2113e741835cc0e4b0b8e3a 100644
 --- a/tests/organize/test_path_templates.py
 +++ b/tests/organize/test_path_templates.py
-@@ -1184,8 +1184,11 @@ def test_actress_names(case: _ActressCase) -> None:
+@@ -24,7 +24,9 @@
+ from amane.organize.template import (
+     PATH_FIELD_ELLIPSIS,
+     PATH_FIELD_MAX_BYTES,
++    PLACEHOLDERS,
+     PathEngine,
++    StrmEngine,
+     TemplateContext,
+     actress_names,
+ )
+@@ -1255,8 +1257,11 @@
          (["M"], {"M": ActorGender.MALE}, "Unknown", "Unknown"),
          ([], None, "Unknown", "Unknown"),
          (["A", "B"], None, "A", "A,B"),
 +        (["A", "B", "C"], None, "A", "A,B,C"),
-+        (["A", "B", "C", "D"], None, "A", "多人作品"),
++        (["A", "B", "C", "D"], None, "A", "A,B,C,D"),
 +        (["A", "B", "C", "D"], {"D": ActorGender.MALE}, "A", "A,B,C"),
      ],
 -    ids=["drop-male", "all-male", "empty", "unknown-kept"],
-+    ids=["drop-male", "all-male", "empty", "unknown-kept", "three", "four", "filter-before-count"],
++    ids=["drop-male", "all-male", "empty", "unknown-kept", "三人", "四人完整名单", "先筛选再统计"],
  )
  def test_from_metadata_actress_placeholders(
      actors: list[str],
+@@ -1294,3 +1299,127 @@
+         actor_genders={"F": ActorGender.FEMALE, "M": ActorGender.MALE},
+     )
+     assert result.video == media / "F" / "ABC-123.mp4"
++
++
++@pytest.mark.parametrize(
++    ("actors", "genders", "directory"),
++    [
++        pytest.param([], None, "Unknown", id="零人"),
++        pytest.param(["甲"], None, "甲", id="一人"),
++        pytest.param(["甲", "乙"], None, "甲,乙", id="两人"),
++        pytest.param(["甲", "乙", "丙"], None, "甲,乙,丙", id="三人"),
++        pytest.param(["甲", "乙", "丙", "丁"], None, "多人作品", id="四人"),
++        pytest.param(["甲", "乙", "丙", "丁"], {"丁": ActorGender.MALE}, "甲,乙,丙", id="排除男性后恰好三人"),
++        pytest.param(["甲", "乙", "丙", "丁", "男"], {"男": ActorGender.MALE}, "多人作品", id="排除男性后仍有四人"),
++        pytest.param(["男"], {"男": ActorGender.MALE}, "Unknown", id="全部为男性"),
++        pytest.param(["甲,别名", "乙", "丙"], None, "甲,别名,乙,丙", id="姓名中的逗号不增加人数"),
++        pytest.param([_JP_90, "乙", "丙", "丁"], None, "多人作品", id="字段截断前统计人数"),
++    ],
++)
++def test_actress_directory_counts(
++    media: Path, actors: list[str], genders: dict[str, ActorGender] | None, directory: str
++) -> None:
++    original = tuple(actors)
++    metadata = _meta(actors=actors)
++    library = Library(name="t", path=str(media), video_template="{actresses}/{number}.{ext}")
++
++    result = resolve_paths(library, metadata, ext="mp4", actor_genders=genders)
++
++    assert result.video == media / directory / "ABC-123.mp4"
++    assert tuple(metadata.actors) == original
++
++
++@pytest.mark.parametrize(
++    ("template", "expected"),
++    [
++        pytest.param("{actresses}/video.mp4", "多人作品/video.mp4", id="独立目录"),
++        pytest.param("[{actresses}]/video.mp4", "多人作品/video.mp4", id="单层可选组"),
++        pytest.param("[[{actresses}]]/video.mp4", "[多人作品]/video.mp4", id="保留方括号"),
++        pytest.param("演员-{actresses}/video.mp4", "演员-多人作品/video.mp4", id="保留固定文字"),
++        pytest.param(" { actresses } /video.mp4", " 多人作品/video.mp4", id="保留有效空格"),
++        pytest.param("[[{actresses}]]-{actresses}/video.mp4", "[多人作品]-多人作品/video.mp4", id="重复演员占位符"),
++        pytest.param(
++            "{actresses}/{actresses}-{title}/{actresses}.mp4",
++            "多人作品/A,B,C,D-Test Title/A,B,C,D.mp4",
++            id="各层及文件名独立判断",
++        ),
++        pytest.param("{actresses}[-{sub?}]/video.mp4", "A,B,C,D/video.mp4", id="空的可选占位符仍阻止替换"),
++        pytest.param("{actresses}[{studio|StudioX=}]/video.mp4", "A,B,C,D/video.mp4", id="映射为空仍阻止替换"),
++        pytest.param("{actresses}[{sub?|C=/}]/video.mp4", "A,B,C,D/video.mp4", id="映射中的斜线不划分模板层级"),
++        pytest.param("[{actresses}/{title}]/video.mp4", "多人作品/Test Title/video.mp4", id="可选组跨越目录"),
++        pytest.param("{actresses}-[{title}]/video.mp4", "A,B,C,D-Test Title/video.mp4", id="混合可选组"),
++        pytest.param("{actresses}-{missing}/video.mp4", "A,B,C,D-Unknown/video.mp4", id="未知占位符仍阻止替换"),
++        pytest.param("{actresses|多人作品=合集}/video.mp4", "合集/video.mp4", id="保留多人名称映射"),
++        pytest.param("{actresses}", "A,B,C,D", id="无扩展名的文件名"),
++        pytest.param("{actresses}.mp4", "A,B,C,D.mp4", id="固定扩展名的文件名"),
++        pytest.param("{actresses}/", "多人作品", id="带末尾分隔符的目录"),
++        pytest.param(r"{actresses}\{number}\{actresses}.mp4", "多人作品/ABC-123/A,B,C,D.mp4", id="反斜线目录"),
++        pytest.param(r"{number}/{actresses}\video.mp4", "ABC-123/多人作品/video.mp4", id="混合目录分隔符"),
++        pytest.param(r"D:\分类\{actresses}\video.mp4", "D:/分类/多人作品/video.mp4", id="盘符绝对路径"),
++        pytest.param(r"\\server\share\{actresses}\video.mp4", "//server/share/多人作品/video.mp4", id="网络共享路径"),
++        pytest.param(
++            "{actresses}/[[{number}[-CD{cd?}][-{mosaic?|cracked=U,censored=}{sub?}]]] "
++            "{title}/{number}[-CD{cd?}][-{mosaic?|cracked=U,censored=}{sub?}].{ext}",
++            "多人作品/[ABC-123] Test Title/ABC-123.mp4",
++            id="用户独立目录模板",
++        ),
++        pytest.param(
++            "[[{number}[-{mosaic?|cracked=U,censored=}{sub?}]]] [[{actresses}]] {title}/",
++            "[ABC-123] [A,B,C,D] Test Title",
++            id="用户混合目录模板",
++        ),
++    ],
++)
++def test_actress_directory_templates(template: str, expected: str) -> None:
++    metadata = _meta(actors=["A", "B", "C", "D"], content_type=ContentType.CENSORED)
++    context = TemplateContext.from_metadata(metadata, ext="mp4")
++
++    assert PathEngine(template).render(context) == expected
++    assert context.variables["actresses"] == "A,B,C,D"
++
++
++@pytest.mark.parametrize("name", [name for name in PLACEHOLDERS if name != "actresses"] + ["dir", "missing"])
++@pytest.mark.parametrize("template", ["{actresses}[-{other}]/video.mp4", "[[{other}]]{actresses}/video.mp4"])
++def test_actress_directory_other_placeholders(name: str, template: str) -> None:
++    """依据模板占位符判断，其他字段即使为空并被可选组省略也阻止替换。"""
++    context = TemplateContext.from_metadata(_meta(actors=["A", "B", "C", "D"]))
++    context.variables[name] = ""
++    source = template.replace("{other}", "{" + name + "}")
++
++    assert PathEngine(source).render(context) == "A,B,C,D/video.mp4"
++
++
++def test_actress_directory_long_names() -> None:
++    """超过三人时，混合目录和文件名仍遵循原有的 UTF-8 字段长度限制。"""
++    context = TemplateContext.from_metadata(_meta(actors=[_JP_90, "乙", "丙", "丁"]))
++
++    result = PathEngine("{actresses}/{number}-{actresses}/{actresses}.mp4").render(context)
++
++    assert result == f"多人作品/ABC-123-{_CLIPPED_JP}/{_CLIPPED_JP}.mp4"
++
++
++def test_actress_directory_shared_context(media: Path, other: Path) -> None:
++    """视频、链接及附属产物共用完整名单，目录替换不影响文件名与正文。"""
++    metadata = _meta(actors=["A", "B", "C", "D"])
++    library = Library(
++        name="t",
++        path=str(media),
++        video_template="{actresses}/{number}-{actresses}.{ext}",
++        nfo_template="{video_dir}/[[{actresses}]]-{number}.nfo",
++        extrafanart_template="{actresses}",
++        link_template=str(other / "{actresses}" / "{number}-{actresses}.{ext}"),
++    )
++
++    result = resolve_paths(library, metadata, ext="mp4", safe_dirs=[other])
++
++    assert result.video == media / "多人作品" / "ABC-123-A,B,C,D.mp4"
++    assert result.link == other / "多人作品" / "ABC-123-A,B,C,D.strm"
++    assert result.nfo == media / "多人作品" / "[A,B,C,D]-ABC-123.nfo"
++    assert result.extrafanart_dir == media / "多人作品"
++    context = TemplateContext.from_metadata(metadata)
++    assert PathEngine("{actresses}/video.mp4").render(context) == "多人作品/video.mp4"
++    assert PathEngine("{actresses}.mp4").render(context) == "A,B,C,D.mp4"
++    assert (
++        StrmEngine("https://example.com/{actresses}/{number}").render(context)
++        == "https://example.com/A,B,C,D/ABC-123\n"
++    )
