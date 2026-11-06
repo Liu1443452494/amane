@@ -1,0 +1,58 @@
+diff --git a/docs/dev/database.md b/docs/dev/database.md
+index a906e41..a1d4d79 100644
+--- a/docs/dev/database.md
++++ b/docs/dev/database.md
+@@ -42,7 +42,7 @@ pysqlite 只在 DML 之前发出 `BEGIN`, 纯 SELECT 落在事务之外 (SQLAlch
+ 2. **落后 head**: 先用 sqlite3 **online backup API** 写 `{db}.pre-migrate-{oldrev}-{utc}.bak` (含 WAL 一致快照; 同目录保留最近 5 份), 再升级.
+ 3. **迁移连接**单独 `autocommit=False` + Alembic `transactional_ddl=True`: 单次 revision 内 DDL 与 `alembic_version` 同事务, 失败则回滚, 避免「表已创建但版本未升」的半成品. 业务连接不修改事务模式, 仍只开 WAL + FK.
+ 
+-自用水印与上游迁移通过 `src/amane/db/migrations/versions/610da6db7500_合并水印与上游数据库升级.py::down_revision` 合并为单一终点; 已发布迁移的标识与父版本保持稳定, 保证既有数据库补齐尚未执行的分支.
++自用水印与上游迁移通过 `src/amane/db/migrations/versions/0bbd0974b7c7_合并上游清理任务与自用水印迁移.py::down_revision` 合并为单一终点; 已发布迁移的标识与父版本保持稳定, 保证既有数据库补齐尚未执行的分支.
+ 
+ 迁移内不允许文件系统 I/O 与其它无界等待: 整条链共用一个事务, 中止即整体回滚、重试仍从零开始, 而网盘挂载点上逐目录列举会把启动阻塞数分钟以上且没有可见进度. 需要遍历磁盘的回填由运行期承担 (如 `REFRESH` 库扫描). 迁移内也不允许中途 `commit()`: DDL 会随之提前落盘, 而 `alembic_version` 在 revision 返回后才推进, 失败后重跑报 `duplicate column name`.
+ 
+diff --git "a/src/amane/db/migrations/versions/0bbd0974b7c7_\345\220\210\345\271\266\344\270\212\346\270\270\346\270\205\347\220\206\344\273\273\345\212\241\344\270\216\350\207\252\347\224\250\346\260\264\345\215\260\350\277\201\347\247\273.py" "b/src/amane/db/migrations/versions/0bbd0974b7c7_\345\220\210\345\271\266\344\270\212\346\270\270\346\270\205\347\220\206\344\273\273\345\212\241\344\270\216\350\207\252\347\224\250\346\260\264\345\215\260\350\277\201\347\247\273.py"
+new file mode 100644
+index 0000000..1de5f4a
+--- /dev/null
++++ "b/src/amane/db/migrations/versions/0bbd0974b7c7_\345\220\210\345\271\266\344\270\212\346\270\270\346\270\205\347\220\206\344\273\273\345\212\241\344\270\216\350\207\252\347\224\250\346\260\264\345\215\260\350\277\201\347\247\273.py"
+@@ -0,0 +1,23 @@
++"""合并上游清理任务与自用水印迁移。
++
++迁移版本：0bbd0974b7c7
++父版本：56fe451426ef、610da6db7500
++创建时间：2026-11-06 17:46:09.492001
++
++仅合并版本关系，实际结构与数据变更由父分支执行。
++"""
++
++from collections.abc import Sequence
++
++revision: str = "0bbd0974b7c7"
++down_revision: str | Sequence[str] | None = ("56fe451426ef", "610da6db7500")
++branch_labels: str | Sequence[str] | None = None
++depends_on: str | Sequence[str] | None = None
++
++
++def upgrade() -> None:
++    pass
++
++
++def downgrade() -> None:
++    pass
+diff --git a/tests/db/test_liu1443452494_watermark_migration.py b/tests/db/test_liu1443452494_watermark_migration.py
+index bc77436..b2eab74 100644
+--- a/tests/db/test_liu1443452494_watermark_migration.py
++++ b/tests/db/test_liu1443452494_watermark_migration.py
+@@ -50,8 +50,10 @@ def test_watermark_migration_preserves_existing_media(tmp_path: Path) -> None:
+         ("9054ebacea29", Mosaic.UNCENSORED, False),
+         ("6940e4cf8a80", Mosaic.CRACKED, False),
+         ("2016f33e04dd", Mosaic.UNCENSORED, True),
++        ("56fe451426ef", Mosaic.CRACKED, False),
++        ("610da6db7500", Mosaic.CRACKED, True),
+     ],
+-    ids=["旧上游", "新上游", "旧自用"],
++    ids=["旧上游", "路径升级上游", "旧自用", "清理任务上游", "水印合并版"],
+ )
+ def test_watermark_migration_merges_upgrade_paths(
+     tmp_path: Path, starting_revision: str, initial_mosaic: Mosaic, has_watermarks: bool

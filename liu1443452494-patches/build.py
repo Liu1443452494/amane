@@ -69,6 +69,7 @@ def prepare(root: Path, directory: Path, version: str) -> None:
         "0012-watermark-editor.patch",
         "0013-poster-preview.patch",
         "0014-media-reorganize.patch",
+        "0015-migration-merge.patch",
     )
     actual = {path.name for path in directory.glob("*.patch")}
     if actual != set(patches):
@@ -119,6 +120,7 @@ def run_tests(root: Path) -> None:
     cases = (
         "tests/db/test_liu1443452494_watermarks.py",
         "tests/db/test_liu1443452494_watermark_migration.py",
+        "tests/db/test_drop_retired_trash_tasks_migration.py",
         "tests/api/test_liu1443452494_watermarks.py",
         "tests/api/test_media.py",
         "tests/handlers/test_liu1443452494_watermarks.py",
