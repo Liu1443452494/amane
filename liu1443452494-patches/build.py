@@ -72,6 +72,7 @@ def prepare(root: Path, directory: Path, version: str) -> None:
         "0015-migration-merge.patch",
         "0016-western-full-cover-poster.patch",
         "0017-organize-number.patch",
+        "0018-emby-actors.patch",
     )
     actual = {path.name for path in directory.glob("*.patch")}
     if actual != set(patches):
@@ -120,6 +121,16 @@ def check_release(version: str) -> None:
 
 def run_tests(root: Path) -> None:
     cases = (
+        "tests/api/test_liu1443452494_emby_actors.py",
+        "tests/media_server/test_liu1443452494_emby_client.py",
+        "tests/handlers/test_liu1443452494_emby_actors.py",
+        "tests/crawlers/test_liu1443452494_emby_factory.py",
+        "tests/media_server/test_client.py",
+        "tests/handlers/test_actor_push.py",
+        "tests/handlers/test_protocol.py",
+        "tests/crawlers/test_factory.py",
+        "tests/observability/test_recorder.py",
+        "tests/api/test_worker_swap.py",
         "tests/db/test_liu1443452494_watermarks.py",
         "tests/db/test_liu1443452494_watermark_migration.py",
         "tests/db/test_liu1443452494_organize_number_migration.py",
@@ -186,11 +197,11 @@ def run_tests(root: Path) -> None:
     if result.returncode:
         raise BuildError("补丁相关逻辑测试失败，已停止构建")
     frontend = subprocess.run(
-        ["node", "--experimental-strip-types", "--test", "web/tests/watermark-edit.test.mjs"],
+        ["node", "--experimental-strip-types", "--test", "web/tests/watermark-edit.test.mjs", "web/tests/emby-actors.test.mjs"],
         cwd=root,
     )
     if frontend.returncode:
-        raise BuildError("水印编辑的前端逻辑测试失败，已停止构建")
+        raise BuildError("补丁前端逻辑测试失败，已停止构建")
     append_summary("\n补丁相关逻辑测试通过。")
 
 

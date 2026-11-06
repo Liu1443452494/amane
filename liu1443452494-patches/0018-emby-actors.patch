@@ -1,0 +1,2257 @@
+diff --git a/docs/dev/config.md b/docs/dev/config.md
+index ce7cbc30..d485c569 100644
+--- a/docs/dev/config.md
++++ b/docs/dev/config.md
+@@ -95,13 +95,15 @@ Worker 替换不取消运行中任务: `_rebuild()` 构建新 worker 后旧 work
+ 演员刮削与影片 `scraping` 分 section: 影片管线不读演员站列表, 演员任务也不读 `field_priority` / `field_blacklist`. 契约 (实现见 `ActorScrapeHandler` / `aggregate.actor`):
+ 
+ - **`profile_sites`** / **`image_sites`**: 资料来源与头像来源的顺序 (单源字段填空优先级, 头像优先于资料来源附图). 默认与 schema 枚举都是注册表里声明了对应能力的插入序, 不在配置层手写站点名单.
+-- **`download_images`**: 是否经 ResourceStore 缓存头像 (URL 仍为远端 locator).
++- **`download_images`**: ACTOR_SCRAPE 是否经 ResourceStore 缓存头像 (URL 仍为远端 locator).
+ - **`auto_scrape`**: 影片刮削成功后自动链式入队该片演员的 `ACTOR_SCRAPE` 任务; 见 [task-system.md](task-system.md).
+ - **`auto_push`**: 演员刮削成功后链式入队该演员的 `ACTOR_PUSH`; `media_server` 未配置时静默跳过, 推送失败不回溯父任务.
+-- **`gfriends_repo`**: gFriends 仓库 URL, Filetree 缓存在 `data_dir`.
++- **`gfriends_repo`**: gFriends 仓库 URL; ACTOR_SCRAPE 的 Filetree 缓存在 `data_dir`.
+ 
+ 跨角色站点写入会被 section validator 拒绝. 发请求前仍按 `Actor.gender` 与站点性别覆盖再过滤 (见 [crawlers.md](crawlers.md)).
+ 
++独立 Emby 任务共用本节的来源与 gFriends 仓库配置，不读取下载、自动刮削或自动推送开关。`src/amane/api/routes/liu1443452494_emby_actors.py::scrape_emby_actors` 与 handler 均核对选库时的服务器摘要，配置变化后拒绝旧选择；执行中的任务持有原连接快照，不随热重载切换目标。
++
+ ## `semantic` (Hot)
+ 
+ 只有 `auto_maintain`: 打开且视觉塔就绪时, 图片变化的条目立即增量重算且视觉塔常驻; 否则只删变动图片的旧向量, 等下次索引重建.
+diff --git a/docs/dev/frontend.md b/docs/dev/frontend.md
+index ebcf808a..7e5828ec 100644
+--- a/docs/dev/frontend.md
++++ b/docs/dev/frontend.md
+@@ -73,6 +73,8 @@ Settings、任务提交、定时创建、metadata 编辑共用 `components/schem
+ 
+ 媒体库共同目录仅存在于表单: `web/src/components/library/metadata-directory.ts::collapseMetadataDirectory` 按接口默认模板合并显示, `expandMetadataDirectory` 在提交前还原完整单项; 数据库与 API 不保存共同目录. 编辑入口先取得默认模板, 缺失时不能清空单项或忽略前缀提交.
+ 
++媒体服务器附加操作见 `web/src/components/media/liu1443452494-emby-actors-panel.tsx::EmbyActorsPanel`。`SchemaForm` 向操作区传递实际未保存状态；保存完成前禁用选库与提交，连接变化时重置选择，查询缓存键不得包含凭据。任务绑定校验见 [config.md](config.md)。
++
+ ## 对话通道
+ 
+ `/` 的实现边界见 [agent.md](agent.md). 前端四点: 对话经 AG-UI (`@ag-ui/client` + `@assistant-ui/react-ag-ui`), 不经 hey-api 也不经 `/ws`, 且 `@ag-ui/client` 必须停留在 0.0.x —— react-ag-ui 的 peer 依赖为 `^0.0.59`, 1.x 调整了 `Message` 内容部件的类型, 与之不兼容; 请求统一经由 `lib/api-token.ts` 的 `apiFetch` (纯透传, 只把 401 转成登录门); 读 assistant-ui 线程状态的 hook (`useAuiState` / `useAgUi*`) 须在 `AssistantRuntimeProvider` 之内 — 持有 provider 的那个组件读不到, 要另起子组件; 展示只认回放行 — `lib/agent/trace.ts::foldTrace` 的产物直接渲染, 本页发起的回合也跟随 `.../agui/events` (从 `after_seq` 接上, 回合未收尾时重开), 运行时的消息虽同步同一份 fold 但不参与渲染, 因此直播与刷新同形, 决不允许另建一份消息状态.
+diff --git a/docs/dev/observability.md b/docs/dev/observability.md
+index d3528370..0fd4d65f 100644
+--- a/docs/dev/observability.md
++++ b/docs/dev/observability.md
+@@ -9,6 +9,8 @@
+ 
+ scrape 等 handler 只调用 `current()`; 其它代码仍可直接使用 `logger`, Worker `begin` 后同样写入同一 `task.log`. WebClient 经由 ContextVar 透明接入 HTTP. Worker 只负责 `Recorder.begin` / `finalize`.
+ 
++独立 Emby 演员任务仅持久化任务参数、进度、统计及必要错误。`src/amane/handlers/liu1443452494_emby_actors.py::EmbyActorScrapeHandler.handle` 对全部来源请求启用 `skip_body_recording`；`src/amane/observability/redact.py::hot_slice_for_task` 排除其配置快照。禁止保存演员完整资料、头像或响应正文，调试捕获同样受此约束。
++
+ ## 三流日志 (进程级)
+ 
+ `observability/logging.py` 把 structlog 同时输出到三处, 另有一条 EventBus `log` event 流转到前端 Logs 页:
+diff --git a/docs/dev/task-system.md b/docs/dev/task-system.md
+index b8f34da0..e5b02666 100644
+--- a/docs/dev/task-system.md
++++ b/docs/dev/task-system.md
+@@ -17,6 +17,7 @@
+ | `SEMANTIC_INDEX` | 遍历 Metadata 编码封面与剧照, 对账写 `{data_dir}/embeddings.db`; 首次运行会下载模型 | 不动文件、不写 Metadata |
+ | `SEMANTIC_BENCHMARK` | 抽样本地封面与剧照测嵌入吞吐与文本查询延迟, 不写索引 | 不动文件、不写 Metadata / 向量 |
+ | `ACTOR_PUSH` | 读取演员与已落盘头像, 匹配媒体服务器的同名人物并写回字段 / 主图 | 创建人物、修改影片、补下载头像 |
++| `EMBY_ACTOR_SCRAPE` | 读取 Emby 所选库演员、刮削后按原人物 ID 写回 | 写入 Amane 演员、别名、资源或影片 |
+ 
+ `CLEANUP` / `UPSCALE` 扫描 DB / Resource; `ACTOR_SCRAPE` 刮人物; `ACTOR_PUSH` 写媒体服务器; `R18_IMPORT` 导入 dump. 上述类型均不执行影片落盘.
+ 
+@@ -90,7 +91,7 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
+ 
+ 库路径 (含 FUSE / NAS) 与用户浏览路径上的磁盘调用不允许在事件循环上执行: 整段同步 I/O 用 `@in_thread`, 调用方 `await fn(...)`; 已在工作线程内 (例如 `place_subtitles` 里再 `execute_organize`) 用 `.sync`, 不允许再次进入线程池. Watchdog 的 `stat` 在 observer 线程, 不经过事件循环.
+ 
+-`_common.py` 只放置无 `execute_file_operations` 依赖的轻量单元 (纯函数, 依赖全参数注入); `apply_file_operations` 因封装 `execute_file_operations` 而与之相邻置于 `file.py`, 避免循环导入. 前置条件不满足时返回 `None` 表示跳过. 图片下载统一经 `ResourceStore` (强制注入).
++`_common.py` 只放置无 `execute_file_operations` 依赖的轻量单元 (纯函数, 依赖全参数注入); `apply_file_operations` 与 `execute_file_operations` 相邻置于 `file.py`, 避免循环导入. 前置条件不满足时返回 `None` 表示跳过. 本地资源下载经 `ResourceStore`; 独立 Emby 任务的内存图片例外见下文.
+ 
+ ## 落盘执行
+ 
+@@ -175,7 +176,7 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
+ 
+ ## 即时提交与定时提交
+ 
+-**即时** (`POST /tasks`): 接收 `TaskSubmission` (含全部即时 type), 经 `resolve_submission` 得到 `(TaskType, Payload)` 后建 Task. REFRESH / ORGANIZE / SCAN_INVALID 只接受 `library_id`, resolve 时由 library 派生 `path` (submission 可显式覆盖) 与 `recursive` / `patterns`; ORGANIZE 还可带 `media_file_ids`, 与显式 `path` 互斥且不含扫描字段. SCRAPE 采用 number / media_id, 二者可同时提交; **`content_type` 可空**, 为空时仅 media_id 按文件路径解析, 有 number 时按番号推断. 覆盖只作用于这一次 `POST /tasks`. ACTOR_SCRAPE 采用 `actor_id`.
++**即时** (`POST /tasks`): 接收通用 `TaskSubmission`, 经 `resolve_submission` 得到 `(TaskType, Payload)` 后建 Task. REFRESH / ORGANIZE / SCAN_INVALID 只接受 `library_id`, resolve 时由 library 派生 `path` (submission 可显式覆盖) 与 `recursive` / `patterns`; ORGANIZE 还可带 `media_file_ids`, 与显式 `path` 互斥且不含扫描字段. SCRAPE 采用 number / media_id, 二者可同时提交; **`content_type` 可空**, 为空时仅 media_id 按文件路径解析, 有 number 时按番号推断. 覆盖只作用于这一次 `POST /tasks`. ACTOR_SCRAPE 采用 `actor_id`.
+ 
+ **定时** (`Schedule`): 仅接受 `RoutineSubmission` (`cleanup` / `upscale` / `r18_import` / `rescrape` / `semantic_index`). 触发时由 `CronScheduler` 用对应 Payload 的 `model_validate` 入队; 编辑只修改 name / cron / enabled, 修改任务类型或 payload 须删除后重建 (见 [api.md](api.md)).
+ 
+@@ -185,6 +186,12 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
+ 
+ **链式自动触发**: `actor_scraping.auto_scrape` 开启 (默认) 时, 影片 SCRAPE 成功后在 `ScrapeHandler` 末尾按清洗解析后的 `meta.actors` 查询 Actor 实体, **`Actor.raw` 非空 (已刮过) 则跳过**, 其余以 **`priority=-1`** 入队 (不抢占影片任务优先级); 同 `actor_id` 已有 queued / running 时复用入队互斥. 链式块内异常只记录 warning, 不阻断刮削主流程.
+ 
++## EMBY_ACTOR_SCRAPE
++
++`src/amane/handlers/liu1443452494_emby_actors.py::EmbyActorScrapeHandler` 仅经媒体服务器专用 API 入队。`src/amane/liu1443452494_emby_client.py::EmbyActorClient.library_actors` 完整读取所选库影片后才允许写回，禁止按姓名扩大为全服人物匹配。原名未命中时使用 XML 唯一日文映射；共用既有来源资格与聚合规则，配置边界见 [config.md](config.md)。
++
++来源实例由 `src/amane/crawlers/factory.py::CrawlerFactory.for_transient_actors` 按任务创建，头像及 gFriends 索引仅存在于内存。写回前重新读取人物，补充模式逐字段保护当前值；覆盖模式仅提交成功取得的内容。持久化限制见 [observability.md](observability.md)。
++
+ ## CLEANUP 悬空引用回收
+ 
+ Metadata 是一等公民, CLEANUP **从不**因「无关联 MediaFile」删除 Metadata. 两个独立开关: `remove_missing_files` 删路径在磁盘上不存在的 MediaFile 索引行; `remove_unreferenced_resources` 删不被任何 Metadata / Actor 媒体 URL 字段引用的 Resource. 存活引用从 `poster_urls` / `thumb_urls` / `trailer_urls` / `extrafanart_urls` 与 `Actor.image_urls` 收集, 匹配规则见 [data-model.md](data-model.md) Resource 一节.
+diff --git a/docs/user/media-server.md b/docs/user/media-server.md
+index 6993c11f..60974af9 100644
+--- a/docs/user/media-server.md
++++ b/docs/user/media-server.md
+@@ -41,6 +41,21 @@ Amane 与 Emby / Jellyfin 分工互补: 媒体服务器管理视频文件, 负
+ 
+ 「设置 → 演员刮削 → 自动推送」默认关闭. 开启之后, 演员刮削成功会再提交一个只包含该演员的推送任务, 优先级较低, 不抢占手动提交的任务; 媒体服务器尚未配置时不会提交. 推送失败不影响演员刮削的结果.
+ 
++## 刮削 Emby 媒体库演员 {#emby-actors}
++
++Emby 扫描并导入影片之后，可以直接读取所选媒体库的演员，刮削资料和头像后更新 Emby。入口位于「设置 → 媒体服务器」的连接配置下方，仅选择 Emby 类型时显示。
++
++1. 填写并保存 Emby 地址和管理员 API Key。
++2. 在「Emby 媒体库」下拉框中选择一个或多个媒体库；列表变化时点击「刷新媒体库」。
++3. 按需开启「覆盖已有资料」，点击「刮削媒体库演员」。
++4. 点击「查看任务」进入任务列表，检查进度、统计及失败明细。
++
++「覆盖已有资料」默认关闭，逐项补充缺失的头像、简介、生日和出生地。已有头像仍可补充资料。开启后只覆盖成功取得的内容，未取得的字段保留 Emby 原值。共用演员的其他媒体库也会显示更新后的资料。
++
++任务使用「设置 → 演员刮削」中的资料来源、头像来源与 gFriends 仓库设置，独立于自动刮削、自动推送及本地头像下载开关。按 Emby 原名查询，未命中时使用数据目录中 `mapping_actor.xml` 唯一匹配的 `jp` 名称再次查询，保留 Emby 显示名称。人物按 Emby ID 去重；仅更新已存在的人物。
++
++演员资料与头像不写入 Amane 数据库或资源目录，仅保留任务记录。单个人物失败后继续处理其他人物；媒体库读取不完整时停止任务。修改连接配置后需要保存并重新选择媒体库。
++
+ ## 写出的文件
+ 
+ 使用默认模板整理一部带外挂字幕的影片后, 目录结构如下:
+diff --git a/src/amane/api/models/tasks.py b/src/amane/api/models/tasks.py
+index c5c2d4b4..46f480c6 100644
+--- a/src/amane/api/models/tasks.py
++++ b/src/amane/api/models/tasks.py
+@@ -16,6 +16,7 @@ from ...handlers import (
+     CleanupResult,
+     DeletePayload,
+     DeleteResult,
++    EmbyActorScrapeResult,
+     OrganizePayload,
+     OrganizeResult,
+     R18ImportPayload,
+@@ -56,6 +57,7 @@ TaskResultPayload = Annotated[
+     | R18ImportResult
+     | ActorScrapeResult
+     | ActorPushResult
++    | EmbyActorScrapeResult
+     | RescrapeResult
+     | SemanticIndexResult
+     | SemanticBenchmarkResult,
+diff --git a/src/amane/api/routes/__init__.py b/src/amane/api/routes/__init__.py
+index c958c20e..78ffe1d5 100644
+--- a/src/amane/api/routes/__init__.py
++++ b/src/amane/api/routes/__init__.py
+@@ -12,6 +12,7 @@ from .feeds import router as feeds_router
+ from .files import router as files_router
+ from .health import router as health_router
+ from .libraries import router as libraries_router
++from .liu1443452494_emby_actors import router as emby_actors_router
+ from .liu1443452494_processing_log import router as processing_log_router
+ from .media import router as media_router
+ from .metadata import router as metadata_router
+@@ -34,6 +35,7 @@ router = APIRouter(prefix=API_PREFIX)
+ router.include_router(health_router)
+ router.include_router(bootstrap_router)
+ router.include_router(config_router)
++router.include_router(emby_actors_router)
+ router.include_router(cleanup_router)
+ router.include_router(files_router)
+ router.include_router(media_router)
+diff --git a/src/amane/api/routes/liu1443452494_emby_actors.py b/src/amane/api/routes/liu1443452494_emby_actors.py
+new file mode 100644
+index 00000000..0a25ce96
+--- /dev/null
++++ b/src/amane/api/routes/liu1443452494_emby_actors.py
+@@ -0,0 +1,49 @@
++"""媒体服务器设置页的 Emby 媒体库选择与独立演员任务。"""
++
++from fastapi import APIRouter, HTTPException
++from pydantic import BaseModel
++
++from ...db.models import TaskType
++from ...handlers.models import EmbyActorScrapePayload
++from ...liu1443452494_emby_client import (
++    EmbyActorClient,
++    EmbyLibrariesResponse,
++    emby_server_key,
++    require_emby,
++)
++from ...media_server import MediaServerError
++from ..deps import ConfigDep, RepoDep
++
++router = APIRouter(prefix="/media-server/emby", tags=["media_server"])
++
++
++class EmbyActorTaskResponse(BaseModel):
++    task_id: int
++
++
++@router.get("/libraries")
++async def get_emby_libraries(config: ConfigDep) -> EmbyLibrariesResponse:
++    server = config.hot.media_server.model_copy(deep=True)
++    try:
++        require_emby(server)
++    except ValueError as exc:
++        raise HTTPException(422, detail=str(exc)) from exc
++    try:
++        async with EmbyActorClient(server) as client:
++            libraries = await client.list_libraries()
++    except MediaServerError as exc:
++        raise HTTPException(502, detail=str(exc)) from exc
++    return EmbyLibrariesResponse(server_key=emby_server_key(server), libraries=libraries)
++
++
++@router.post("/actors/scrape", status_code=202)
++async def scrape_emby_actors(req: EmbyActorScrapePayload, config: ConfigDep, repo: RepoDep) -> EmbyActorTaskResponse:
++    try:
++        require_emby(config.hot.media_server)
++    except ValueError as exc:
++        raise HTTPException(422, detail=str(exc)) from exc
++    if req.server_key != emby_server_key(config.hot.media_server):
++        raise HTTPException(409, detail="Emby 服务器配置已变化，请刷新媒体库后重新选择")
++    task = await repo.create_task(TaskType.EMBY_ACTOR_SCRAPE, req)
++    assert task.id is not None
++    return EmbyActorTaskResponse(task_id=task.id)
+diff --git a/src/amane/app/runtime.py b/src/amane/app/runtime.py
+index 8ac9c7ab..9f89d08b 100644
+--- a/src/amane/app/runtime.py
++++ b/src/amane/app/runtime.py
+@@ -34,6 +34,7 @@ from ..handlers import (
+     SemanticIndexHandler,
+     UpscaleHandler,
+ )
++from ..handlers.liu1443452494_emby_actors import EmbyActorScrapeHandler
+ from ..library import InventoryStore
+ from ..llm import TranslationCache, TranslationCoalescer, build_translator
+ from ..media.watermarks import user_watermark_dir
+@@ -585,6 +586,9 @@ def build_handlers(
+         ),
+         TaskType.ACTOR_SCRAPE: ActorScrapeHandler(repo, factory, resource_store, hot, web_client),
+         TaskType.ACTOR_PUSH: ActorPushHandler(repo, resource_store, hot),
++        TaskType.EMBY_ACTOR_SCRAPE: EmbyActorScrapeHandler(
++            hot, factory.for_transient_actors, web_client, resource_store.data_dir
++        ),
+         TaskType.ORGANIZE: OrganizeHandler(
+             repo,
+             hot,
+diff --git a/src/amane/crawlers/factory.py b/src/amane/crawlers/factory.py
+index ccbb8edd..1ede5250 100644
+--- a/src/amane/crawlers/factory.py
++++ b/src/amane/crawlers/factory.py
+@@ -189,3 +189,7 @@ class CrawlerFactory:
+             if crawler is not None:
+                 result[name] = crawler
+         return result
++
++    def for_transient_actors(self) -> CrawlerFactory:
++        """独立演员任务不传数据目录，来源实例与 gFriends 索引仅保留在当次任务内存中。"""
++        return CrawlerFactory(self._http, self._site_configs, gfriends_repo=self._gfriends_repo)
+diff --git a/src/amane/db/models.py b/src/amane/db/models.py
+index f6deda35..a982378f 100644
+--- a/src/amane/db/models.py
++++ b/src/amane/db/models.py
+@@ -47,6 +47,7 @@ class TaskType(StrEnum):
+     SEMANTIC_INDEX = "semantic_index"
+     SEMANTIC_BENCHMARK = "semantic_benchmark"
+     ACTOR_PUSH = "actor_push"
++    EMBY_ACTOR_SCRAPE = "emby_actor_scrape"
+ 
+ 
+ class RoutineType(StrEnum):
+diff --git a/src/amane/handlers/liu1443452494_emby_actors.py b/src/amane/handlers/liu1443452494_emby_actors.py
+new file mode 100644
+index 00000000..6a409b86
+--- /dev/null
++++ b/src/amane/handlers/liu1443452494_emby_actors.py
+@@ -0,0 +1,302 @@
++"""从 Emby 读取演员并直接写回，仅任务统计进入本地数据库。"""
++
++from __future__ import annotations
++
++import asyncio
++from collections.abc import Callable, Mapping
++from io import BytesIO
++from pathlib import Path
++from typing import TYPE_CHECKING
++from xml.etree import ElementTree
++
++from PIL import Image, UnidentifiedImageError
++from pydantic import BaseModel, Field
++
++from ..aggregate import first_known_gender, merge_actor_metadata
++from ..aggregate.actor import AggregatedActor
++from ..crawlers.actor import ActorFetcher, ActorMetadata, filter_sites_for_gender
++from ..enums import ActorGender, SiteName
++from ..liu1443452494_emby_client import EmbyActorClient, emby_server_key, require_emby
++from ..media_server import MediaPerson, MediaServerError, normalize_person_name
++from ..net.errors import FailureReason, SourceError
++from ..net.recording import skip_body_recording
++from ..utils.dates import normalize_calendar_date
++from ..utils.threads import in_thread
++from .models import EmbyActorScrapePayload, EmbyActorScrapeResult
++from .protocol import TaskHandler, TaskResult
++
++if TYPE_CHECKING:
++    from ..config import ActorScrapingConfig, HotSettings, MediaServerConfig
++    from ..net.http import WebClient
++    from .actor_scrape import ActorCrawlerFactoryLike
++
++
++class _SiteResult(BaseModel):
++    site: SiteName
++    metadata: ActorMetadata | None = None
++    error: str | None = None
++
++
++class _FetchedActor(BaseModel):
++    metadata: AggregatedActor
++    errors: list[str] = Field(default_factory=list)
++
++
++class _Portrait(BaseModel):
++    content_type: str
++    data: bytes
++
++
++class _PersonUpdates(BaseModel):
++    overview: str | None = Field(default=None, alias="Overview")
++    birthday: str | None = Field(default=None, alias="PremiereDate")
++    year: int | None = Field(default=None, alias="ProductionYear")
++    locations: list[str] | None = Field(default=None, alias="ProductionLocations")
++
++    model_config = {"populate_by_name": True}
++
++
++@in_thread
++def read_emby_name_mapping(data_dir: Path) -> dict[str, str | None]:
++    """原名优先，XML 仅提供唯一匹配的日文备用名，不改变 Emby 显示名。"""
++    path = data_dir / "mapping_actor.xml"
++    try:
++        root = ElementTree.fromstring(path.read_text(encoding="utf-8-sig"))
++    except FileNotFoundError:
++        return {}
++    except OSError, UnicodeError, ElementTree.ParseError:
++        raise ValueError("演员映射文件读取失败，请检查 UTF-8 编码和 XML 格式") from None
++    names: dict[str, str | None] = {}
++    for entry in root.iter("a"):
++        japanese = entry.get("jp", "").strip()
++        if not japanese:
++            continue
++        candidates = [entry.get(key, "") for key in ("zh_cn", "zh_tw", "jp")]
++        candidates.extend(entry.get("keyword", "").split(","))
++        for candidate in candidates:
++            key = normalize_person_name(candidate)
++            if not key:
++                continue
++            if key not in names:
++                names[key] = japanese
++            elif names[key] != japanese:
++                names[key] = None
++    return names
++
++
++def _lookup_names(name: str, mapping: Mapping[str, str | None]) -> list[str]:
++    japanese = mapping.get(normalize_person_name(name))
++    return [name, japanese] if japanese and normalize_person_name(japanese) != normalize_person_name(name) else [name]
++
++
++async def _fetch_site(site: SiteName, crawler: ActorFetcher | None, names: list[str]) -> _SiteResult:
++    if crawler is None:
++        return _SiteResult(site=site, error=f"{site}：来源不可用")
++    for name in names:
++        try:
++            metadata = await crawler.fetch(name)
++        except SourceError as exc:
++            if exc.reason in {FailureReason.NOT_FOUND, FailureReason.NO_USABLE_METADATA}:
++                continue
++            return _SiteResult(site=site, error=f"{site}：来源请求失败（{exc.reason.value}）")
++        except Exception:
++            # 来源异常可能携带响应正文，仅记录分类信息，禁止保存完整演员资料。
++            return _SiteResult(site=site, error=f"{site}：来源解析失败")
++        if metadata is not None and (
++            metadata.overview
++            or metadata.birthday
++            or metadata.birthplace
++            or metadata.image_urls
++            or metadata.gender in {ActorGender.FEMALE, ActorGender.MALE}
++        ):
++            return _SiteResult(site=site, metadata=metadata)
++    return _SiteResult(site=site)
++
++
++async def fetch_emby_actor(
++    names: list[str], config: ActorScrapingConfig, factory: ActorCrawlerFactoryLike, *, need_image: bool
++) -> _FetchedActor:
++    profiles = config.profile_sites
++    images = config.image_sites if need_image else []
++    configured = list(dict.fromkeys([*profiles, *images]))
++    sites, deferred = filter_sites_for_gender(configured, ActorGender.UNKNOWN)
++    crawlers = await factory.get_actor_crawlers(configured)
++    outcomes = list(await asyncio.gather(*(_fetch_site(site, crawlers.get(site), names) for site in sites)))
++    results = {outcome.site: outcome.metadata for outcome in outcomes}
++    gender = first_known_gender(results, profile_sites=profiles)
++    if gender is not None:
++        second, _ = filter_sites_for_gender(deferred, gender)
++        extra = await asyncio.gather(*(_fetch_site(site, crawlers.get(site), names) for site in second))
++        outcomes.extend(extra)
++        results.update({outcome.site: outcome.metadata for outcome in extra})
++    return _FetchedActor(
++        metadata=merge_actor_metadata(results, profile_sites=profiles, image_sites=images),
++        errors=[outcome.error for outcome in outcomes if outcome.error is not None],
++    )
++
++
++def _has_text(value: str | None) -> bool:
++    return bool(value and value.strip())
++
++
++def _profile_complete(person: MediaPerson) -> bool:
++    return (
++        _has_text(person.overview)
++        and _has_text(person.premiere_date)
++        and person.production_year is not None
++        and any(value.strip() for value in person.production_locations)
++    )
++
++
++def emby_profile_updates(actor: AggregatedActor, person: MediaPerson, *, force: bool) -> _PersonUpdates:
++    updates = _PersonUpdates()
++    if _has_text(actor.overview) and (force or not _has_text(person.overview)):
++        updates.overview = actor.overview
++    birthday = normalize_calendar_date(actor.birthday) if actor.birthday else None
++    if birthday:
++        if force or not _has_text(person.premiere_date):
++            updates.birthday = birthday
++        if force or person.production_year is None:
++            # 补充出生年份时与已保留的生日保持一致，避免产生互相矛盾的日期。
++            effective = (
++                birthday
++                if force or not _has_text(person.premiere_date)
++                else normalize_calendar_date(person.premiere_date or "")
++            )
++            if effective:
++                updates.year = int(effective[:4])
++    if _has_text(actor.birthplace) and (force or not any(value.strip() for value in person.production_locations)):
++        updates.locations = [actor.birthplace] if actor.birthplace is not None else None
++    return updates
++
++
++@in_thread
++def _portrait(data: bytes) -> _Portrait:
++    with Image.open(BytesIO(data)) as image:
++        content_type = Image.MIME.get(image.format or "")
++        # JPEG 容器校验无法确认像素完整，上传前必须完成解码。
++        image.load()
++    if content_type not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
++        raise ValueError("头像格式不受 Emby 支持")
++    return _Portrait(content_type=content_type, data=data)
++
++
++class EmbyActorScrapeHandler(TaskHandler[EmbyActorScrapePayload, EmbyActorScrapeResult]):
++    def __init__(
++        self,
++        config: HotSettings,
++        factory: Callable[[], ActorCrawlerFactoryLike],
++        web_client: WebClient,
++        data_dir: Path,
++        client_factory: Callable[[MediaServerConfig], EmbyActorClient] = EmbyActorClient,
++    ) -> None:
++        super().__init__(payload_t=EmbyActorScrapePayload, result_t=EmbyActorScrapeResult)
++        self._server = config.media_server.model_copy(deep=True)
++        self._scraping = config.actor_scraping.model_copy(deep=True)
++        self._factory = factory
++        self._web_client = web_client
++        self._data_dir = data_dir
++        self._client_factory = client_factory
++
++    async def handle(self, payload: EmbyActorScrapePayload) -> TaskResult[EmbyActorScrapeResult]:
++        result = EmbyActorScrapeResult()
++        try:
++            require_emby(self._server)
++            if payload.server_key != emby_server_key(self._server):
++                raise ValueError("Emby 服务器配置已变化，请刷新媒体库后重新提交")
++            if not self._scraping.profile_sites and not self._scraping.image_sites:
++                raise ValueError("尚未配置演员刮削来源")
++            mapping = await read_emby_name_mapping(self._data_dir)
++            factory = self._factory()
++            # 覆盖整个来源调用范围，即使开启调试捕获，也只记录 HTTP 状态，不保存响应正文。
++            with skip_body_recording():
++                async with self._client_factory(self._server) as client:
++                    await self.report_progress(0, 0, "读取 Emby 媒体库演员")
++                    actors = await client.library_actors(payload.library_ids)
++                    result.requested = len(actors)
++                    for actor in actors:
++                        await self._sync_person(actor.id, actor.name, payload, client, factory, mapping, result)
++                        result.processed += 1
++                        await self.report_progress(result.processed, result.requested, actor.name)
++        except (MediaServerError, ValueError) as exc:
++            return TaskResult(success=False, error=str(exc), result=result)
++        return TaskResult(
++            success=result.failed == 0,
++            error="部分演员处理失败，请查看任务结果" if result.failed else None,
++            result=result,
++        )
++
++    async def _sync_person(
++        self,
++        person_id: str,
++        name: str,
++        payload: EmbyActorScrapePayload,
++        client: EmbyActorClient,
++        factory: ActorCrawlerFactoryLike,
++        mapping: Mapping[str, str | None],
++        result: EmbyActorScrapeResult,
++    ) -> None:
++        try:
++            person = await client.get_person(person_id)
++            if not payload.force and person.has_primary_image and _profile_complete(person):
++                result.skipped += 1
++                return
++            fetched = await fetch_emby_actor(
++                _lookup_names(person.name, mapping),
++                self._scraping,
++                factory,
++                need_image=payload.force or not person.has_primary_image,
++            )
++            # 刮削期间 Emby 可能被人工编辑，写回前重新读取，补充模式保护新出现的内容。
++            current = await client.get_person(person_id)
++            updates = emby_profile_updates(fetched.metadata, current, force=payload.force)
++            image: _Portrait | None = None
++            image_failed = False
++            if payload.force or not current.has_primary_image:
++                for url in fetched.metadata.image_urls:
++                    try:
++                        image = await _portrait(await self._web_client.get_bytes(url))
++                        break
++                    except SourceError, OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError:
++                        image_failed = True
++                if image is not None:
++                    image_failed = False
++            fields = updates.model_dump(by_alias=True, exclude_none=True)
++            if not fields and image is None:
++                if image_failed or fetched.errors:
++                    self._failed(result, name, "；".join(fetched.errors) or "头像下载或校验失败")
++                elif _profile_complete(current) and current.has_primary_image and not payload.force:
++                    result.skipped += 1
++                else:
++                    result.not_found += 1
++                    self._detail(result, name, "没有取得可用于补充的资料或头像")
++                return
++            errors: list[str] = []
++            if fields:
++                try:
++                    await client.update_person(current, fields)
++                    result.updated += 1
++                except MediaServerError as exc:
++                    errors.append(str(exc))
++            if image is not None:
++                try:
++                    await client.upload_primary_image(person_id, image.data, content_type=image.content_type)
++                    result.images += 1
++                except MediaServerError as exc:
++                    errors.append(str(exc))
++            elif image_failed:
++                errors.append("头像下载或校验失败")
++            if errors:
++                self._failed(result, name, "；".join(errors))
++        except MediaServerError as exc:
++            self._failed(result, name, str(exc))
++
++    @staticmethod
++    def _detail(result: EmbyActorScrapeResult, name: str, message: str) -> None:
++        if len(result.failures) < 50:
++            result.failures.append(f"{name}：{message}")
++
++    @classmethod
++    def _failed(cls, result: EmbyActorScrapeResult, name: str, message: str) -> None:
++        result.failed += 1
++        cls._detail(result, name, message)
+diff --git a/src/amane/handlers/models.py b/src/amane/handlers/models.py
+index 4051da4b..94c2106a 100644
+--- a/src/amane/handlers/models.py
++++ b/src/amane/handlers/models.py
+@@ -4,13 +4,14 @@ from enum import StrEnum
+ from typing import TYPE_CHECKING, Literal
+ 
+ from fastapi import HTTPException
+-from pydantic import BaseModel, Field
++from pydantic import BaseModel, Field, field_validator
+ from starlette.status import HTTP_403_FORBIDDEN
+ 
+ from ..db import Library, MediaFileStatus, Repository
+ from ..db.embeddings import EmbeddingKind
+ from ..db.models import TaskType
+ from ..enums import LibraryResource
++from ..liu1443452494_emby_client import EmbyItemId
+ from ..observability.models import OrganizeConflict, SiteOutcomeRecord
+ from ..parsing import ContentType, infer_content_type
+ from ..utils.path import is_descendant, is_resolved_path, resolved_path
+@@ -376,6 +377,29 @@ class ActorPushPayload(BaseModel):
+     force: bool = Field(default=False, description="覆盖媒体服务器上已有的头像与人物字段")
+ 
+ 
++class EmbyActorScrapePayload(BaseModel):
++    library_ids: list[EmbyItemId] = Field(min_length=1, max_length=200, description="本次选择的 Emby 媒体库")
++    server_key: str = Field(pattern=r"^[0-9a-f]{64}$", description="读取媒体库时取得的服务器配置摘要")
++    force: bool = Field(default=False, description="覆盖成功刮削到的头像和资料；未取得的字段保留原值")
++
++    @field_validator("library_ids")
++    @classmethod
++    def _unique_libraries(cls, values: list[str]) -> list[str]:
++        return list(dict.fromkeys(values))
++
++
++class EmbyActorScrapeResult(BaseModel):
++    type: Literal[TaskType.EMBY_ACTOR_SCRAPE] = TaskType.EMBY_ACTOR_SCRAPE
++    requested: int = 0
++    processed: int = 0
++    updated: int = 0
++    images: int = 0
++    skipped: int = 0
++    not_found: int = 0
++    failed: int = 0
++    failures: list[str] = Field(default_factory=list)
++
++
+ class ActorPushResult(BaseModel):
+     type: Literal[TaskType.ACTOR_PUSH] = TaskType.ACTOR_PUSH
+     requested: int
+diff --git a/src/amane/liu1443452494_emby_client.py b/src/amane/liu1443452494_emby_client.py
+new file mode 100644
+index 00000000..e1ae945c
+--- /dev/null
++++ b/src/amane/liu1443452494_emby_client.py
+@@ -0,0 +1,158 @@
++"""Emby 媒体库及库内演员读取，写回复用既有人物接口。"""
++
++from __future__ import annotations
++
++import hashlib
++from typing import TYPE_CHECKING, Annotated, Self
++
++from httpx2 import HTTPError, InvalidURL
++from pydantic import BaseModel, Field, TypeAdapter, ValidationError
++
++from .media_server import MediaPerson, MediaServerClient, MediaServerError
++
++if TYPE_CHECKING:
++    from .config import MediaServerConfig
++
++
++type EmbyItemId = Annotated[str, Field(pattern=r"^[a-zA-Z0-9_-]+$", min_length=1, max_length=128)]
++
++
++class EmbyLibrary(BaseModel):
++    id: EmbyItemId
++    name: str
++
++
++class EmbyLibrariesResponse(BaseModel):
++    server_key: str
++    libraries: list[EmbyLibrary]
++
++
++class _VirtualFolder(BaseModel):
++    id: EmbyItemId = Field(alias="ItemId")
++    name: str = Field(alias="Name", min_length=1)
++
++
++class EmbyActorReference(BaseModel):
++    id: EmbyItemId
++    name: str
++
++
++class _PersonReference(BaseModel):
++    id: EmbyItemId | None = Field(default=None, alias="Id")
++    name: str = Field(alias="Name", min_length=1)
++    type: str = Field(default="", alias="Type")
++
++
++class _LibraryItem(BaseModel):
++    id: EmbyItemId = Field(alias="Id")
++    people: list[_PersonReference] | None = Field(default=None, alias="People")
++
++
++class _LibraryPage(BaseModel):
++    items: list[_LibraryItem] = Field(alias="Items")
++    total: int = Field(alias="TotalRecordCount", ge=0, strict=True)
++
++
++def emby_server_key(config: MediaServerConfig) -> str:
++    """任务仅保存连接配置的摘要，配置变化后必须重新选择媒体库。"""
++    return hashlib.sha256(config.model_dump_json().encode("utf-8")).hexdigest()
++
++
++def require_emby(config: MediaServerConfig) -> None:
++    if config.kind != "emby" or not config.enabled:
++        raise ValueError("请先保存有效的 Emby 服务器地址和 API Key")
++
++
++class EmbyActorClient(MediaServerClient):
++    async def __aenter__(self) -> Self:
++        return self
++
++    async def list_libraries(self) -> list[EmbyLibrary]:
++        try:
++            response = await self._client.get(self._base + "/Library/VirtualFolders", headers=self._headers())
++        except (HTTPError, InvalidURL) as exc:
++            raise MediaServerError("无法连接 Emby，请检查服务器地址和连接配置") from exc
++        self._raise_for_status(response.status_code, "")
++        try:
++            folders = TypeAdapter(list[_VirtualFolder]).validate_json(response.content)
++        except ValidationError:
++            raise MediaServerError("Emby 媒体库列表格式无效") from None
++        if len({folder.id for folder in folders}) != len(folders):
++            raise MediaServerError("Emby 媒体库列表包含重复标识，请刷新后重试")
++        return [EmbyLibrary(id=folder.id, name=folder.name) for folder in folders]
++
++    async def library_actors(self, library_ids: list[str]) -> list[EmbyActorReference]:
++        """通过库内影片的 People 取得人物 ID，避免全服人物检索扩大选定范围。"""
++        selected = set(library_ids)
++        available = {library.id for library in await self.list_libraries()}
++        if not selected or not selected <= available:
++            raise MediaServerError("所选 Emby 媒体库已失效，请刷新媒体库后重新选择")
++        actors: dict[str, EmbyActorReference] = {}
++        for library_id in dict.fromkeys(library_ids):
++            seen: set[str] = set()
++            start = 0
++            total: int | None = None
++            while True:
++                data = await self._get_json(
++                    "/Items",
++                    {
++                        "ParentId": library_id,
++                        "Recursive": "true",
++                        "IncludeItemTypes": "Movie,Episode",
++                        "Fields": "People",
++                        "EnableImages": "false",
++                        "EnableTotalRecordCount": "true",
++                        "SortBy": "SortName",
++                        "SortOrder": "Ascending",
++                        "StartIndex": start,
++                        "Limit": 200,
++                    },
++                )
++                try:
++                    page = _LibraryPage.model_validate(data)
++                except ValidationError:
++                    raise MediaServerError("Emby 库内影片列表格式无效，无法确认演员范围") from None
++                if total is not None and page.total != total:
++                    raise MediaServerError("读取期间 Emby 媒体库发生变化，请重试")
++                total = page.total
++                if not page.items:
++                    if start == total:
++                        break
++                    raise MediaServerError("Emby 库内影片分页提前结束，未取得完整演员列表")
++                for item in page.items:
++                    if item.id in seen:
++                        raise MediaServerError("Emby 库内影片分页重复，未取得完整演员列表")
++                    seen.add(item.id)
++                    for person in item.people or []:
++                        if person.type.casefold() != "actor":
++                            continue
++                        if person.id is None:
++                            raise MediaServerError("Emby 库内演员缺少人物 ID，无法确认写回对象")
++                        actors.setdefault(person.id, EmbyActorReference(id=person.id, name=person.name))
++                start += len(page.items)
++                if start > total:
++                    raise MediaServerError("Emby 库内影片数量超过分页总数，请重试")
++                if start == total:
++                    break
++        return list(actors.values())
++
++    async def get_person(self, person_id: str) -> MediaPerson:
++        data = await self._get_json(
++            f"/Items/{person_id}",
++            {
++                "Fields": (
++                    "Overview,OriginalTitle,PremiereDate,ProductionYear,ProductionLocations,"
++                    "CustomRating,Genres,Tags,People,Settings,ProviderIds"
++                ),
++                "EnableImages": "true",
++            },
++        )
++        person = MediaPerson.from_dto(data)
++        if person is None or person.id != person_id or data.get("Type") != "Person":
++            raise MediaServerError("Emby 人物详情与请求对象不一致，已停止该人物写回")
++        return person
++
++    @staticmethod
++    def _raise_for_status(status: int, body: str) -> None:
++        """错误记录仅保留状态信息，不包含可能携带人物资料的响应正文。"""
++        MediaServerClient._raise_for_status(status, "")
+diff --git a/src/amane/observability/redact.py b/src/amane/observability/redact.py
+index 8b28994d..0ec75648 100644
+--- a/src/amane/observability/redact.py
++++ b/src/amane/observability/redact.py
+@@ -16,6 +16,9 @@ _SCRAPE_HOT_KEYS: tuple[str, ...] = ("scraping", "network", "llm", "r18", "plugi
+ 
+ def hot_slice_for_task(hot_dump: dict[str, Any], task_type: str) -> dict[str, Any]:
+     """去掉与回放无关的噪声 section."""
++    if task_type == "emby_actor_scrape":
++        # 独立 Emby 任务仅保留执行记录，不复制来源配置或服务器密钥。
++        return {}
+     if task_type == "scrape":
+         return {k: deepcopy(hot_dump[k]) for k in _SCRAPE_HOT_KEYS if k in hot_dump}
+     drop = {"watcher", "worker", "logging"}
+diff --git a/tests/api/test_liu1443452494_emby_actors.py b/tests/api/test_liu1443452494_emby_actors.py
+new file mode 100644
+index 00000000..f1ea16c7
+--- /dev/null
++++ b/tests/api/test_liu1443452494_emby_actors.py
+@@ -0,0 +1,94 @@
++"""Emby 设置页的媒体库读取、提交校验及任务结果接线。"""
++
++from typing import TYPE_CHECKING
++
++import httpx2
++import pytest
++
++from amane.api.routes import liu1443452494_emby_actors as routes
++from amane.config import MediaServerConfig
++from amane.db.models import TaskType
++from amane.handlers.liu1443452494_emby_actors import EmbyActorScrapeHandler
++from amane.handlers.models import EmbyActorScrapeResult
++from amane.liu1443452494_emby_client import EmbyActorClient
++
++if TYPE_CHECKING:
++    from fastapi import FastAPI
++
++    from amane.db.repository import Repository
++
++
++@pytest.mark.asyncio
++async def test_emby_settings_http_flow(
++    client: httpx2.AsyncClient, app: FastAPI, repo: Repository, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    status = 200
++    requests: list[httpx2.Request] = []
++
++    def respond(request: httpx2.Request) -> httpx2.Response:
++        requests.append(request)
++        assert request.url.path == "/Library/VirtualFolders"
++        return httpx2.Response(status, json=[{"ItemId": "library", "Name": "已导入的影片"}])
++
++    def make_client(config: MediaServerConfig) -> EmbyActorClient:
++        return EmbyActorClient(config, client=httpx2.AsyncClient(transport=httpx2.MockTransport(respond)))
++
++    monkeypatch.setattr(routes, "EmbyActorClient", make_client)
++    response = await client.get("media-server/emby/libraries")
++    assert response.status_code == 422 and "Emby" in response.json()["detail"]
++    assert requests == []
++    config = await client.patch(
++        "config",
++        json={
++            "media_server": {
++                "kind": "emby",
++                "url": "https://emby.test",
++                "api_key": "test-key",
++            }
++        },
++    )
++    assert config.status_code == 200
++    runtime = app.state.runtime
++    assert isinstance(runtime.worker._handlers[TaskType.EMBY_ACTOR_SCRAPE], EmbyActorScrapeHandler)
++    await runtime.stop_workers(closing=False)
++
++    libraries = await client.get("media-server/emby/libraries")
++    assert libraries.status_code == 200
++    data = libraries.json()
++    assert data["libraries"] == [{"id": "library", "name": "已导入的影片"}]
++    assert "test-key" not in libraries.text
++    payload = {"library_ids": ["library"], "server_key": data["server_key"], "force": True}
++    generic = await client.post("tasks", json={"type": "emby_actor_scrape", **payload})
++    assert generic.status_code == 422
++    for update, expected in [
++        ({"library_ids": []}, 422),
++        ({"library_ids": ["../other"]}, 422),
++        ({"library_ids": ["library"] * 201}, 422),
++        ({"server_key": "invalid"}, 422),
++        ({"server_key": "0" * 64}, 409),
++    ]:
++        rejected = await client.post("media-server/emby/actors/scrape", json={**payload, **update})
++        assert rejected.status_code == expected and rejected.json()["detail"]
++
++    accepted = await client.post(
++        "media-server/emby/actors/scrape", json={**payload, "library_ids": ["library", "library"]}
++    )
++    assert accepted.status_code == 202
++    task_id = accepted.json()["task_id"]
++    task = await client.get(f"tasks/{task_id}")
++    assert task.status_code == 200
++    assert task.json()["type"] == "emby_actor_scrape"
++    assert task.json()["payload"] == payload
++    filtered = await client.get("tasks", params={"type": "emby_actor_scrape"})
++    assert filtered.status_code == 200 and filtered.json()["total"] == 1
++    await repo.complete_task(
++        task_id, EmbyActorScrapeResult(requested=2, processed=2, updated=1, skipped=1).model_dump(mode="json")
++    )
++    finished = await client.get(f"tasks/{task_id}")
++    assert finished.status_code == 200
++    assert finished.json()["result"]["type"] == "emby_actor_scrape"
++    assert finished.json()["result"]["processed"] == 2
++
++    status = 401
++    unavailable = await client.get("media-server/emby/libraries")
++    assert unavailable.status_code == 502 and "认证失败" in unavailable.json()["detail"]
+diff --git a/tests/api/test_tasks.py b/tests/api/test_tasks.py
+index 1150343a..d1dc18f5 100644
+--- a/tests/api/test_tasks.py
++++ b/tests/api/test_tasks.py
+@@ -179,8 +179,10 @@ class TestSubmitTask:
+         schema = await client.get("tasks/schema")
+         assert schema.status_code == 200
+         covered = set(schema.json()["discriminator"]["mapping"].keys())
+-        missing = set(TaskType) - covered
+-        assert not missing, f"TaskSubmission missing: {missing}. Add submission model to TaskSubmission union."
++        # Emby 演员任务经选库专用接口提交，不属于通用任务表单。
++        assert TaskType.EMBY_ACTOR_SCRAPE not in covered
++        missing = set(TaskType) - {TaskType.EMBY_ACTOR_SCRAPE} - covered
++        assert not missing, f"通用任务提交缺少类型: {missing}，需要补充 TaskSubmission 联合模型。"
+ 
+     @pytest.mark.asyncio(loop_scope="function")
+     async def test_submit_semantic_benchmark(self, client: AsyncClient, stop_worker: None):
+diff --git a/tests/crawlers/test_liu1443452494_emby_factory.py b/tests/crawlers/test_liu1443452494_emby_factory.py
+new file mode 100644
+index 00000000..fa7d211c
+--- /dev/null
++++ b/tests/crawlers/test_liu1443452494_emby_factory.py
+@@ -0,0 +1,39 @@
++"""独立 Emby 任务的 gFriends 索引只在任务内存中使用。"""
++
++from pathlib import Path
++from unittest.mock import AsyncMock
++
++import pytest
++
++from amane.crawlers.factory import CrawlerFactory
++from amane.crawlers.http import HttpClient
++
++
++@pytest.mark.asyncio
++async def test_transient_factory_ignores_disk_cache_and_does_not_retain_task_index(
++    tmp_path: Path, http_client: HttpClient, mock_web_client: AsyncMock
++) -> None:
++    cache = tmp_path / "gfriends.json"
++    original_bytes = '{"演员.jpg": "https://images.test/Content/old/actor.jpg"}'.encode()
++    cache.write_bytes(original_bytes)
++    factory = CrawlerFactory(http_client, data_dir=tmp_path, gfriends_repo="https://github.com/example/portraits")
++    regular = await factory.get_actor("gfriends")
++    assert regular is not None
++    cached = await regular.fetch("演员")
++    assert cached is not None and cached.image_urls == ["https://images.test/Content/old/actor.jpg"]
++    mock_web_client.get_json.assert_not_awaited()
++
++    for target in ("first.jpg", "second.jpg"):
++        mock_web_client.get_json.return_value = {"Content": {"custom": {"演员.jpg": target}}}
++        transient = factory.for_transient_actors()
++        crawler = await transient.get_actor("gfriends")
++        assert crawler is not None
++        for _ in range(2):
++            result = await crawler.fetch("演员")
++            assert result is not None
++            assert result.image_urls == [
++                f"https://raw.githubusercontent.com/example/portraits/master/Content/custom/{target}"
++            ]
++    assert mock_web_client.get_json.await_count == 2
++    assert cache.read_bytes() == original_bytes
++    assert list(tmp_path.iterdir()) == [cache]
+diff --git a/tests/handlers/test_liu1443452494_emby_actors.py b/tests/handlers/test_liu1443452494_emby_actors.py
+new file mode 100644
+index 00000000..07096075
+--- /dev/null
++++ b/tests/handlers/test_liu1443452494_emby_actors.py
+@@ -0,0 +1,522 @@
++"""独立 Emby 演员任务的字段保护、姓名重试及本地数据边界。"""
++
++from __future__ import annotations
++
++import base64
++import json
++from collections.abc import Callable
++from io import BytesIO
++from pathlib import Path
++from unittest.mock import AsyncMock
++
++import httpx2
++import pytest
++from PIL import Image
++from sqlmodel import select
++
++from amane.aggregate.actor import AggregatedActor
++from amane.config import ActorScrapingConfig, HotSettings, MediaServerConfig
++from amane.crawlers.actor import ActorMetadata
++from amane.db.models import Actor, ActorAlias, Resource, Task, TaskStatus, TaskType
++from amane.db.repository import Repository
++from amane.enums import ActorGender, SiteName
++from amane.handlers.liu1443452494_emby_actors import (
++    EmbyActorScrapeHandler,
++    _lookup_names,
++    emby_profile_updates,
++    fetch_emby_actor,
++    read_emby_name_mapping,
++)
++from amane.handlers.models import EmbyActorScrapePayload
++from amane.liu1443452494_emby_client import EmbyActorClient, emby_server_key
++from amane.media_server import MediaPerson
++from amane.net.errors import FailureReason, SourceError
++from amane.observability.recorder import Recorder, get_recorder, task_dir_for
++from tests.handlers.test_actor_scrape import _FakeActorCrawler, _FakeFactory
++from tests.media_server.test_client import _person_dto
++
++
++def _hot() -> HotSettings:
++    return HotSettings(
++        media_server=MediaServerConfig(kind="emby", url="https://emby.test", api_key="test-key"),
++        actor_scraping=ActorScrapingConfig(profile_sites=[SiteName.WIKIPEDIA], image_sites=[]),
++    )
++
++
++def _payload(hot: HotSettings, *, force: bool = False) -> EmbyActorScrapePayload:
++    return EmbyActorScrapePayload(library_ids=["library"], server_key=emby_server_key(hot.media_server), force=force)
++
++
++def _person(person_id: str, name: str, **changes: object) -> dict[str, object]:
++    return {
++        **_person_dto(person_id=person_id, name=name, overview=None),
++        "PremiereDate": None,
++        "ProductionYear": None,
++        "ProductionLocations": [],
++        **changes,
++    }
++
++
++class _EmbyState:
++    def __init__(self, people: list[dict[str, object]], *, fail_ids: tuple[str, ...] = ()) -> None:
++        self.people = {str(person["Id"]): person for person in people}
++        self.fail_ids = fail_ids
++        self.fail_posts: tuple[str, ...] = ()
++        self.requests: list[httpx2.Request] = []
++        self.updates: list[dict[str, object]] = []
++        self.uploads: list[httpx2.Request] = []
++
++    def respond(self, request: httpx2.Request) -> httpx2.Response:
++        self.requests.append(request)
++        if request.url.path == "/Library/VirtualFolders":
++            return httpx2.Response(200, json=[{"ItemId": "library", "Name": "测试媒体库"}])
++        if request.url.path == "/Items":
++            return httpx2.Response(
++                200,
++                json={
++                    "Items": [
++                        {
++                            "Id": "film",
++                            "People": [
++                                {"Id": person_id, "Name": person["Name"], "Type": "Actor"}
++                                for person_id, person in self.people.items()
++                            ],
++                        }
++                    ],
++                    "TotalRecordCount": 1,
++                },
++            )
++        person_id = request.url.path.split("/")[2]
++        if person_id in self.fail_ids:
++            return httpx2.Response(503, text="不允许写入任务记录的服务器正文")
++        if request.method == "GET":
++            return httpx2.Response(200, json=self.people[person_id])
++        if request.url.path in self.fail_posts:
++            return httpx2.Response(500, text="不允许保存的写入响应正文")
++        if request.url.path.endswith("/Images/Primary"):
++            self.uploads.append(request)
++        else:
++            self.updates.append(json.loads(request.content))
++        return httpx2.Response(204)
++
++    def client(self, config: MediaServerConfig) -> EmbyActorClient:
++        return EmbyActorClient(config, client=httpx2.AsyncClient(transport=httpx2.MockTransport(self.respond)))
++
++
++class _ScriptedCrawler:
++    def __init__(
++        self,
++        hits: dict[str, ActorMetadata | Exception | None],
++        change: Callable[[], None] | None = None,
++    ) -> None:
++        self.hits = hits
++        self.change = change
++        self.calls: list[str] = []
++
++    async def fetch(self, name: str) -> ActorMetadata | None:
++        self.calls.append(name)
++        if self.change is not None:
++            self.change()
++        recorder = get_recorder()
++        if recorder is not None:
++            recorder.record_http(
++                method="GET",
++                url="https://source.test/actor",
++                status=200,
++                error=None,
++                content_type="text/html",
++                body="不应保存的完整演员正文".encode(),
++                elapsed_ms=1,
++            )
++        result = self.hits.get(name)
++        if isinstance(result, Exception):
++            raise result
++        return result
++
++
++def _image(image_format: str = "PNG") -> bytes:
++    stream = BytesIO()
++    Image.new("RGB", (20, 20), color="red").save(stream, format=image_format)
++    return stream.getvalue()
++
++
++@pytest.mark.parametrize(
++    ("current", "actor", "force", "expected"),
++    [
++        (
++            {},
++            AggregatedActor(overview="简介", birthday="1991/2/3", birthplace="东京"),
++            False,
++            {"Overview": "简介", "PremiereDate": "1991-02-03", "ProductionYear": 1991, "ProductionLocations": ["东京"]},
++        ),
++        (
++            {
++                "Overview": "已有简介",
++                "PremiereDate": "1980-01-01T00:00:00",
++                "ProductionYear": 1980,
++                "ProductionLocations": ["大阪"],
++            },
++            AggregatedActor(overview="新简介", birthday="1991-02-03", birthplace="东京"),
++            False,
++            {},
++        ),
++        (
++            {
++                "Overview": "已有简介",
++                "PremiereDate": "1980-01-01T00:00:00",
++                "ProductionYear": 1980,
++                "ProductionLocations": ["大阪"],
++            },
++            AggregatedActor(overview="新简介"),
++            True,
++            {"Overview": "新简介"},
++        ),
++        (
++            {"Overview": "已有简介", "PremiereDate": "1980-01-01T00:00:00", "ProductionYear": 1980},
++            AggregatedActor(overview="新简介", birthday="1991-02-03"),
++            True,
++            {"Overview": "新简介", "PremiereDate": "1991-02-03", "ProductionYear": 1991},
++        ),
++        (
++            {"PremiereDate": "1980-01-01T00:00:00"},
++            AggregatedActor(birthday="1991-02-03"),
++            False,
++            {"ProductionYear": 1980},
++        ),
++        (
++            {"Overview": " ", "ProductionLocations": [""]},
++            AggregatedActor(overview="简介", birthplace="东京"),
++            False,
++            {"Overview": "简介", "ProductionLocations": ["东京"]},
++        ),
++        ({}, AggregatedActor(overview=" ", birthday="2020-02-30", birthplace=" "), True, {}),
++    ],
++)
++def test_profile_updates_protect_existing_values_and_ignore_unusable_fields(
++    current: dict[str, object], actor: AggregatedActor, force: bool, expected: dict[str, object]
++) -> None:
++    person = MediaPerson.from_dto(_person("p1", "演员", **current))
++    assert person is not None
++    assert emby_profile_updates(actor, person, force=force).model_dump(by_alias=True, exclude_none=True) == expected
++
++
++@pytest.mark.asyncio
++async def test_mapping_uses_unique_japanese_fallback_and_reloads_file(tmp_path: Path) -> None:
++    path = tmp_path / "mapping_actor.xml"
++    assert await read_emby_name_mapping(tmp_path) == {}
++    path.write_text(
++        '<actors><a zh_cn="枫花恋" zh_tw="楓可憐" jp="楓カレン" keyword="田中レモン,重名"/>'
++        '<a zh_cn="另一演员" jp="別人" keyword="重名"/></actors>',
++        encoding="utf-8-sig",
++    )
++    mapping = await read_emby_name_mapping(tmp_path)
++    for name, expected in [
++        ("枫花恋", ["枫花恋", "楓カレン"]),
++        ("楓可憐", ["楓可憐", "楓カレン"]),
++        (" 田中レモン ", [" 田中レモン ", "楓カレン"]),
++        ("楓カレン", ["楓カレン"]),
++        ("重名", ["重名"]),
++        ("未知", ["未知"]),
++    ]:
++        assert _lookup_names(name, mapping) == expected
++    path.write_text('<actors><a zh_cn="枫花恋" jp="変更後"/></actors>', encoding="utf-8")
++    assert _lookup_names("枫花恋", await read_emby_name_mapping(tmp_path)) == ["枫花恋", "変更後"]
++
++
++@pytest.mark.parametrize("data", [b"<actors>", b"\xff\xfe"])
++@pytest.mark.asyncio
++async def test_mapping_rejects_invalid_xml_or_encoding(tmp_path: Path, data: bytes) -> None:
++    (tmp_path / "mapping_actor.xml").write_bytes(data)
++    with pytest.raises(ValueError, match="UTF-8 编码和 XML 格式"):
++        await read_emby_name_mapping(tmp_path)
++
++
++@pytest.mark.parametrize(
++    ("first", "expected_calls", "has_result", "has_error"),
++    [
++        (None, ["原名", "日文名"], True, False),
++        (SourceError(FailureReason.NOT_FOUND), ["原名", "日文名"], True, False),
++        (SourceError(FailureReason.NO_USABLE_METADATA), ["原名", "日文名"], True, False),
++        (ActorMetadata(overview="原名资料"), ["原名"], True, False),
++        (SourceError(FailureReason.NETWORK, detail="敏感响应全文"), ["原名"], False, True),
++        (RuntimeError("敏感响应全文"), ["原名"], False, True),
++    ],
++)
++@pytest.mark.asyncio
++async def test_names_retry_only_after_missing_metadata(
++    first: ActorMetadata | Exception | None, expected_calls: list[str], has_result: bool, has_error: bool
++) -> None:
++    crawler = _ScriptedCrawler({"原名": first, "日文名": ActorMetadata(overview="日文名资料")})
++    fetched = await fetch_emby_actor(
++        ["原名", "日文名"], _hot().actor_scraping, _FakeFactory({"wikipedia": crawler}), need_image=False
++    )
++    assert crawler.calls == expected_calls
++    assert bool(fetched.metadata.overview) is has_result
++    assert bool(fetched.errors) is has_error
++    assert "敏感响应全文" not in str(fetched.errors)
++
++
++@pytest.mark.parametrize(
++    ("gender", "need_image", "profile_calls", "image_calls"),
++    [
++        (ActorGender.FEMALE, True, 1, 1),
++        (ActorGender.FEMALE, False, 1, 0),
++        (ActorGender.MALE, True, 0, 0),
++        (ActorGender.UNKNOWN, True, 0, 0),
++    ],
++)
++@pytest.mark.asyncio
++async def test_gender_qualification_and_existing_image_control_source_calls(
++    gender: ActorGender, need_image: bool, profile_calls: int, image_calls: int
++) -> None:
++    hot = _hot()
++    hot.actor_scraping.profile_sites.append(SiteName.MINNANO)
++    hot.actor_scraping.image_sites = [SiteName.GFRIENDS]
++    profile = _FakeActorCrawler({"演员": ActorMetadata(birthday="1990-01-01")})
++    image = _FakeActorCrawler({"演员": ActorMetadata(image_urls=["https://images.test/avatar.jpg"])})
++    factory = _FakeFactory(
++        {
++            "wikipedia": _FakeActorCrawler({"演员": ActorMetadata(gender=gender, overview="简介")}),
++            "minnano": profile,
++            "gfriends": image,
++        }
++    )
++    fetched = await fetch_emby_actor(["演员"], hot.actor_scraping, factory, need_image=need_image)
++    assert len(profile.calls) == profile_calls
++    assert len(image.calls) == image_calls
++    assert fetched.metadata.overview == "简介"
++
++
++async def _local_snapshot(repo: Repository) -> dict[str, list[dict[str, object]]]:
++    async with repo._session() as session:
++        return {
++            "actors": [actor.model_dump(mode="json") for actor in (await session.exec(select(Actor))).all()],
++            "aliases": [alias.model_dump(mode="json") for alias in (await session.exec(select(ActorAlias))).all()],
++            "resources": [
++                resource.model_dump(mode="json") for resource in (await session.exec(select(Resource))).all()
++            ],
++        }
++
++
++@pytest.mark.asyncio
++async def test_existing_portrait_still_gets_profile_without_local_actor_writes_or_body_capture(
++    tmp_path: Path, repo: Repository
++) -> None:
++    hot = _hot()
++    hot.actor_scraping.image_sites = [SiteName.GFRIENDS]
++    await repo.upsert_metadata(number="LOCAL-1", actors=["枫花恋"])
++    before = await _local_snapshot(repo)
++    (tmp_path / "mapping_actor.xml").write_text('<actors><a zh_cn="枫花恋" jp="楓カレン"/></actors>', encoding="utf-8")
++    state = _EmbyState([_person("p1", "枫花恋", ImageTags={"Primary": "existing"})])
++    crawler = _ScriptedCrawler(
++        {
++            "楓カレン": ActorMetadata(
++                overview="不会写入本地的简介",
++                birthday="1990-01-02",
++                birthplace="东京",
++                gender=ActorGender.FEMALE,
++            )
++        }
++    )
++    images = _FakeActorCrawler({})
++    web = AsyncMock()
++    handler = EmbyActorScrapeHandler(
++        hot, lambda: _FakeFactory({"wikipedia": crawler, "gfriends": images}), web, tmp_path, state.client
++    )
++    task = Task(id=42, type=TaskType.EMBY_ACTOR_SCRAPE, status=TaskStatus.RUNNING, payload=_payload(hot).model_dump())
++    rec = Recorder.begin(tmp_path / "logs", task, hot)
++    try:
++        outcome = await handler.handle(_payload(hot))
++        task.result = outcome.as_dict()
++        task.status = TaskStatus.DONE
++        rec.finalize(task, success=outcome.success, error=outcome.error, debug_capture=True)
++    finally:
++        rec.close()
++    assert outcome.success and outcome.result is not None
++    assert outcome.result.processed == outcome.result.updated == 1
++    assert outcome.result.images == 0
++    assert crawler.calls == ["枫花恋", "楓カレン"]
++    assert images.calls == []
++    web.get_bytes.assert_not_awaited()
++    assert state.updates[0]["Name"] == "枫花恋"
++    assert state.updates[0]["Overview"] == "不会写入本地的简介"
++    assert state.updates[0]["PremiereDate"] == "1990-01-02"
++    assert await _local_snapshot(repo) == before
++    root = task_dir_for(tmp_path / "logs", 42)
++    assert not list((root / "http" / "bodies").glob("*"))
++    exchanges = (root / "http" / "index.jsonl").read_text(encoding="utf-8").splitlines()
++    assert exchanges and all(json.loads(line)["body_file"] is None for line in exchanges)
++    record = b"".join(path.read_bytes() for path in root.rglob("*") if path.is_file())
++    for private in ("不会写入本地的简介", "不应保存的完整演员正文", "test-key"):
++        assert private.encode() not in record
++    assert json.loads((root / "config.hot.json").read_text(encoding="utf-8")) == {}
++
++
++@pytest.mark.asyncio
++async def test_overwrite_updates_found_fields_and_uses_next_valid_image(tmp_path: Path, repo: Repository) -> None:
++    hot = _hot()
++    state = _EmbyState(
++        [
++            _person(
++                "p1",
++                "演员",
++                Overview="原简介",
++                PremiereDate="1980-01-01T00:00:00",
++                ProductionYear=1980,
++                ImageTags={"Primary": "old"},
++            )
++        ]
++    )
++    crawler = _FakeActorCrawler(
++        {
++            "演员": ActorMetadata(
++                overview="新简介",
++                image_urls=["https://images.test/bad", "https://images.test/truncated", "https://images.test/good"],
++            )
++        }
++    )
++    web = AsyncMock()
++    portrait = _image()
++    web.get_bytes.side_effect = [b"<html>not-an-image</html>", _image("JPEG")[:-20], portrait]
++    async with repo._session() as session:
++        session.add(Resource(url="https://images.test/good", file_path="kept/portrait.png"))
++        await session.commit()
++    before = await _local_snapshot(repo)
++    handler = EmbyActorScrapeHandler(hot, lambda: _FakeFactory({"wikipedia": crawler}), web, tmp_path, state.client)
++    outcome = await handler.handle(_payload(hot, force=True))
++    assert outcome.success and outcome.result is not None
++    assert outcome.result.updated == outcome.result.images == 1
++    assert state.updates[0]["Overview"] == "新简介"
++    assert state.updates[0]["PremiereDate"] == "1980-01-01T00:00:00"
++    assert state.updates[0]["ProductionYear"] == 1980
++    assert len(state.uploads) == 1
++    assert state.uploads[0].headers["Content-Type"] == "image/png"
++    assert base64.b64decode(state.uploads[0].content) == portrait
++    assert web.get_bytes.await_count == 3
++    assert await _local_snapshot(repo) == before
++
++
++@pytest.mark.asyncio
++async def test_supplement_rereads_person_and_preserves_changes_during_scraping(tmp_path: Path) -> None:
++    hot = _hot()
++    state = _EmbyState([_person("p1", "演员")])
++
++    def change() -> None:
++        state.people["p1"].update(
++            {
++                "Overview": "人工简介",
++                "PremiereDate": "1980-01-01",
++                "ProductionYear": 1980,
++                "ProductionLocations": ["人工地点"],
++                "ImageTags": {"Primary": "new"},
++            }
++        )
++
++    crawler = _ScriptedCrawler(
++        {
++            "演员": ActorMetadata(
++                overview="来源简介", birthday="1990-01-01", birthplace="东京", image_urls=["https://images.test/a"]
++            )
++        },
++        change,
++    )
++    web = AsyncMock()
++    handler = EmbyActorScrapeHandler(hot, lambda: _FakeFactory({"wikipedia": crawler}), web, tmp_path, state.client)
++    outcome = await handler.handle(_payload(hot))
++    assert outcome.success and outcome.result is not None
++    assert outcome.result.skipped == 1
++    assert state.updates == state.uploads == []
++    web.get_bytes.assert_not_awaited()
++
++
++@pytest.mark.asyncio
++async def test_failures_do_not_block_following_people_and_progress_is_complete(tmp_path: Path) -> None:
++    hot = _hot()
++    state = _EmbyState(
++        [_person("p1", "无法连接"), _person("p2", "成功"), _person("p3", "无效图片"), _person("p4", "未找到")],
++        fail_ids=("p1",),
++    )
++    crawler = _FakeActorCrawler(
++        {"成功": ActorMetadata(overview="简介"), "无效图片": ActorMetadata(image_urls=["https://images.test/bad"])}
++    )
++    web = AsyncMock()
++    web.get_bytes.return_value = b"not-an-image"
++    handler = EmbyActorScrapeHandler(hot, lambda: _FakeFactory({"wikipedia": crawler}), web, tmp_path, state.client)
++    progress: list[tuple[int, int]] = []
++
++    async def report(current: int, total: int, message: str) -> None:
++        progress.append((current, total))
++
++    handler.set_progress_callback(report)
++    outcome = await handler.handle(_payload(hot))
++    assert not outcome.success and outcome.result is not None
++    assert outcome.result.processed == outcome.result.requested == 4
++    assert outcome.result.updated == 1 and outcome.result.failed == 2 and outcome.result.not_found == 1
++    assert progress == [(0, 0), (1, 4), (2, 4), (3, 4), (4, 4)]
++    assert state.uploads == []
++    assert "不允许写入任务记录的服务器正文" not in str(outcome.as_dict())
++
++
++@pytest.mark.parametrize("reason", ["server", "mapping", "sources"])
++@pytest.mark.asyncio
++async def test_invalid_task_configuration_stops_before_contacting_emby(tmp_path: Path, reason: str) -> None:
++    hot = _hot()
++    payload = _payload(hot)
++    if reason == "server":
++        hot.media_server.api_key = "changed-key"
++    elif reason == "mapping":
++        (tmp_path / "mapping_actor.xml").write_text("<broken>", encoding="utf-8")
++    else:
++        hot.actor_scraping.profile_sites = []
++    state = _EmbyState([])
++    handler = EmbyActorScrapeHandler(hot, lambda: _FakeFactory({}), AsyncMock(), tmp_path, state.client)
++    outcome = await handler.handle(payload)
++    assert not outcome.success and outcome.error
++    assert state.requests == []
++
++
++@pytest.mark.asyncio
++async def test_complete_person_is_skipped_without_source_requests(tmp_path: Path) -> None:
++    hot = _hot()
++    state = _EmbyState(
++        [
++            _person(
++                "p1",
++                "完整演员",
++                Overview="现有简介",
++                PremiereDate="1990-01-01",
++                ProductionYear=1990,
++                ProductionLocations=["东京"],
++                ImageTags={"Primary": "existing"},
++            )
++        ]
++    )
++    crawler = _FakeActorCrawler({})
++    web = AsyncMock()
++    handler = EmbyActorScrapeHandler(hot, lambda: _FakeFactory({"wikipedia": crawler}), web, tmp_path, state.client)
++    outcome = await handler.handle(_payload(hot))
++    assert outcome.success and outcome.result is not None
++    assert outcome.result.skipped == 1
++    assert crawler.calls == [] and state.updates == state.uploads == []
++    web.get_bytes.assert_not_awaited()
++
++
++@pytest.mark.parametrize(
++    ("failed_path", "updated", "images"), [("/Items/p1", 0, 1), ("/Items/p1/Images/Primary", 1, 0)]
++)
++@pytest.mark.asyncio
++async def test_profile_and_image_write_failures_preserve_successful_part(
++    tmp_path: Path, failed_path: str, updated: int, images: int
++) -> None:
++    hot = _hot()
++    state = _EmbyState([_person("p1", "演员")])
++    state.fail_posts = (failed_path,)
++    crawler = _FakeActorCrawler({"演员": ActorMetadata(overview="简介", image_urls=["https://images.test/a"])})
++    web = AsyncMock()
++    web.get_bytes.return_value = _image()
++    handler = EmbyActorScrapeHandler(hot, lambda: _FakeFactory({"wikipedia": crawler}), web, tmp_path, state.client)
++    outcome = await handler.handle(_payload(hot))
++    assert not outcome.success and outcome.result is not None
++    assert outcome.result.failed == 1
++    assert outcome.result.updated == updated and outcome.result.images == images
++    assert "不允许保存的写入响应正文" not in str(outcome.as_dict())
+diff --git a/tests/handlers/test_protocol.py b/tests/handlers/test_protocol.py
+index f8a9870b..b41d6908 100644
+--- a/tests/handlers/test_protocol.py
++++ b/tests/handlers/test_protocol.py
+@@ -18,6 +18,7 @@ from amane.handlers.models import (
+     ActorScrapeResult,
+     CleanupResult,
+     DeleteResult,
++    EmbyActorScrapeResult,
+     OrganizeResult,
+     R18ImportResult,
+     RefreshResult,
+@@ -38,6 +39,10 @@ from amane.observability.models import (
+ )
+ 
+ RESULT_CASES = [
++    pytest.param(
++        EmbyActorScrapeResult(requested=2, processed=2, updated=1, failed=1, failures=["演员：来源请求失败"]),
++        id="emby_actor_scrape",
++    ),
+     pytest.param(
+         ScrapeResult(
+             metadata_id=7,
+diff --git a/tests/media_server/test_liu1443452494_emby_client.py b/tests/media_server/test_liu1443452494_emby_client.py
+new file mode 100644
+index 00000000..0b78e0c3
+--- /dev/null
++++ b/tests/media_server/test_liu1443452494_emby_client.py
+@@ -0,0 +1,199 @@
++"""Emby 选库范围、分页完整性与按人物 ID 写回。"""
++
++from __future__ import annotations
++
++import base64
++import json
++
++import httpx2
++import pytest
++
++from amane.config import MediaServerConfig
++from amane.liu1443452494_emby_client import EmbyActorClient
++from amane.media_server import MediaServerError
++from tests.media_server.test_client import _person_dto
++
++
++def _config() -> MediaServerConfig:
++    return MediaServerConfig(kind="emby", url="https://emby.test/emby", api_key="test-key")
++
++
++@pytest.mark.asyncio
++async def test_selected_libraries_deduplicate_actors_and_preserve_person_fields() -> None:
++    requests: list[httpx2.Request] = []
++
++    def respond(request: httpx2.Request) -> httpx2.Response:
++        requests.append(request)
++        path = request.url.path.removeprefix("/emby")
++        if request.method == "POST":
++            return httpx2.Response(204)
++        if path == "/Library/VirtualFolders":
++            return httpx2.Response(200, json=[{"ItemId": key, "Name": key} for key in ("a", "b", "outside")])
++        if path == "/Items/p1":
++            return httpx2.Response(200, json=_person_dto(person_id="p1", name="原显示名", lock_data=True))
++        assert path == "/Items"
++        library = request.url.params["ParentId"]
++        start = int(request.url.params["StartIndex"])
++        assert library in {"a", "b"}
++        assert request.url.params["IncludeItemTypes"] == "Movie,Episode"
++        assert request.url.params["Fields"] == "People"
++        if library == "a" and start == 0:
++            return httpx2.Response(
++                200,
++                json={
++                    "Items": [
++                        {
++                            "Id": "film-1",
++                            "People": [
++                                {"Id": "p1", "Name": "同名演员", "Type": "Actor"},
++                                {"Id": "director", "Name": "导演", "Type": "Director"},
++                            ],
++                        }
++                    ],
++                    "TotalRecordCount": 2,
++                },
++            )
++        if library == "a":
++            assert start == 1
++            return httpx2.Response(200, json={"Items": [{"Id": "film-2", "People": None}], "TotalRecordCount": 2})
++        return httpx2.Response(
++            200,
++            json={
++                "Items": [
++                    {
++                        "Id": "film-3",
++                        "People": [
++                            {"Id": "p1", "Name": "同名演员", "Type": "Actor"},
++                            {"Id": "p2", "Name": "同名演员", "Type": "Actor"},
++                        ],
++                    }
++                ],
++                "TotalRecordCount": 1,
++            },
++        )
++
++    async with EmbyActorClient(_config(), client=httpx2.AsyncClient(transport=httpx2.MockTransport(respond))) as client:
++        actors = await client.library_actors(["a", "b", "a"])
++        assert [actor.id for actor in actors] == ["p1", "p2"]
++        person = await client.get_person("p1")
++        await client.update_person(person, {"Overview": "新简介"})
++        await client.upload_primary_image("p1", b"portrait", content_type="image/png")
++
++    for request in requests:
++        assert request.headers["X-Emby-Token"] == _config().api_key
++        assert "Token=" in request.headers["Authorization"]
++        assert "api_key" not in request.url.params
++    writes = [request for request in requests if request.method == "POST"]
++    assert [request.url.path for request in writes] == ["/emby/Items/p1", "/emby/Items/p1/Images/Primary"]
++    data = json.loads(writes[0].content)
++    assert data["Name"] == "原显示名"
++    assert data["Overview"] == "新简介"
++    assert data["LockData"] is True
++    assert data["LockedFields"] == []
++    assert data["ProviderIds"] == {"Imdb": "tt1"}
++    assert data["PremiereDate"] == "1990-01-01T00:00:00"
++    assert data["Tags"] == ["tag"]
++    assert "People" not in data and "ImageTags" not in data
++    assert writes[1].headers["Content-Type"] == "image/png"
++    assert base64.b64decode(writes[1].content) == b"portrait"
++
++
++@pytest.mark.parametrize(
++    ("pages", "message"),
++    [
++        ([{"Items": [], "TotalRecordCount": 1}], "提前结束"),
++        ([{"Items": [], "TotalRecordCount": True}], "格式无效"),
++        ([{"Items": []}], "格式无效"),
++        ([{"Items": [{"Id": "f"}], "TotalRecordCount": 0}], "超过分页总数"),
++        (
++            [{"Items": [{"Id": "f", "People": [{"Name": "演员", "Type": "Actor"}]}], "TotalRecordCount": 1}],
++            "缺少人物 ID",
++        ),
++        (
++            [
++                {
++                    "Items": [{"Id": "f", "People": [{"Id": "../other", "Name": "演员", "Type": "Actor"}]}],
++                    "TotalRecordCount": 1,
++                }
++            ],
++            "格式无效",
++        ),
++        (
++            [{"Items": [{"Id": "f"}], "TotalRecordCount": 2}, {"Items": [{"Id": "f"}], "TotalRecordCount": 2}],
++            "分页重复",
++        ),
++        ([{"Items": [{"Id": "f"}], "TotalRecordCount": 2}, {"Items": [], "TotalRecordCount": 3}], "发生变化"),
++    ],
++)
++@pytest.mark.asyncio
++async def test_incomplete_library_never_returns_a_partial_actor_list(
++    pages: list[dict[str, object]], message: str
++) -> None:
++    remaining = iter(pages)
++
++    def respond(request: httpx2.Request) -> httpx2.Response:
++        if request.url.path.endswith("/VirtualFolders"):
++            return httpx2.Response(200, json=[{"ItemId": "a", "Name": "影片"}])
++        return httpx2.Response(200, json=next(remaining))
++
++    async with EmbyActorClient(_config(), client=httpx2.AsyncClient(transport=httpx2.MockTransport(respond))) as client:
++        with pytest.raises(MediaServerError, match=message):
++            await client.library_actors(["a"])
++
++
++@pytest.mark.parametrize("selected", [[], ["removed"]])
++@pytest.mark.asyncio
++async def test_invalid_selection_stops_before_loading_films(selected: list[str]) -> None:
++    def respond(request: httpx2.Request) -> httpx2.Response:
++        assert request.url.path.endswith("/VirtualFolders")
++        return httpx2.Response(200, json=[{"ItemId": "a", "Name": "影片"}])
++
++    async with EmbyActorClient(_config(), client=httpx2.AsyncClient(transport=httpx2.MockTransport(respond))) as client:
++        with pytest.raises(MediaServerError, match="媒体库已失效"):
++            await client.library_actors(selected)
++
++
++@pytest.mark.parametrize(
++    ("status", "data", "message"),
++    [
++        (401, {"private": "不应写入错误的正文"}, "认证失败"),
++        (403, {"private": "不应写入错误的正文"}, "权限不足"),
++        (500, {"private": "不应写入错误的正文"}, "HTTP 500"),
++        (200, {"Items": []}, "格式无效"),
++        (200, [{"ItemId": "a", "Name": "影片"}, {"ItemId": "a", "Name": "重复"}], "重复标识"),
++        (200, [{"ItemId": "a"}], "格式无效"),
++    ],
++)
++@pytest.mark.asyncio
++async def test_library_errors_are_clear_and_exclude_response_bodies(status: int, data: object, message: str) -> None:
++    def respond(request: httpx2.Request) -> httpx2.Response:
++        return httpx2.Response(status, json=data)
++
++    async with EmbyActorClient(_config(), client=httpx2.AsyncClient(transport=httpx2.MockTransport(respond))) as client:
++        with pytest.raises(MediaServerError, match=message) as error:
++            await client.list_libraries()
++        assert "不应写入错误的正文" not in str(error.value)
++
++
++@pytest.mark.parametrize("change", [{"Id": "wrong"}, {"Type": "Movie"}, {"Name": ""}])
++@pytest.mark.asyncio
++async def test_person_identity_must_match(change: dict[str, object]) -> None:
++    def respond(request: httpx2.Request) -> httpx2.Response:
++        assert request.method == "GET"
++        return httpx2.Response(200, json={**_person_dto(person_id="p1"), **change})
++
++    async with EmbyActorClient(_config(), client=httpx2.AsyncClient(transport=httpx2.MockTransport(respond))) as client:
++        with pytest.raises(MediaServerError, match="人物详情与请求对象不一致"):
++            await client.get_person("p1")
++
++
++@pytest.mark.asyncio
++async def test_empty_library_is_valid() -> None:
++    def respond(request: httpx2.Request) -> httpx2.Response:
++        data: object = [{"ItemId": "a", "Name": "空媒体库"}]
++        if request.url.path.endswith("/Items"):
++            data = {"Items": [], "TotalRecordCount": 0}
++        return httpx2.Response(200, json=data)
++
++    async with EmbyActorClient(_config(), client=httpx2.AsyncClient(transport=httpx2.MockTransport(respond))) as client:
++        assert await client.library_actors(["a"]) == []
+diff --git a/web/src/components/media/liu1443452494-emby-actors-panel.tsx b/web/src/components/media/liu1443452494-emby-actors-panel.tsx
+new file mode 100644
+index 00000000..822327f2
+--- /dev/null
++++ b/web/src/components/media/liu1443452494-emby-actors-panel.tsx
+@@ -0,0 +1,157 @@
++import { Alert, Button, Divider, Group, MultiSelect, Stack, Switch, Text } from "@mantine/core";
++import { notifications } from "@mantine/notifications";
++import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
++import { Link } from "@tanstack/react-router";
++import { useId, useState } from "react";
++import { useTranslation } from "react-i18next";
++import { listTasksQueryKey, scrapeEmbyActorsMutation } from "@/client/@tanstack/react-query.gen";
++import { getEmbyLibraries } from "@/client/sdk.gen";
++import type { MediaServerConfig } from "@/client/types.gen";
++import { extractErrorMessage } from "@/lib/api-error";
++import { embyActorRequest, sameEmbyConnection } from "./liu1443452494-emby-actors";
++
++interface EmbyActorsPanelProps {
++  server: MediaServerConfig | undefined;
++  unsaved: boolean;
++  saving: boolean;
++}
++
++export function EmbyActorsPanel({ server, unsaved, saving }: EmbyActorsPanelProps) {
++  const [connection, setConnection] = useState({ server, revision: 0 });
++  if (!sameEmbyConnection(connection.server, server)) {
++    setConnection({ server, revision: connection.revision + 1 });
++  }
++  if (server?.kind !== "emby") return null;
++  return (
++    <EmbyActorsControls
++      key={connection.revision}
++      server={server}
++      unsaved={unsaved}
++      saving={saving}
++      revision={connection.revision}
++    />
++  );
++}
++
++function EmbyActorsControls({
++  server,
++  unsaved,
++  saving,
++  revision,
++}: EmbyActorsPanelProps & { revision: number }) {
++  const { t } = useTranslation("settings");
++  const queryClient = useQueryClient();
++  const instance = useId();
++  const [selected, setSelected] = useState<string[]>([]);
++  const [force, setForce] = useState(false);
++  const [taskId, setTaskId] = useState<number | null>(null);
++  const configured = Boolean(server?.url && server?.api_key);
++  const libraries = useQuery({
++    queryKey: ["emby-library-choices", instance, revision],
++    queryFn: async () => {
++      const { data } = await getEmbyLibraries({ throwOnError: true });
++      return data;
++    },
++    enabled: configured && !unsaved && !saving,
++    retry: false,
++    gcTime: 0,
++    refetchOnWindowFocus: false,
++  });
++  const scrape = useMutation({
++    ...scrapeEmbyActorsMutation(),
++    onSuccess: (response) => {
++      setTaskId(response.task_id);
++      void queryClient.invalidateQueries({ queryKey: listTasksQueryKey() });
++      notifications.show({ message: t("embyActors.started"), color: "blue" });
++    },
++    onError: (error) =>
++      notifications.show({
++        message: extractErrorMessage(error, t("embyActors.failed")),
++        color: "red",
++      }),
++  });
++  const blocked =
++    !configured ||
++    unsaved ||
++    saving ||
++    libraries.isFetching ||
++    libraries.isError ||
++    scrape.isPending;
++  const request = embyActorRequest(libraries.data, selected, force, blocked);
++  return (
++    <Stack gap="md">
++      <Divider />
++      <Text fw={600}>{t("embyActors.title")}</Text>
++      <Text size="sm" c="dimmed">
++        {t("embyActors.description")}
++      </Text>
++      {(!configured || unsaved || saving) && (
++        <Text size="sm" c="dimmed">
++          {t("embyActors.saveFirst")}
++        </Text>
++      )}
++      {libraries.isError && (
++        <Alert color="red">
++          {extractErrorMessage(libraries.error, t("embyActors.loadFailed"))}
++        </Alert>
++      )}
++      <MultiSelect
++        label={t("embyActors.libraries")}
++        placeholder={
++          libraries.isFetching ? t("embyActors.loading") : t("embyActors.selectLibraries")
++        }
++        data={(libraries.data?.libraries ?? []).map((library) => ({
++          value: library.id,
++          label: library.name,
++        }))}
++        value={selected}
++        onChange={setSelected}
++        searchable
++        clearable
++        disabled={blocked}
++        nothingFoundMessage={t("embyActors.noLibraries")}
++      />
++      <Switch
++        label={t("embyActors.overwrite")}
++        description={t("embyActors.overwriteDescription")}
++        checked={force}
++        onChange={(event) => setForce(event.currentTarget.checked)}
++        disabled={blocked}
++      />
++      <Group>
++        <Button
++          type="button"
++          variant="default"
++          loading={libraries.isFetching}
++          disabled={!configured || unsaved || saving || scrape.isPending}
++          onClick={() => {
++            setSelected([]);
++            void libraries.refetch();
++          }}
++        >
++          {t("embyActors.refresh")}
++        </Button>
++        <Button
++          type="button"
++          loading={scrape.isPending}
++          disabled={request === null}
++          onClick={() => {
++            if (request !== null) scrape.mutate({ body: request });
++          }}
++        >
++          {t("embyActors.start")}
++        </Button>
++        {taskId !== null && (
++          <Button
++            renderRoot={(props) => (
++              <Link {...props} to="/tasks" search={{ type: ["emby_actor_scrape"], page: 1 }} />
++            )}
++            variant="light"
++          >
++            {t("embyActors.viewTask", { id: taskId })}
++          </Button>
++        )}
++      </Group>
++    </Stack>
++  );
++}
+diff --git a/web/src/components/media/liu1443452494-emby-actors.ts b/web/src/components/media/liu1443452494-emby-actors.ts
+new file mode 100644
+index 00000000..3221d976
+--- /dev/null
++++ b/web/src/components/media/liu1443452494-emby-actors.ts
+@@ -0,0 +1,35 @@
++import type {
++  EmbyActorScrapePayload,
++  EmbyLibrariesResponse,
++  MediaServerConfig,
++} from "../../client/types.gen";
++
++/** 连接参数的任一变化都使旧媒体库选择失效，密钥不进入查询缓存键。 */
++export function sameEmbyConnection(
++  first: MediaServerConfig | undefined,
++  second: MediaServerConfig | undefined,
++): boolean {
++  return (
++    first?.kind === second?.kind &&
++    first?.url === second?.url &&
++    first?.api_key === second?.api_key &&
++    first?.verify_tls === second?.verify_tls
++  );
++}
++
++/** 提交时再次检查选择，避免刷新、未保存配置或失效媒体库绕过按钮状态。 */
++export function embyActorRequest(
++  libraries: EmbyLibrariesResponse | undefined,
++  selected: readonly string[],
++  force: boolean,
++  blocked: boolean,
++): EmbyActorScrapePayload | null {
++  if (blocked || !libraries || selected.length === 0) return null;
++  const available = new Set(libraries.libraries.map((library) => library.id));
++  if (selected.some((id) => !available.has(id))) return null;
++  return {
++    library_ids: [...new Set(selected)],
++    server_key: libraries.server_key,
++    force,
++  };
++}
+diff --git a/web/src/components/schema-form/schema-form.tsx b/web/src/components/schema-form/schema-form.tsx
+index f299b6c2..960ecdad 100644
+--- a/web/src/components/schema-form/schema-form.tsx
++++ b/web/src/components/schema-form/schema-form.tsx
+@@ -151,6 +151,8 @@ interface SchemaFormProps {
+    * - `grid`: consecutive short scalars share a 2-col row on `sm+`.
+    */
+   fieldLayout?: "stack" | "grid";
++  /** 附加操作读取真实的未保存状态，避免使用尚未保存的连接配置。 */
++  renderFooter?: (dirty: boolean) => ReactNode;
+ }
+ 
+ export function SchemaForm({
+@@ -165,6 +167,7 @@ export function SchemaForm({
+   submitLabel,
+   submitDisabled = false,
+   fieldLayout = "stack",
++  renderFooter,
+ }: SchemaFormProps) {
+   const { t } = useTranslation("common");
+   const formId = useId();
+@@ -326,6 +329,17 @@ export function SchemaForm({
+       }}
+     >
+       <Stack gap={0}>{fieldBlocks}</Stack>
++      {renderFooter && (
++        <form.Subscribe
++          selector={(state) => {
++            const current =
++              isRecord(state.values) && isRecord(state.values[prefix]) ? state.values[prefix] : {};
++            return !deepEqual(encodeFormBody(schema, { ...current }), baseline);
++          }}
++        >
++          {(dirty) => renderFooter(dirty)}
++        </form.Subscribe>
++      )}
+       {actions}
+     </Stack>
+   );
+diff --git a/web/src/components/task/task-result-panel.tsx b/web/src/components/task/task-result-panel.tsx
+index 2e62a6ec..d8f7c49b 100644
+--- a/web/src/components/task/task-result-panel.tsx
++++ b/web/src/components/task/task-result-panel.tsx
+@@ -81,6 +81,8 @@ function resultBranch(result: TaskResult, failed: boolean): ReactNode {
+       return <BenchmarkFigures result={result} />;
+     case "actor_push":
+       return <ActorPushSummary result={result} />;
++    case "emby_actor_scrape":
++      return <EmbyActorSummary result={result} />;
+     case "refresh":
+     case "cleanup":
+     case "upscale":
+@@ -118,6 +120,46 @@ function SemanticCounts({ result }: { result: Extract<TaskResult, { type: "seman
+   );
+ }
+ 
++function EmbyActorSummary({
++  result,
++}: {
++  result: Extract<TaskResult, { type: "emby_actor_scrape" }>;
++}) {
++  const { t } = useTranslation("tasks");
++  return (
++    <Stack gap="xs">
++      <Group gap="xs">
++        <Badge variant="light" color="blue">
++          {t("result.embyActorsProcessed", {
++            value: result.processed ?? 0,
++            total: result.requested ?? 0,
++          })}
++        </Badge>
++        <Badge variant="light" color="teal">
++          {t("result.actorPushUpdated", { value: result.updated ?? 0 })}
++        </Badge>
++        <Badge variant="light" color="teal">
++          {t("result.actorPushImages", { value: result.images ?? 0 })}
++        </Badge>
++        <Badge variant="light" color="gray">
++          {t("result.actorPushSkipped", { value: result.skipped ?? 0 })}
++        </Badge>
++        <Badge variant="light" color="yellow">
++          {t("result.actorPushNotFound", { value: result.not_found ?? 0 })}
++        </Badge>
++        <Badge variant="light" color="red">
++          {t("result.actorPushFailed", { value: result.failed ?? 0 })}
++        </Badge>
++      </Group>
++      {(result.failures ?? []).map((failure, index) => (
++        <Text key={index} size="sm" c="red">
++          {failure}
++        </Text>
++      ))}
++    </Stack>
++  );
++}
++
+ function ActorPushSummary({ result }: { result: Extract<TaskResult, { type: "actor_push" }> }) {
+   const { t } = useTranslation("tasks");
+   return (
+diff --git a/web/src/i18n/locales/en/settings.json b/web/src/i18n/locales/en/settings.json
+index 6fd88354..d9010431 100644
+--- a/web/src/i18n/locales/en/settings.json
++++ b/web/src/i18n/locales/en/settings.json
+@@ -14,6 +14,23 @@
+     "watermark": "Watermark",
+     "semantic": "Semantic Search"
+   },
++  "embyActors": {
++    "title": "刮削 Emby 媒体库演员",
++    "description": "读取所选媒体库的演员，刮削后直接更新 Emby。共用演员的其他媒体库也会显示更新后的资料。",
++    "started": "演员刮削任务已提交",
++    "failed": "演员刮削任务提交失败",
++    "saveFirst": "请先填写并保存 Emby 连接配置，再选择媒体库。",
++    "loadFailed": "读取 Emby 媒体库失败",
++    "libraries": "Emby 媒体库",
++    "loading": "正在读取媒体库…",
++    "selectLibraries": "请选择一个或多个媒体库",
++    "noLibraries": "没有可选的媒体库",
++    "overwrite": "覆盖已有资料",
++    "overwriteDescription": "关闭时逐项补充缺失的头像、简介、生日和出生地；开启时覆盖成功刮削到的内容，未取得的字段保留原值。",
++    "refresh": "刷新媒体库",
++    "start": "刮削媒体库演员",
++    "viewTask": "查看任务 #{{id}}"
++  },
+   "config": {
+     "loadError": "Failed to load configuration"
+   },
+diff --git a/web/src/i18n/locales/en/tasks.json b/web/src/i18n/locales/en/tasks.json
+index 81229d32..85471109 100644
+--- a/web/src/i18n/locales/en/tasks.json
++++ b/web/src/i18n/locales/en/tasks.json
+@@ -82,7 +82,8 @@
+     "delete": "Delete",
+     "semantic_index": "Semantic index",
+     "semantic_benchmark": "Benchmark",
+-    "actor_push": "Push actors"
++    "actor_push": "Push actors",
++    "emby_actor_scrape": "Emby 演员刮削"
+   },
+   "loadMoreChildren": "Load more ({{count}})",
+   "loadMoreChildren_one": "Load more ({{count}})",
+@@ -170,7 +171,8 @@
+     "actorPushNotFound": "Not found {{value}}",
+     "actorPushNoImage": "No image {{value}}",
+     "actorPushMissing": "Missing actors {{value}}",
+-    "actorPushFailed": "Failed {{value}}"
++    "actorPushFailed": "Failed {{value}}",
++    "embyActorsProcessed": "已处理 {{value}} / {{total}}"
+   },
+   "status": {
+     "queued": "Queued",
+@@ -194,7 +196,8 @@
+       "delete": "Delete",
+       "semantic_index": "Semantic index",
+       "semantic_benchmark": "Benchmark",
+-      "actor_push": "Push actors"
++      "actor_push": "Push actors",
++      "emby_actor_scrape": "Emby 演员刮削"
+     },
+     "cleanup": {
+       "remove_missing_files": {
+diff --git a/web/src/i18n/locales/zh-CN/settings.json b/web/src/i18n/locales/zh-CN/settings.json
+index 0dbf2fe2..4a8a5f95 100644
+--- a/web/src/i18n/locales/zh-CN/settings.json
++++ b/web/src/i18n/locales/zh-CN/settings.json
+@@ -14,6 +14,23 @@
+     "watermark": "水印",
+     "semantic": "语义检索"
+   },
++  "embyActors": {
++    "title": "刮削 Emby 媒体库演员",
++    "description": "读取所选媒体库的演员，刮削后直接更新 Emby。共用演员的其他媒体库也会显示更新后的资料。",
++    "started": "演员刮削任务已提交",
++    "failed": "演员刮削任务提交失败",
++    "saveFirst": "请先填写并保存 Emby 连接配置，再选择媒体库。",
++    "loadFailed": "读取 Emby 媒体库失败",
++    "libraries": "Emby 媒体库",
++    "loading": "正在读取媒体库…",
++    "selectLibraries": "请选择一个或多个媒体库",
++    "noLibraries": "没有可选的媒体库",
++    "overwrite": "覆盖已有资料",
++    "overwriteDescription": "关闭时逐项补充缺失的头像、简介、生日和出生地；开启时覆盖成功刮削到的内容，未取得的字段保留原值。",
++    "refresh": "刷新媒体库",
++    "start": "刮削媒体库演员",
++    "viewTask": "查看任务 #{{id}}"
++  },
+   "config": {
+     "loadError": "加载配置失败"
+   },
+diff --git a/web/src/i18n/locales/zh-CN/tasks.json b/web/src/i18n/locales/zh-CN/tasks.json
+index 4084a024..b9f1dbb4 100644
+--- a/web/src/i18n/locales/zh-CN/tasks.json
++++ b/web/src/i18n/locales/zh-CN/tasks.json
+@@ -70,7 +70,8 @@
+     "delete": "删除",
+     "semantic_index": "语义索引",
+     "semantic_benchmark": "性能测试",
+-    "actor_push": "推送演员"
++    "actor_push": "推送演员",
++    "emby_actor_scrape": "Emby 演员刮削"
+   },
+   "loadMoreChildren": "加载更多 ({{count}})",
+   "logView": {
+@@ -139,7 +140,8 @@
+     "actorPushNotFound": "未找到 {{value}}",
+     "actorPushNoImage": "无头像 {{value}}",
+     "actorPushMissing": "缺少演员 {{value}}",
+-    "actorPushFailed": "失败 {{value}}"
++    "actorPushFailed": "失败 {{value}}",
++    "embyActorsProcessed": "已处理 {{value}} / {{total}}"
+   },
+   "status": {
+     "queued": "排队中",
+@@ -162,7 +164,8 @@
+       "delete": "删除",
+       "semantic_index": "语义索引",
+       "semantic_benchmark": "性能测试",
+-      "actor_push": "推送演员"
++      "actor_push": "推送演员",
++      "emby_actor_scrape": "Emby 演员刮削"
+     },
+     "cleanup": {
+       "remove_missing_files": {
+diff --git a/web/src/lib/exhaustive-maps.ts b/web/src/lib/exhaustive-maps.ts
+index a8339f80..1ba7e3fb 100644
+--- a/web/src/lib/exhaustive-maps.ts
++++ b/web/src/lib/exhaustive-maps.ts
+@@ -98,6 +98,7 @@ export const TASK_TYPES = exhaustiveTuple<TaskType>()(
+   "semantic_index",
+   "semantic_benchmark",
+   "actor_push",
++  "emby_actor_scrape",
+ );
+ 
+ export const DOWNLOADABLE_RESOURCES = exhaustiveTuple<DownloadableResource>()(
+diff --git a/web/src/lib/task/display.ts b/web/src/lib/task/display.ts
+index 3051dd87..b3bf569b 100644
+--- a/web/src/lib/task/display.ts
++++ b/web/src/lib/task/display.ts
+@@ -41,6 +41,7 @@ export const TASK_ICONS: Record<TaskType, Icon> = exhaustiveRecord<TaskType>()({
+   semantic_index: IconSparkles,
+   semantic_benchmark: IconGauge,
+   actor_push: IconCloudUpload,
++  emby_actor_scrape: IconCloudUpload,
+ });
+ 
+ const EMPTY_CHILD_STATUS: Required<TaskChildStatusCounts> = {
+diff --git a/web/src/routes/settings.tsx b/web/src/routes/settings.tsx
+index a523b066..30e76b7c 100644
+--- a/web/src/routes/settings.tsx
++++ b/web/src/routes/settings.tsx
+@@ -16,6 +16,7 @@ import { createFileRoute } from "@tanstack/react-router";
+ import { useMemo } from "react";
+ import { useTranslation } from "react-i18next";
+ import { z } from "zod";
++import { EmbyActorsPanel } from "@/components/media/liu1443452494-emby-actors-panel";
+ import { isHidden, resolveSchema } from "@/components/schema-form/schema";
+ import { SchemaForm } from "@/components/schema-form/schema-form";
+ import { useConfig, useConfigSchema, useUpdateConfig } from "@/hooks/use-config";
+@@ -127,6 +128,17 @@ function SettingsPage() {
+                     actionsPlacement="affix"
+                     onSave={(patch) => saveMutation.mutate({ body: { [key]: patch } })}
+                     saving={saveMutation.isPending}
++                    renderFooter={
++                      key === "media_server"
++                        ? (dirty) => (
++                            <EmbyActorsPanel
++                              server={values.media_server}
++                              unsaved={dirty}
++                              saving={saveMutation.isPending}
++                            />
++                          )
++                        : undefined
++                    }
+                   />
+                 </Paper>
+               );
+diff --git a/web/tests/emby-actors.test.mjs b/web/tests/emby-actors.test.mjs
+new file mode 100644
+index 00000000..bf055e02
+--- /dev/null
++++ b/web/tests/emby-actors.test.mjs
+@@ -0,0 +1,58 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import {
++  embyActorRequest,
++  sameEmbyConnection,
++} from "../src/components/media/liu1443452494-emby-actors.ts";
++
++const connection = {
++  kind: "emby",
++  url: "https://emby.test",
++  api_key: "test-key",
++  verify_tls: true,
++};
++
++for (const change of [
++  { kind: "jellyfin" },
++  { url: "https://another.test" },
++  { api_key: "changed-key" },
++  { verify_tls: false },
++]) {
++  test(`修改连接参数后废弃旧媒体库选择：${Object.keys(change)[0]}`, () => {
++    assert.equal(sameEmbyConnection(connection, { ...connection, ...change }), false);
++  });
++}
++
++test("读取相同配置不会误清除当前媒体库选择", () => {
++  assert.equal(sameEmbyConnection(connection, { ...connection }), true);
++  assert.equal(sameEmbyConnection(undefined, connection), false);
++});
++
++const libraries = {
++  server_key: "a".repeat(64),
++  libraries: [
++    { id: "one", name: "媒体库一" },
++    { id: "two", name: "媒体库二" },
++  ],
++};
++
++for (const { name, data, selected, blocked } of [
++  { name: "尚未读取媒体库", data: undefined, selected: ["one"], blocked: false },
++  { name: "未选择媒体库", data: libraries, selected: [], blocked: false },
++  { name: "选择中包含已删除媒体库", data: libraries, selected: ["one", "removed"], blocked: false },
++  { name: "配置未保存或请求尚未完成", data: libraries, selected: ["one"], blocked: true },
++]) {
++  test(`${name}时不能提交任务`, () => {
++    assert.equal(embyActorRequest(data, selected, false, blocked), null);
++  });
++}
++
++for (const force of [false, true]) {
++  test(`${force ? "覆盖" : "补充"}模式只提交所选媒体库和服务器摘要`, () => {
++    assert.deepEqual(embyActorRequest(libraries, ["two", "two"], force, false), {
++      library_ids: ["two"],
++      server_key: libraries.server_key,
++      force,
++    });
++  });
++}
