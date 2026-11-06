@@ -70,6 +70,7 @@ def prepare(root: Path, directory: Path, version: str) -> None:
         "0013-poster-preview.patch",
         "0014-media-reorganize.patch",
         "0015-migration-merge.patch",
+        "0016-western-full-cover-poster.patch",
     )
     actual = {path.name for path in directory.glob("*.patch")}
     if actual != set(patches):
@@ -121,6 +122,7 @@ def run_tests(root: Path) -> None:
         "tests/db/test_liu1443452494_watermarks.py",
         "tests/db/test_liu1443452494_watermark_migration.py",
         "tests/db/test_drop_retired_trash_tasks_migration.py",
+        "tests/api/test_config_routes.py::TestConfigHttp::test_get_patch_schema",
         "tests/api/test_liu1443452494_watermarks.py",
         "tests/api/test_media.py",
         "tests/handlers/test_liu1443452494_watermarks.py",
@@ -137,11 +139,13 @@ def run_tests(root: Path) -> None:
         "tests/api/test_tasks.py::TestSubmitTask::test_submit_payloads_and_rejects",
         "tests/handlers/test_file_ops.py",
         "tests/handlers/test_liu1443452494_library_images.py",
+        "tests/handlers/test_liu1443452494_western_poster.py",
         "tests/handlers/test_liu1443452494_library_jpeg.py",
         "tests/handlers/test_organize.py",
         "tests/media/test_nfo_write.py",
         "tests/media/test_liu1443452494_nfo.py",
         "tests/media/test_liu1443452494_image_quality.py",
+        "tests/media/test_liu1443452494_western_poster.py",
         "tests/media/test_liu1443452494_posters.py",
         "tests/media/test_liu1443452494_search_stats.py",
         "tests/crawlers/test_liu1443452494_freejavbt.py",
