@@ -1,0 +1,728 @@
+diff --git a/docs/dev/data-model.md b/docs/dev/data-model.md
+index d6ecd8ff..431e6ea1 100644
+--- a/docs/dev/data-model.md
++++ b/docs/dev/data-model.md
+@@ -27,6 +27,8 @@
+ 
+ 类型 (`content_type`) 是**番号的属性**, 落在 `Metadata`: 只在条目创建时落定 (有发现路径时随其路径关键词, 否则只依据番号), 番号不可改, 因此不随文件增删或后续刮削漂移; 它决定刮削路由, 也供「类型」筛选与有码 / 无码角标使用, 不进对外 PATCH. `ContentType.chinese` 是国产, 不是中字.
+ 
++整理用番号只覆盖路径模板和 NFO 的番号部分, 原始 `Metadata.number` 继续承担刮削查询、唯一性与历史关联; 来源快照和 STRM 正文的身份字段不使用整理用番号. REST 编辑经 `src/amane/api/support/liu1443452494_organize_number.py::update_organize_number` 在库锁内记录旧产物再保存, 原番号不变使产物追踪跨改名继续有效; 执行边界见 [task-system.md](task-system.md#落盘执行).
++
+ 文件相位 (`mosaic` / `definition` 与中字的文件名标记列) 是 **path 的投影**, 落在 `MediaFile`: 创建与修改 path 时用同一次 `parse_file_info` 回填, 不纳入对外 PATCH; `cd` 只用于 ORGANIZE 分集配对, 不落库. `mosaic` 只写入文件名与目录整段词表命中的马赛克标记 (无码 / 破解 / 流出); 同一次解析命中多个标记时取破解, 其次流出, 再次无码. 中字是两个来源的并集: 文件名的中字标记 (`has_subtitle_in_name`, path 的投影) 与视频同目录存在库 `subtitle_extensions` 命中的字幕 (`has_external_subtitle`, 在登记 / 修改 path / 库扫描时各检查一次; 外挂字幕只在整理落盘时作为 `parse_file_info` 的入参并进 `FileInfo.has_subtitle`, 不改变入库的路径投影). 两者都不校验语言文字, 与 ORGANIZE 的字幕配对口径相同; 目录读取不到时按无字幕处理. 只删除字幕不会触发复查, 视频重新登记、更换 path 或所在库被扫描时才回退. 并集在 Python 是 `MediaFile.has_subtitle` (property), SQL 侧必须改用 `db/models.py::has_subtitle_predicate`, 两处口径必须一致.
+ 
+ Metadata 列表与 `/media` 文件行的角标与筛选: 有码 / 无码取条目类型 (没有挂载文件也成立), 无码再并上「存在无码标记的文件」; 中字 / 分辨率 / 破解 / 流出按关联 EXISTS 或页级聚合 (`file_phase`) 判定, 任一挂载文件具备即亮, `definition` 取最高档; 布尔取值的口径见 [api.md](api.md). 文件行同样返回派生的 `censored` / `uncensored`: `censored` 取这一份文件的性质 (带无码标记的副本不算有码), `uncensored` 与列表筛选同口径, 未绑定条目的文件只看自身标记. VR 标识与 `GET /metadata` 的 `vr` 筛选不来自文件相位, 也不物化: 只依据 `Metadata.tags` 与 `parsing/file_info.py::VR_TAGS` 的整体相等判定, 番号不参与; Python 与 SQL 两侧共用同一份词表 (`db/models.py::metadata_vr_predicate`, 用法同 `has_subtitle_predicate`), 因此重命名 / 合并标签后判定立即变化, 无需回填. 代价是判定随 `tags` 的单源取值: 字段链首个非空站点不给 VR 标签的条目判为否.
+diff --git a/docs/dev/database.md b/docs/dev/database.md
+index a1d4d79a..6e13b1e4 100644
+--- a/docs/dev/database.md
++++ b/docs/dev/database.md
+@@ -42,7 +42,7 @@ pysqlite 只在 DML 之前发出 `BEGIN`, 纯 SELECT 落在事务之外 (SQLAlch
+ 2. **落后 head**: 先用 sqlite3 **online backup API** 写 `{db}.pre-migrate-{oldrev}-{utc}.bak` (含 WAL 一致快照; 同目录保留最近 5 份), 再升级.
+ 3. **迁移连接**单独 `autocommit=False` + Alembic `transactional_ddl=True`: 单次 revision 内 DDL 与 `alembic_version` 同事务, 失败则回滚, 避免「表已创建但版本未升」的半成品. 业务连接不修改事务模式, 仍只开 WAL + FK.
+ 
+-自用水印与上游迁移通过 `src/amane/db/migrations/versions/0bbd0974b7c7_合并上游清理任务与自用水印迁移.py::down_revision` 合并为单一终点; 已发布迁移的标识与父版本保持稳定, 保证既有数据库补齐尚未执行的分支.
++自用水印与上游迁移通过 `src/amane/db/migrations/versions/0bbd0974b7c7_合并上游清理任务与自用水印迁移.py::down_revision` 合并分支; 后续迁移沿合并节点线性追加, 已发布迁移的标识与父版本保持稳定.
+ 
+ 迁移内不允许文件系统 I/O 与其它无界等待: 整条链共用一个事务, 中止即整体回滚、重试仍从零开始, 而网盘挂载点上逐目录列举会把启动阻塞数分钟以上且没有可见进度. 需要遍历磁盘的回填由运行期承担 (如 `REFRESH` 库扫描). 迁移内也不允许中途 `commit()`: DDL 会随之提前落盘, 而 `alembic_version` 在 revision 返回后才推进, 失败后重跑报 `duplicate column name`.
+ 
+diff --git a/docs/dev/task-system.md b/docs/dev/task-system.md
+index 79be0b5d..b8f34da0 100644
+--- a/docs/dev/task-system.md
++++ b/docs/dev/task-system.md
+@@ -94,7 +94,7 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
+ 
+ ## 落盘执行
+ 
+-所有整理入口在 `src/amane/handlers/file.py::apply_file_operations` 合成有效水印. 编辑过的文件通过 `src/amane/organize/watermark_outputs.py::capture_output_baseline` 和 `finish_output_snapshot` 记录产物位置, 新产物成功后才删除被替代且指纹未变的旧文件, 仅清除因此腾空的目录. 独立元数据目录内已记录的字幕经 `src/amane/organize/subtitles.py::place_subtitles` 按库配置重新放置; 不递归删除目录, 其它版本共用路径和外部修改的文件保留. 固定模板共用目标时报告失败, 原图缺失或输出失败时保留旧产物, 不使用已有水印图作为原图. 未编辑文件保持原整理流程.
++所有整理入口在 `src/amane/handlers/file.py::apply_file_operations` 合成有效水印. 水印或整理用番号编辑通过 `src/amane/organize/watermark_outputs.py::capture_output_baseline` 和 `finish_output_snapshot` 追踪产物, 新产物成功后才删除被替代且指纹未变的旧文件, 仅清除因此腾空的目录. 独立目录内已记录的字幕经 `src/amane/organize/subtitles.py::place_subtitles` 按库配置重新放置; 不递归删除目录, 其它版本共用路径和外部修改的文件保留. 共用目标时报告失败, 原图缺失或输出失败时保留旧产物, 不使用已有水印图作为原图. 未编辑文件保持原整理流程.
+ 
+ `execute_file_operations` 是落盘执行单元, 仅 ORGANIZE 经 `apply_file_operations` 调用. 不变量:
+ 
+diff --git a/src/amane/api/models/metadata.py b/src/amane/api/models/metadata.py
+index 33284655..30612908 100644
+--- a/src/amane/api/models/metadata.py
++++ b/src/amane/api/models/metadata.py
+@@ -31,6 +31,7 @@ class MetadataResponse(BaseModel):
+     id: int
+     number: str
+     content_type: ContentType
++    organize_number: str | None = None
+     title: str | None = None
+     actors: list[str] = []
+     studio: str | None = None
+diff --git a/src/amane/api/routes/metadata.py b/src/amane/api/routes/metadata.py
+index 53e2e9d2..b5aaa995 100644
+--- a/src/amane/api/routes/metadata.py
++++ b/src/amane/api/routes/metadata.py
+@@ -39,6 +39,7 @@ from ..models import (
+     UserTagResponse,
+     to_media_file_response,
+ )
++from ..support.liu1443452494_organize_number import update_organize_number
+ from ..support.metadata_filters import MetadataFilters, parse_metadata_filters, require_known_definition
+ from .saved_queries import resolve_saved_query_id_subquery
+ 
+@@ -325,8 +326,12 @@ async def get_metadata(metadata_id: int, repo: RepoDep) -> MetadataDetailRespons
+ 
+ 
+ @router.patch("/{metadata_id}")
+-async def update_metadata(metadata_id: int, req: PartialMetadata, repo: RepoDep) -> MetadataResponse:
++async def update_metadata(
++    metadata_id: int, req: PartialMetadata, repo: RepoDep, runtime: RuntimeDep
++) -> MetadataResponse:
+     updates = cast("MetadataFields", {k: v for k, v in req.model_dump().items() if v is not None})
++    if "organize_number" in req.model_fields_set:
++        updates["organize_number"] = req.organize_number
+     if not updates:
+         raise HTTPException(status_code=422, detail="没有需要修改的字段")
+     if "release" in updates:
+@@ -338,7 +343,11 @@ async def update_metadata(metadata_id: int, req: PartialMetadata, repo: RepoDep)
+             updates["release"] = normalized
+         else:
+             raise HTTPException(status_code=422, detail="发行日期必须为 YYYY-MM-DD")
+-    metadata = await repo.update_metadata(metadata_id, mode=WriteMode.MANUAL, **updates)
++    metadata = (
++        await update_organize_number(metadata_id, updates, repo, runtime)
++        if "organize_number" in updates
++        else await repo.update_metadata(metadata_id, mode=WriteMode.MANUAL, **updates)
++    )
+     if metadata is None:
+         raise HTTPException(status_code=404, detail="影片不存在")
+     logger.info("metadata updated", metadata_id=metadata_id, fields=list(updates.keys()))
+diff --git a/src/amane/api/support/liu1443452494_organize_number.py b/src/amane/api/support/liu1443452494_organize_number.py
+new file mode 100644
+index 00000000..1a41d55d
+--- /dev/null
++++ b/src/amane/api/support/liu1443452494_organize_number.py
+@@ -0,0 +1,56 @@
++"""修改整理用番号前记录旧产物，保存过程不移动或重写媒体文件。"""
++
++from contextlib import AsyncExitStack
++from pathlib import Path
++from typing import TYPE_CHECKING
++
++import structlog
++
++from ...db.repo_types import WriteMode
++from ...db.watermarks import effective_file_info
++from ...organize.watermark_outputs import OutputSnapshot, capture_output_baseline
++from ...parsing import parse_file_info
++
++if TYPE_CHECKING:
++    from ...app.runtime import AppRuntime
++    from ...db.models import Metadata
++    from ...db.repo_types import MetadataFields
++    from ...db.repository import Repository
++
++
++async def update_organize_number(
++    metadata_id: int, updates: MetadataFields, repo: Repository, runtime: AppRuntime
++) -> Metadata | None:
++    files = await repo.get_media_by_metadata_id(metadata_id)
++    # 与整理共用库锁，按固定顺序取得多个库的锁，避免旧产物在记录期间被移动。
++    async with AsyncExitStack() as stack:
++        for library_id in sorted({media.library_id for media in files}):
++            await stack.enter_async_context(await runtime.library_locks.get(library_id))
++        metadata = await repo.get_metadata(metadata_id)
++        if metadata is None:
++            return None
++        if "organize_number" in updates and updates["organize_number"] != metadata.organize_number:
++            actor_genders = {actor.name: actor.gender for actor in await repo.get_actors_by_names(metadata.actors)}
++            for media in await repo.get_media_by_metadata_id(metadata_id):
++                if media.id is None or media.organized_outputs is not None:
++                    continue
++                baseline = OutputSnapshot(number=metadata.number).model_dump_json()
++                library = await repo.get_library(media.library_id)
++                if library is not None:
++                    try:
++                        baseline = await capture_output_baseline(
++                            library,
++                            metadata,
++                            Path(media.path),
++                            effective_file_info(
++                                media, parse_file_info(media.path, has_external_subtitle=media.has_external_subtitle)
++                            ),
++                            safe_dirs=runtime.safe_dirs,
++                            actor_genders=actor_genders,
++                        )
++                    except (OSError, ValueError) as exc:
++                        structlog.get_logger().warning(
++                            "整理改名前的产物无法确认，保留旧文件", media_id=media.id, error=str(exc)
++                        )
++                await repo.update_media_file(media.id, organized_outputs=baseline)
++        return await repo.update_metadata(metadata_id, mode=WriteMode.MANUAL, **updates)
+diff --git "a/src/amane/db/migrations/versions/c4b12eeaee74_\345\242\236\345\212\240\345\275\261\347\211\207\346\225\264\347\220\206\347\224\250\347\225\252\345\217\267.py" "b/src/amane/db/migrations/versions/c4b12eeaee74_\345\242\236\345\212\240\345\275\261\347\211\207\346\225\264\347\220\206\347\224\250\347\225\252\345\217\267.py"
+new file mode 100644
+index 00000000..c4608acb
+--- /dev/null
++++ "b/src/amane/db/migrations/versions/c4b12eeaee74_\345\242\236\345\212\240\345\275\261\347\211\207\346\225\264\347\220\206\347\224\250\347\225\252\345\217\267.py"
+@@ -0,0 +1,24 @@
++"""增加影片整理用番号。
++
++迁移版本：c4b12eeaee74
++父版本：0bbd0974b7c7
++创建时间：2026-11-06 18:32:34.493359
++"""
++
++from collections.abc import Sequence
++
++import sqlalchemy as sa
++from alembic import op
++
++revision: str = "c4b12eeaee74"
++down_revision: str | None = "0bbd0974b7c7"
++branch_labels: str | Sequence[str] | None = None
++depends_on: str | Sequence[str] | None = None
++
++
++def upgrade() -> None:
++    op.add_column("metadata", sa.Column("organize_number", sa.String(), nullable=True))
++
++
++def downgrade() -> None:
++    op.drop_column("metadata", "organize_number")
+diff --git a/src/amane/db/models.py b/src/amane/db/models.py
+index db0cd4a0..f6deda35 100644
+--- a/src/amane/db/models.py
++++ b/src/amane/db/models.py
+@@ -1,7 +1,8 @@
+ from datetime import UTC, datetime
+ from enum import StrEnum
+-from typing import Any, NoReturn
++from typing import Annotated, Any, NoReturn
+ 
++from pydantic import AfterValidator
+ from sqlalchemy import Boolean, Column, Index, String, Text, UniqueConstraint, and_, exists, func, or_, text
+ from sqlalchemy.sql.elements import ColumnElement
+ from sqlmodel import JSON, Field, SQLModel, col, select
+@@ -15,6 +16,7 @@ from ..library import (
+     SubtitleExtensions,
+     TrailerPattern,
+ )
++from ..liu1443452494_organize_number import normalize_organize_number
+ from ..organize.path_templates import VIDEO_TEMPLATE_DEFAULT, PathTemplate
+ from ..organize.strm_content import StrmContentTemplate
+ from ..parsing import VR_TAGS, ContentType, Mosaic, MosaicNature, WatermarkMode, is_vr
+@@ -301,6 +303,11 @@ class Metadata(SQLModel, table=True):
+     #: 番号类型; 只在条目创建时落定 (契约见 docs/dev/data-model.md), 不随挂载文件或后续刮削变化, 也不进对外 PATCH.
+     content_type: ContentType = Field(default=ContentType.WESTERN, index=True)
+ 
++    organize_number: Annotated[str | None, AfterValidator(normalize_organize_number)] = Field(
++        default=None,
++        title="整理用番号",
++        description="仅用于整理目录、文件名和 NFO，保存后需重新整理；留空使用原番号，不影响刮削。",
++    )
+     title: str | None = None
+     actors: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+     # studio/publisher/series 同时投影到目录表.
+diff --git a/src/amane/db/repo_types.py b/src/amane/db/repo_types.py
+index 2ac22731..ee29babe 100644
+--- a/src/amane/db/repo_types.py
++++ b/src/amane/db/repo_types.py
+@@ -298,6 +298,7 @@ class ActorBrowseParams(BaseModel):
+ 
+ 
+ class MetadataFields(TypedDict, total=False):
++    organize_number: str | None
+     title: str | None
+     actors: list[str]
+     studio: str | None
+diff --git a/src/amane/db/repos/metadata.py b/src/amane/db/repos/metadata.py
+index 5ebc0040..b6868013 100644
+--- a/src/amane/db/repos/metadata.py
++++ b/src/amane/db/repos/metadata.py
+@@ -11,6 +11,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
+ 
+ from ...enums import ActorGender, MetadataField
+ from ...liu1443452494_metadata_tags import build_metadata_tags
++from ...liu1443452494_organize_number import normalize_organize_number
+ from ...parsing import ContentType, Mosaic, infer_content_type
+ from ...utils.collections import unique_ids
+ from ...utils.text import normalize_long_text
+@@ -454,6 +455,8 @@ class MetadataRepoMixin(RepositoryMixinBase):
+             else:
+                 metadata.locked_fields = _merge_auto_locks(updates, locked)
+             # 显式赋值, 禁止 setattr; 字段集由 MetadataFields 与 Metadata 静态对齐.
++            if "organize_number" in updates:
++                metadata.organize_number = normalize_organize_number(updates["organize_number"])
+             if "title" in updates:
+                 metadata.title = updates["title"]
+             if "actors" in updates:
+diff --git a/src/amane/handlers/file.py b/src/amane/handlers/file.py
+index 74f0f2c0..4062d253 100644
+--- a/src/amane/handlers/file.py
++++ b/src/amane/handlers/file.py
+@@ -279,7 +279,11 @@ async def apply_file_operations(
+         safe_dirs=safe_dirs,
+         actor_genders=actor_genders,
+     )
+-    tracking = media_file.watermark_mode is WatermarkMode.MANUAL or media_file.organized_outputs is not None
++    tracking = (
++        media_file.watermark_mode is WatermarkMode.MANUAL
++        or media_file.organized_outputs is not None
++        or metadata.organize_number is not None
++    )
+     previous = read_output_snapshot(media_file.organized_outputs, metadata.number)
+     kinds = list(copy_resources) if copy_resources is not None else list(LibraryResource)
+     if tracking and media_file.organized_outputs is None:
+diff --git a/src/amane/liu1443452494_organize_number.py b/src/amane/liu1443452494_organize_number.py
+new file mode 100644
+index 00000000..8ea81922
+--- /dev/null
++++ b/src/amane/liu1443452494_organize_number.py
+@@ -0,0 +1,27 @@
++"""整理用番号的文件名校验，不参与刮削番号识别。"""
++
++import ntpath
++
++
++def normalize_organize_number(value: str | None) -> str | None:
++    """允许名称中的空格，空值恢复原番号；拒绝无法作为单个文件名的内容。"""
++    if value is None:
++        return None
++    if any(ord(char) < 32 or ord(char) == 127 for char in value):
++        raise ValueError("整理用番号不能包含换行或控制字符")
++    number = value.strip()
++    if not number:
++        return None
++    if any(char in '<>:"/\\|?*' for char in number):
++        raise ValueError('整理用番号不能包含文件名非法字符：< > : " / \\ | ? *')
++    if number.endswith("."):
++        raise ValueError("整理用番号不能以句点结尾")
++    if ntpath.isreserved(number):
++        raise ValueError("整理用番号不能使用系统保留名称")
++    try:
++        encoded = number.encode("utf-8")
++    except UnicodeEncodeError as exc:
++        raise ValueError("整理用番号包含无法编码为 UTF-8 的字符") from exc
++    if len(encoded) > 200:
++        raise ValueError("整理用番号过长，UTF-8 编码后不能超过 200 字节")
++    return number
+diff --git a/src/amane/media/nfo.py b/src/amane/media/nfo.py
+index 434828f9..948e7cb4 100644
+--- a/src/amane/media/nfo.py
++++ b/src/amane/media/nfo.py
+@@ -58,14 +58,13 @@ async def write_nfo(metadata: Metadata, nfo_path: Path, *, file_info: FileInfo |
+             if year_match:
+                 code.write(f"  <year>{year_match.group(1)}</year>\n")
+ 
+-        code.write(f"  <num>{_escape_xml(metadata.number)}</num>\n")
++        number = metadata.organize_number or metadata.number
++        code.write(f"  <num>{_escape_xml(number)}</num>\n")
+ 
+         if metadata.title:
+-            code.write(f"  <title>{_escape_xml(metadata.number)} {_escape_xml(metadata.title)}</title>\n")
+-            code.write(
+-                f"  <originaltitle>{_escape_xml(metadata.number)} {_escape_xml(metadata.title)}</originaltitle>\n"
+-            )
+-            code.write(f"  <sorttitle>{_escape_xml(metadata.number)} {_escape_xml(metadata.title)}</sorttitle>\n")
++            code.write(f"  <title>{_escape_xml(number)} {_escape_xml(metadata.title)}</title>\n")
++            code.write(f"  <originaltitle>{_escape_xml(number)} {_escape_xml(metadata.title)}</originaltitle>\n")
++            code.write(f"  <sorttitle>{_escape_xml(number)} {_escape_xml(metadata.title)}</sorttitle>\n")
+ 
+         code.write("  <mpaa>JP-18+</mpaa>\n")
+ 
+diff --git a/src/amane/organize/path_templates.py b/src/amane/organize/path_templates.py
+index 3ef81c25..7adab2cd 100644
+--- a/src/amane/organize/path_templates.py
++++ b/src/amane/organize/path_templates.py
+@@ -84,6 +84,7 @@ def resolve_paths(
+         library_root=base_path,
+     )
+ 
++    ctx.variables["number"] = metadata.organize_number or metadata.number
+     # 先渲染视频, 注入 `{video_*}` 后再渲染链接与刮削产物.
+     video = PathEngine(library.video_template).resolve(ctx, base_path, safe_dirs)
+     if path_key(video) == path_key(base_path):
+@@ -165,6 +166,7 @@ def resolve_subtitle_path(
+         actor_genders=actor_genders,
+         library_root=base_path,
+     )
++    ctx.variables["number"] = metadata.organize_number or metadata.number
+     if video_dest is not None:
+         ctx.apply_video(video_dest, base_path)
+     else:
+diff --git a/src/amane/organize/watermark_outputs.py b/src/amane/organize/watermark_outputs.py
+index a3f9347c..8f357478 100644
+--- a/src/amane/organize/watermark_outputs.py
++++ b/src/amane/organize/watermark_outputs.py
+@@ -145,7 +145,7 @@ def capture_output_baseline(
+     )
+     snapshot = OutputSnapshot(number=metadata.number)
+     dest = video_dest(paths.video.parent, paths.video.stem, source)
+-    owns_outputs = _nfo_matches(paths.nfo, metadata.number)
++    owns_outputs = _nfo_matches(paths.nfo, metadata.organize_number or metadata.number)
+     if not owns_outputs and not paths.nfo.exists():
+         with suppress(OSError):
+             owns_outputs = source.samefile(dest)
+diff --git a/tests/api/test_liu1443452494_organize_number.py b/tests/api/test_liu1443452494_organize_number.py
+new file mode 100644
+index 00000000..f9ae6c3c
+--- /dev/null
++++ b/tests/api/test_liu1443452494_organize_number.py
+@@ -0,0 +1,145 @@
++"""编辑后延迟整理、连续改名恢复，以及同号影片分批落盘。"""
++
++from pathlib import Path
++from typing import cast
++from xml.etree import ElementTree
++
++import pytest
++from fastapi import FastAPI
++from httpx2 import AsyncClient
++
++from amane.app.runtime import AppRuntime
++from amane.config import HotSettings, WatermarkConfig
++from amane.db.repository import Repository
++from amane.enums import LibraryResource, MoveMode
++from amane.handlers import OrganizeHandler, OrganizePayload
++from amane.net.http import WebClient
++from amane.organize.watermark_outputs import read_output_snapshot
++from amane.parsing import ContentType
++from tests.media.test_liu1443452494_image_quality import PosterClient, image_bytes
++
++
++async def _organize(handler: OrganizeHandler, library_id: int, media_id: int) -> None:
++    result = await handler.handle(OrganizePayload(library_id=library_id, media_file_ids=[media_id]))
++    assert result.result is not None and result.result.organized == 1 and result.result.failed == 0
++
++
++@pytest.mark.asyncio
++async def test_organize_number_edit_and_separate_batches(
++    client: AsyncClient, app: FastAPI, repo: Repository, safe_path: Path
++) -> None:
++    runtime: AppRuntime = app.state.runtime
++    number = "Vixen.19.05.09"
++    first_name = f"{number}  Jia Episode 1"
++    second_name = f"{number}  Jia Episode 2"
++    url = "https://images.test/cover.jpg"
++    web = PosterClient(images={url: image_bytes((800, 400))})
++    library = await repo.create_library(
++        name="分批整理",
++        path=str(safe_path),
++        move_mode=MoveMode.MOVE,
++        video_template="电影/{number}/{number}.{ext}",
++        nfo_template="{video_dir}/{number}.nfo",
++        subtitle_template="{video_dir}/{number}.srt",
++        subtitle_extensions=[".srt"],
++        copy_resources=[LibraryResource.poster, LibraryResource.fanart],
++    )
++    metadata = await repo.upsert_metadata(
++        number=number,
++        content_type=ContentType.WESTERN,
++        title="第一部标题",
++        plot="第一部剧情",
++        thumb_urls=[url],
++        poster_urls=[url],
++        raw={"javdb": {"number": number, "title": "第一部标题"}},
++    )
++    assert library.id is not None and metadata.id is not None
++    source = safe_path / f"{number}.mp4"
++    source.write_bytes(b"first movie")
++    source.with_suffix(".srt").write_text("第一部字幕", encoding="utf-8")
++    media = await repo.create_media_file(library.id, path=str(source), metadata_id=metadata.id)
++    assert media.id is not None
++    handler = OrganizeHandler(
++        repo,
++        HotSettings(watermark=WatermarkConfig(enabled=False)),
++        runtime.resource_store,
++        web_client=cast("WebClient", web),
++        library_locks=runtime.library_locks,
++    )
++    await _organize(handler, library.id, media.id)
++    old_dir = safe_path / "电影" / number
++    old_nfo = old_dir / f"{number}.nfo"
++    original_nfo = old_nfo.read_bytes()
++    endpoint = f"metadata/{metadata.id}"
++    schema = (await client.get("metadata/schema")).json()
++    assert "organize_number" in schema["properties"] and "number" not in schema["properties"]
++    for invalid in ("../越界", "名称\n", "a" * 201, 3, [], {}):
++        response = await client.patch(endpoint, json={"organize_number": invalid})
++        assert response.status_code == 422 and "organize_number" in response.text
++    assert (await client.patch("metadata/999999", json={"organize_number": first_name})).status_code == 404
++    assert (await client.patch(endpoint, json={"number": first_name})).status_code == 422
++    updated = await client.patch(endpoint, json={"organize_number": f"  {first_name}  "})
++    assert updated.status_code == 200 and updated.json()["organize_number"] == first_name
++    assert updated.json()["number"] == number and updated.json()["title"] == "第一部标题"
++    other_edit = await client.patch(endpoint, json={"plot": "人工修订的第一部剧情"})
++    assert other_edit.status_code == 200 and other_edit.json()["organize_number"] == first_name
++    assert old_nfo.read_bytes() == original_nfo
++    stored = await repo.get_media_file(media.id)
++    assert stored is not None
++    snapshot = stored.organized_outputs
++    assert old_nfo in {output.path for output in read_output_snapshot(snapshot, number).outputs}
++    assert (await client.patch(endpoint, json={"organize_number": first_name})).status_code == 200
++    repeated = await repo.get_media_file(media.id)
++    assert repeated is not None and repeated.organized_outputs == snapshot
++    assert (await client.get("tasks")).json()["total"] == 0
++
++    first_dir = safe_path / "电影" / first_name
++    first_dir.mkdir()
++    conflict = first_dir / f"{first_name}.mp4"
++    conflict.write_bytes(b"other movie")
++    failed = await handler.handle(OrganizePayload(library_id=library.id, media_file_ids=[media.id]))
++    assert failed.result is not None and failed.result.conflicted == 1
++    assert conflict.read_bytes() == b"other movie" and old_nfo.read_bytes() == original_nfo
++    conflict.unlink()
++    await _organize(handler, library.id, media.id)
++    assert not old_dir.exists()
++    assert (first_dir / f"{first_name}.mp4").read_bytes() == b"first movie"
++    assert (first_dir / f"{first_name}.srt").read_text(encoding="utf-8") == "第一部字幕"
++    assert not (first_dir / "thumb.jpg").exists()
++    assert (first_dir / "fanart.jpg").read_bytes() == (first_dir / "poster.jpg").read_bytes()
++    nfo = ElementTree.parse(first_dir / f"{first_name}.nfo").getroot()
++    assert nfo.findtext("num") == first_name and nfo.findtext("title") == f"{first_name} 第一部标题"
++    saved = (await client.get(endpoint)).json()["metadata"]
++    assert saved["number"] == number and saved["raw"] == metadata.raw and saved["plot"] == "人工修订的第一部剧情"
++
++    assert (await client.patch(endpoint, json={"organize_number": "临时名称"})).status_code == 200
++    cleared = await client.patch(endpoint, json={"organize_number": None})
++    assert cleared.status_code == 200 and cleared.json()["organize_number"] is None
++    await _organize(handler, library.id, media.id)
++    assert not first_dir.exists() and not (safe_path / "电影" / "临时名称").exists()
++    assert ElementTree.parse(old_nfo).getroot().findtext("num") == number
++    assert (await client.patch(endpoint, json={"organize_number": first_name})).status_code == 200
++    await _organize(handler, library.id, media.id)
++    first_outputs = {path: path.read_bytes() for path in first_dir.iterdir() if path.is_file()}
++    assert (await client.delete(endpoint)).status_code == 204
++    second = await repo.upsert_metadata(
++        number=number, content_type=ContentType.WESTERN, title="第二部标题", thumb_urls=[url], poster_urls=[url]
++    )
++    assert second.id is not None and second.organize_number is None
++    response = await client.patch(f"metadata/{second.id}", json={"organize_number": second_name})
++    assert response.status_code == 200 and response.json()["organize_number"] == second_name
++    response = await client.patch(f"metadata/{second.id}", json={"organize_number": ""})
++    assert response.status_code == 200 and response.json()["organize_number"] is None
++    source.write_bytes(b"second movie")
++    second_media = await repo.create_media_file(library.id, path=str(source), metadata_id=second.id)
++    assert second_media.id is not None
++    await _organize(handler, library.id, second_media.id)
++    response = await client.patch(f"metadata/{second.id}", json={"organize_number": second_name})
++    assert response.status_code == 200
++    await _organize(handler, library.id, second_media.id)
++    second_dir = safe_path / "电影" / second_name
++    assert (second_dir / f"{second_name}.mp4").read_bytes() == b"second movie"
++    assert (
++        ElementTree.parse(second_dir / f"{second_name}.nfo").getroot().findtext("title") == f"{second_name} 第二部标题"
++    )
++    assert all(path.read_bytes() == data for path, data in first_outputs.items())
+diff --git a/tests/api/test_schema_repo_compat.py b/tests/api/test_schema_repo_compat.py
+index fd3a342c..2d9c0b9b 100644
+--- a/tests/api/test_schema_repo_compat.py
++++ b/tests/api/test_schema_repo_compat.py
+@@ -476,7 +476,7 @@ _ROUNDTRIP = [
+         ),
+     ),
+     (ScheduleUpdates, _make_schedule, "update_schedule", frozenset(), frozenset()),
+-    (MetadataFields, _make_metadata, "update_metadata", frozenset(), frozenset()),
++    (MetadataFields, _make_metadata, "update_metadata", frozenset(), frozenset({"organize_number"})),
+     (FeedUpdates, _make_feed, "update_feed", frozenset(), frozenset()),
+ ]
+ _ROUNDTRIP_IDS = ["media", "library", "schedule", "metadata", "feed"]
+diff --git a/tests/db/test_liu1443452494_organize_number_migration.py b/tests/db/test_liu1443452494_organize_number_migration.py
+new file mode 100644
+index 00000000..9d553d76
+--- /dev/null
++++ b/tests/db/test_liu1443452494_organize_number_migration.py
+@@ -0,0 +1,49 @@
++"""整理用番号迁移保留原番号及其唯一约束。"""
++
++from pathlib import Path
++
++import pytest
++from alembic import command
++from sqlalchemy import create_engine, inspect, text
++from sqlalchemy.exc import IntegrityError
++
++from tests.helpers import alembic_config
++
++
++def test_organize_number_migration_preserves_existing_metadata(tmp_path: Path) -> None:
++    path = tmp_path / "整理番号迁移.db"
++    config = alembic_config(path)
++    command.upgrade(config, "0bbd0974b7c7")
++    engine = create_engine(f"sqlite:///{path}")
++    insert = text(
++        "INSERT INTO metadata (number,title,content_type,actors,directors,tags,poster_urls,thumb_urls,"
++        "trailer_urls,extrafanart_urls,scores,external_ids,source_urls,field_sources,raw,created_at,updated_at) "
++        "VALUES (:number,:title,'WESTERN','[]','[]','[]','[]','[]','[]','{}','{}','{}','{}','{}','{}',"
++        "CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"
++    )
++    try:
++        with engine.begin() as connection:
++            connection.execute(insert, {"number": "Vixen.19.05.09", "title": "原有标题"})
++        command.upgrade(config, "c4b12eeaee74")
++        with engine.begin() as connection:
++            assert connection.execute(text("SELECT number,title,organize_number FROM metadata")).one() == (
++                "Vixen.19.05.09",
++                "原有标题",
++                None,
++            )
++            connection.execute(text("UPDATE metadata SET organize_number='Vixen.19.05.09  Jia Episode 1'"))
++        command.downgrade(config, "0bbd0974b7c7")
++        with engine.connect() as connection:
++            assert "organize_number" not in {column["name"] for column in inspect(connection).get_columns("metadata")}
++            assert connection.execute(text("SELECT number,title FROM metadata")).one() == ("Vixen.19.05.09", "原有标题")
++        with pytest.raises(IntegrityError, match="UNIQUE"), engine.begin() as connection:
++            connection.execute(insert, {"number": "vixen.19.05.09", "title": "重复番号"})
++        command.upgrade(config, "c4b12eeaee74")
++        with engine.connect() as connection:
++            assert connection.execute(text("SELECT number,title,organize_number FROM metadata")).one() == (
++                "Vixen.19.05.09",
++                "原有标题",
++                None,
++            )
++    finally:
++        engine.dispose()
+diff --git a/tests/handlers/test_liu1443452494_organize_number.py b/tests/handlers/test_liu1443452494_organize_number.py
+new file mode 100644
+index 00000000..29eb1ed3
+--- /dev/null
++++ b/tests/handlers/test_liu1443452494_organize_number.py
+@@ -0,0 +1,46 @@
++"""整理用番号不能改变刮削查询或被刮削结果覆盖。"""
++
++import pytest
++
++from amane.config import HotSettings
++from amane.crawlers.models import FetchOptions, MediaMetadata, SearchQuery
++from amane.db.repo_types import WriteMode
++from amane.db.repository import Repository
++from amane.enums import SiteName
++from amane.handlers import ScrapeHandler, ScrapePayload
++from amane.media import ResourceStore
++from amane.parsing import ContentType
++from tests.handlers.test_liu1443452494_image_quality import OriginalCrawler
++from tests.handlers.test_scraper import FakeFactory
++
++
++class NumberRecordingCrawler(OriginalCrawler):
++    def __init__(self, metadata: MediaMetadata) -> None:
++        super().__init__(metadata)
++        self.numbers: list[str] = []
++
++    async def fetch(self, query: SearchQuery, options: FetchOptions | None = None) -> MediaMetadata | None:
++        self.numbers.append(query.number)
++        return await super().fetch(query, options)
++
++
++@pytest.mark.asyncio
++async def test_rescrape_keeps_organize_number_and_uses_original_query(
++    repo: Repository, resource_store: ResourceStore
++) -> None:
++    number = "Vixen.19.05.09"
++    custom = f"{number}  Jia Episode 1"
++    metadata = await repo.upsert_metadata(number=number, content_type=ContentType.WESTERN, title="旧标题")
++    assert metadata.id is not None
++    await repo.update_metadata(metadata.id, mode=WriteMode.MANUAL, organize_number=custom)
++    crawler = NumberRecordingCrawler(MediaMetadata(number=number, title="重新取得的标题"))
++    config = HotSettings()
++    config.scraping.content_routes[ContentType.WESTERN] = [SiteName.DMM]
++    handler = ScrapeHandler(repo, FakeFactory({"dmm": crawler}), resource_store, config)
++    result = await handler.handle(ScrapePayload(number=number, content_type=ContentType.WESTERN, use_cache=set()))
++    assert result.success and crawler.numbers == [number]
++    saved = await repo.get_metadata(metadata.id)
++    assert saved is not None and saved.organize_number == custom and saved.number == number
++    assert saved.title == "重新取得的标题" and saved.raw["dmm"]["number"] == number
++    assert "organize_number" not in saved.raw["dmm"]
++    assert await repo.get_metadata_by_number(custom) is None
+diff --git a/tests/organize/test_liu1443452494_organize_number.py b/tests/organize/test_liu1443452494_organize_number.py
+new file mode 100644
+index 00000000..248e13b7
+--- /dev/null
++++ b/tests/organize/test_liu1443452494_organize_number.py
+@@ -0,0 +1,65 @@
++"""整理用番号的输入边界、路径和 NFO 输出。"""
++
++from pathlib import Path
++from xml.etree import ElementTree
++
++import pytest
++
++from amane.db.models import Library, Metadata
++from amane.liu1443452494_organize_number import normalize_organize_number
++from amane.media import write_nfo
++from amane.organize import resolve_paths
++from amane.organize.strm_content import render_strm_content
++
++
++@pytest.mark.parametrize(
++    ("value", "expected", "error"),
++    [
++        (None, None, None),
++        ("", None, None),
++        ("   ", None, None),
++        ("  Vixen.19.05.09  Jia Episode 1  ", "Vixen.19.05.09  Jia Episode 1", None),
++        ("中文片名 & Episode 2", "中文片名 & Episode 2", None),
++        ("a" * 200, "a" * 200, None),
++        ("中" * 66, "中" * 66, None),
++        ("a" * 201, None, "过长"),
++        ("中" * 67, None, "过长"),
++        *[(value, None, "非法字符") for value in ("../电影", "目录\\电影", "a:b", 'a"b', "a?b", "a*b", "a|b", "a<b>")],
++        *[(value, None, "控制字符") for value in ("电影\n", "\t电影", "电影\x00", "电影\x7f")],
++        *[(value, None, "句点") for value in (".", "..", "电影.")],
++        *[(value, None, "保留名称") for value in ("CON", "nul.mp4", "COM1", "lpt²", "CON .txt", "CONIN$", "CONOUT$")],
++        ("电影\ud800", None, "无法编码为 UTF-8"),
++    ],
++)
++def test_organize_number_validation(value: str | None, expected: str | None, error: str | None) -> None:
++    if error is not None:
++        with pytest.raises(ValueError, match=error):
++            normalize_organize_number(value)
++    else:
++        assert normalize_organize_number(value) == expected
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("custom", [None, "Vixen.19.05.09  Jia Episode 1", "中文片名 & Episode 2"])
++async def test_organize_number_changes_outputs_without_changing_identity(tmp_path: Path, custom: str | None) -> None:
++    metadata = Metadata(
++        number="Vixen.19.05.09",
++        organize_number=custom,
++        title="时光与场所",
++        external_ids={"javdb": "来源标识"},
++    )
++    library = Library(name="测试库", path=str(tmp_path), video_template="{number}/{number}.{ext}")
++    expected = custom or metadata.number
++    paths = resolve_paths(library, metadata, ext="mp4")
++    assert paths.video == tmp_path / expected / f"{expected}.mp4"
++    assert render_strm_content("https://example.test/{number}", paths.video, tmp_path, metadata) == (
++        "https://example.test/Vixen.19.05.09\n"
++    )
++    assert render_strm_content(None, paths.video, tmp_path, metadata) == f"{paths.video}\n"
++    assert await write_nfo(metadata, paths.nfo)
++    root = ElementTree.parse(paths.nfo).getroot()
++    assert root.findtext("num") == expected
++    for field in ("title", "originaltitle", "sorttitle"):
++        assert root.findtext(field) == f"{expected} 时光与场所"
++    assert root.findtext("javdbid") == "来源标识"
++    assert metadata.number == "Vixen.19.05.09" and metadata.title == "时光与场所"
+diff --git a/web/src/i18n/locales/en/metadata.json b/web/src/i18n/locales/en/metadata.json
+index 273dafd6..f3ac5b73 100644
+--- a/web/src/i18n/locales/en/metadata.json
++++ b/web/src/i18n/locales/en/metadata.json
+@@ -325,6 +325,10 @@
+   "confirmDelete": "Delete film #{{id}}? This cannot be undone",
+   "empty": "No films",
+   "editor": {
++    "organize_number": {
++      "label": "整理用番号",
++      "description": "仅用于整理目录、文件名和 NFO，保存后需重新整理；留空使用原番号，不影响刮削"
++    },
+     "title": {
+       "label": "Title"
+     },
+diff --git a/web/src/i18n/locales/zh-CN/metadata.json b/web/src/i18n/locales/zh-CN/metadata.json
+index a54f5ad2..2e2e5ab5 100644
+--- a/web/src/i18n/locales/zh-CN/metadata.json
++++ b/web/src/i18n/locales/zh-CN/metadata.json
+@@ -306,6 +306,10 @@
+   "confirmDelete": "确定删除影片 #{{id}}？此操作不可撤销",
+   "empty": "暂无影片记录",
+   "editor": {
++    "organize_number": {
++      "label": "整理用番号",
++      "description": "仅用于整理目录、文件名和 NFO，保存后需重新整理；留空使用原番号，不影响刮削"
++    },
+     "title": {
+       "label": "标题"
+     },

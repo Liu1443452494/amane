@@ -71,6 +71,7 @@ def prepare(root: Path, directory: Path, version: str) -> None:
         "0014-media-reorganize.patch",
         "0015-migration-merge.patch",
         "0016-western-full-cover-poster.patch",
+        "0017-organize-number.patch",
     )
     actual = {path.name for path in directory.glob("*.patch")}
     if actual != set(patches):
@@ -121,13 +122,20 @@ def run_tests(root: Path) -> None:
     cases = (
         "tests/db/test_liu1443452494_watermarks.py",
         "tests/db/test_liu1443452494_watermark_migration.py",
+        "tests/db/test_liu1443452494_organize_number_migration.py",
         "tests/db/test_drop_retired_trash_tasks_migration.py",
         "tests/api/test_config_routes.py::TestConfigHttp::test_get_patch_schema",
+        "tests/api/test_liu1443452494_organize_number.py",
+        "tests/api/test_metadata.py",
+        "tests/api/test_schema_repo_compat.py",
         "tests/api/test_liu1443452494_watermarks.py",
         "tests/api/test_media.py",
         "tests/handlers/test_liu1443452494_watermarks.py",
+        "tests/handlers/test_liu1443452494_organize_number.py",
         "tests/media/test_liu1443452494_watermarks.py",
         "tests/organize/test_liu1443452494_watermark_outputs.py",
+        "tests/organize/test_liu1443452494_organize_number.py",
+        "tests/organize/test_strm_content.py",
         "tests/organize/test_subtitles.py",
         "tests/db/test_liu1443452494_metadata_tags.py",
         "tests/db/test_repository.py::TestMetadataRepo",
