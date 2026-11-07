@@ -105,7 +105,7 @@ PATCH 三态: **省略键** = 不更新 (`exclude_unset`); **显式值** = 写�
 
 ## Library 整理布局
 
-每个 Library 持有 `move_mode` (move / copy / hardlink / symlink)、一组按资源类型独立的路径模板与整理默认 (`write_nfo` / `copy_resources`), 因此同一进程里各库可以不同. `copy_resources` 与刮削热配置 `scraping.download_resources` 共用 `DownloadableResource` 枚举但互不读写 — 前者控制复制到库路径, 后者控制写入 Resource 目录. ORGANIZE payload 上对应字段为 `None` 时沿用库设置, 非空则只覆盖该次任务.
+每个 Library 持有 `move_mode` (move / copy / hardlink / symlink)、一组按资源类型独立的路径模板与整理默认 (`write_nfo` / `copy_resources`), 因此同一进程里各库可以不同; 剧照另有一个文件名模板. `copy_resources` 与刮削热配置 `scraping.download_resources` 共用 `DownloadableResource` 枚举但互不读写 — 前者控制复制到库路径, 后者控制写入 Resource 目录. ORGANIZE payload 上对应字段为 `None` 时沿用库设置, 非空则只覆盖该次任务.
 
 `trailer_pattern` 只在库上: 对**文件名 (含扩展名)** 做正则搜索, 命中则 REFRESH 扫描与 watcher 都不把该文件当正片入库; 空串关闭. `min_file_size` (字节, 默认 0 关闭) 只过滤**扫描视频**: 后缀须属于该次扫描的视频扩展名白名单; 图片 / NFO / 字幕不适用, `.strm` 是路径指针也不参与判定; 符号链接跟随目标比较真实大小, 否则已整理的入口会被当作广告. 低于阈值与文件黑名单同语义: REFRESH / watcher 不入库, 整库扫描列为清理候选; stat 失败 (含悬空链接) 视为不匹配.
 
@@ -123,11 +123,11 @@ PATCH 三态: **省略键** = 不更新 (`exclude_unset`); **显式值** = 写�
 
 `link_template` 为空则不创建链接, 非空时 ORGANIZE 在视频就位后按该模板写一条指向真实视频的链接 (`link_mode=strm` 写 `.strm`, `symlink` 做符号链接). 链接必须在库外, 否则 REFRESH 会把链接再扫描为媒体. `.strm` 正文由库级 `strm_content_template` 决定 (空则写一行视频绝对路径); 模板引用 `{video_relpath}` 且整理后路径不在本库内时失败, 不写出错误正文. 默认附属模板用 `{link_dir}`, 因此填链接模板后 NFO / 海报自动跟随链接.
 
-模板语言在 `organize/template.py`, 只约束以下几点: 占位符分相位注入 (`metadata` → file 相位 → `apply_video` → `apply_link`), file 相位未检出是**空串**不是 `Unknown`; 渲染时把 `{title}` / `{actor}` 等分量截到 200 UTF-8 字节 (不切开多字节字符), 但不截断渲染后的路径分量; 可选组 `[...]` 内直接占位符全空则整段丢弃, 有一个非空时其余输出空串. 普通占位符缺失回退 `Unknown`. **段名按 Windows 创建结果对齐**: 每个路径段去掉段尾的 `.` 与空格, 控制字符替换为空格 — 创建与 `os.path.abspath` 对段尾字符的处理不同, 不对齐会让索引记录磁盘上不存在的名字; `.` / `..` 原样保留给逃逸检查. **逃逸防护**: 校验对渲染结果做 realpath (跟随符号链接), 相对模板的真实写出路径必须在本库内 (`ALLOW_ALL` 也不例外), 绝对模板必须位于本库或 `safe_dirs` 内, 否则 `ValueError`; 多盘分存要求目标盘在 `safe_dirs` 内. 细则见 `organize/path_templates.py`.
+模板语言在 `organize/template.py`, 只约束以下几点: 占位符分相位注入 (`metadata` → file 相位 → `apply_video` → `apply_link`), file 相位未检出是**空串**不是 `Unknown`; `{index}` / `{index_padded}` 不在这些相位里, 只在剧照文件名模板的写盘渲染中有值 (补零宽度取本轮张数位数), 其它模板输出 `Unknown`, 因此剧照文件名由复制阶段渲染并依赖 `ResolvedPaths.context` 携带同一份取值, 不由 `resolve_paths` 产出; 渲染时把 `{title}` / `{actor}` 等分量截到 200 UTF-8 字节 (不切开多字节字符), 但不截断渲染后的路径分量; 可选组 `[...]` 内直接占位符全空则整段丢弃, 有一个非空时其余输出空串. 普通占位符缺失回退 `Unknown`. **段名按 Windows 创建结果对齐**: 每个路径段去掉段尾的 `.` 与空格, 控制字符替换为空格 — 创建与 `os.path.abspath` 对段尾字符的处理不同, 不对齐会让索引记录磁盘上不存在的名字; `.` / `..` 原样保留给逃逸检查. **逃逸防护**: 校验对渲染结果做 realpath (跟随符号链接), 相对模板的真实写出路径必须在本库内 (`ALLOW_ALL` 也不例外), 绝对模板必须位于本库或 `safe_dirs` 内, 否则 `ValueError`; 多盘分存要求目标盘在 `safe_dirs` 内. 细则见 `organize/path_templates.py`.
 
 ## Resource (一等存储, 非缓存)
 
-`Resource.url` UNIQUE, 作**通用 locator key**: 原始外部图用真实外部 URL, 派生裁剪用合成串 `derived:{sha256(src_url)}:crop:{args}`. 手动裁切写入派生 Resource: 海报替换 `poster_urls`, 演员头像前插 `image_urls` 并保留原图; 均**不**修改库路径海报 (ORGANIZE 再复制). 文件路径相对 `{data_dir}/resources/`.
+`Resource.url` UNIQUE, 作**通用 locator key**: 原始外部图用真实外部 URL, 派生裁剪用合成串 `derived:{sha256(src_url)}:crop:{args}`. 手动裁切写入派生 Resource: 海报替换 `poster_urls`, 演员头像前插 `image_urls` 并保留原图; 均**不**修改库路径海报 (ORGANIZE 再复制). 文件路径相对 `{data_dir}/resources/`, 扩展名取 URL 后缀 (无后缀为 `.bin`, 派生资源由 `ext` 指定); `mime_type` 在入库与就地超分后按内容判定 (见 `src/amane/media/file_type.py::detect_media_type`), 判不出为 `NULL` — 存量行的值可能来自 URL 后缀, 读取方遇 `NULL` 或 `application/octet-stream` 须按内容复核.
 
 `meta` (JSON, 默认 `{}`) 记可逆来源与处理标记: 裁剪记 `{'op':'crop','src':底层locator,'args':str}` (不记内部 URL); `args` 为像素框, 顺时针旋转非 0 时追加 `:r90` — 键必须覆盖角度, 否则换角度命中旧结果. 超分追加 `{'sr':{tool,model,scale}}`, **就地覆盖**文件 (URL 不变).
 
@@ -135,7 +135,7 @@ PATCH 三态: **省略键** = 不更新 (`exclude_unset`); **显式值** = 写�
 
 ## 图片向量 (`media_embeddings`, sidecar)
 
-语义检索的派生数据, 可随时重建: 存 `{data_dir}/embeddings.db` (独立 SQLite, 不经 Alembic, 删除文件即关闭功能). `semantic_models` 按 `(name, version, dim)` 注册模型, 其 id 是向量的命名空间; `media_embeddings` 每 `(条目, 模型, 图片 locator)` 一行, 存 `kind` (`cover` / `still`)、`content_hash` 与 L2 归一化的 float32 字节串. 封面取 `poster_url` 优先、`thumb_url` 兜底; 剧照取 `Metadata.extrafanart` 中第一个有已落盘 Resource 的站点 (与 `ResourceStore.acquire_extrafanart` 的取舍一致), 按 `content_hash` 去重; 没有封面的条目不建向量. 跨库无外键: 删除条目在主库提交后再清 sidecar (清理失败留下的孤儿行由下一次完整索引删掉), 图片字段变化由 `Repository.set_media_hook` 通知, 只删 url 或 `content_hash` 变了的行; 就地超分只改 `content_hash`, 建索引时据此重算. 检索时整表装载, 缓存键为 `(条数, 最后写入时间)`; 筛选条件先由主库解析成条目 id 集合, 再据此屏蔽向量索引的行.
+语义检索的派生数据, 可随时重建: 存 `{data_dir}/embeddings.db` (独立 SQLite, 不经 Alembic, 删除文件即关闭功能). `semantic_models` 按 `(name, version, dim)` 注册模型, 其 id 是向量的命名空间; `media_embeddings` 每 `(条目, 模型, 图片 locator)` 一行, 存 `kind` (`cover` / `still`)、`content_hash` 与 L2 归一化的 float32 字节串. 封面取 `poster_url` 优先、`thumb_url` 兜底; 剧照取 `Metadata.extrafanart` 中第一个有已落盘 Resource 的站点 (与 `ResourceStore.acquire_extrafanart` 的取舍一致), 按 `content_hash` 去重; 没有封面的条目不建向量. 跨库无外键: 删除条目在主库提交后再清 sidecar (清理失败留下的孤儿行由下一次完整索引删掉), 图片字段变化由 `Repository.set_media_hook` 通知, 只删 url 或 `content_hash` 变了的行; 就地超分只改 `content_hash` 与媒体类型, 建索引时据此重算. 检索时整表装载, 缓存键为 `(条数, 最后写入时间)`; 筛选条件先由主库解析成条目 id 集合, 再据此屏蔽向量索引的行.
 
 ## 分类索引 (爬取侧投影)
 
