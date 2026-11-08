@@ -338,7 +338,7 @@ index 0000000000000000000000000000000000000000..b55c1290c332a9fd9f6bbd3c3a7490e6
 +def downgrade() -> None:
 +    pass
 diff --git a/src/amane/db/models.py b/src/amane/db/models.py
-index ac3ab2c58692787d69207eda4c74ce36b58e266a..04568a1414b03836f2d0329c54bf18b134ceaef8 100644
+index 7e3d9d0781748585ced464849808b427a53865ca..5147c4b999868f051d51911071e86110a3b90dff 100644
 --- a/src/amane/db/models.py
 +++ b/src/amane/db/models.py
 @@ -2,7 +2,7 @@ from datetime import UTC, datetime
@@ -352,14 +352,14 @@ index ac3ab2c58692787d69207eda4c74ce36b58e266a..04568a1414b03836f2d0329c54bf18b1
  
 @@ -17,7 +17,7 @@ from ..library import (
  )
- from ..organize.path_templates import VIDEO_TEMPLATE_DEFAULT, PathTemplate
+ from ..organize.path_templates import VIDEO_TEMPLATE_DEFAULT, ExtrafanartNameTemplate, PathTemplate
  from ..organize.strm_content import StrmContentTemplate
 -from ..parsing import VR_TAGS, ContentType, Mosaic, is_vr
 +from ..parsing import VR_TAGS, ContentType, Mosaic, MosaicNature, WatermarkMode, is_vr
  
  
  def _utcnow() -> datetime:
-@@ -199,6 +199,14 @@ class MediaFile(SQLModel, table=True):
+@@ -200,6 +200,14 @@ class MediaFile(SQLModel, table=True):
      #: 作为 `parse_file_info` 的 `has_external_subtitle` 入参并入文件相位.
      has_external_subtitle: bool = Field(default=False, index=True)
      definition: str | None = Field(default=None, index=True)
@@ -374,7 +374,7 @@ index ac3ab2c58692787d69207eda4c74ce36b58e266a..04568a1414b03836f2d0329c54bf18b1
      metadata_id: int | None = Field(default=None, foreign_key="metadata.id", index=True)
      library_id: int = Field(foreign_key="libraries.id", index=True)
      created_at: datetime = Field(default_factory=_utcnow)
-@@ -206,16 +214,57 @@ class MediaFile(SQLModel, table=True):
+@@ -207,16 +215,57 @@ class MediaFile(SQLModel, table=True):
  
      @_HasSubtitleProperty
      def has_subtitle(self) -> bool:
@@ -819,7 +819,7 @@ index 0000000000000000000000000000000000000000..4dade740a3bee643b430d70897ebef66
 +        media.watermark_definition = update.definition
 +        media.watermark_definition_locked = True
 diff --git a/src/amane/handlers/file.py b/src/amane/handlers/file.py
-index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3306789f5 100644
+index c54c86508152827467d93abbb7684334ae68999e..bbf6b8d00c727ce466f596af13c090f242dd45fa 100644
 --- a/src/amane/handlers/file.py
 +++ b/src/amane/handlers/file.py
 @@ -11,6 +11,7 @@ from PIL import Image
@@ -830,7 +830,7 @@ index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3
  from ..enums import ActorGender, LibraryResource, LinkMode
  from ..library import MEDIA_EXTENSIONS, LibraryFileKind, LibraryScan, ancestor_dirs, prune_empty_dirs
  from ..library.rules import is_in_trash
-@@ -36,9 +37,18 @@ from ..organize import (
+@@ -38,9 +39,18 @@ from ..organize import (
      video_dest,
  )
  from ..organize.link import create_video_link
@@ -851,7 +851,7 @@ index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3
  from ..utils.threads import existing_disk_path, in_thread, path_is_dir
  from ._common import LibraryTaskLocks, refresh_external_subtitle
  from .models import (
-@@ -69,6 +79,7 @@ class FileOperationsResult:
+@@ -71,6 +81,7 @@ class FileOperationsResult:
      """CONFLICT 时被占用的目标路径."""
      subtitle_conflicts: list[SubtitleConflict] = field(default_factory=list)
      error: str | None = None
@@ -859,7 +859,7 @@ index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3
  
  
  async def execute_file_operations(
-@@ -87,6 +98,9 @@ async def execute_file_operations(
+@@ -89,6 +100,9 @@ async def execute_file_operations(
      safe_dirs: Sequence[Path] | None = (),
      watermark_dir: Path | None = None,
      actor_genders: dict[str, ActorGender] | None = None,
@@ -869,7 +869,7 @@ index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3
  ) -> FileOperationsResult:
      """``file_info`` 由渲染路径的那一次 ``parse_file_info`` 产出, 必须带上 ``has_external_subtitle``.
  
-@@ -110,25 +124,38 @@ async def execute_file_operations(
+@@ -112,26 +126,39 @@ async def execute_file_operations(
          return FileOperationsResult(outcome=PlaceOutcome.FAILED, error=check.error)
  
      # 下载图片; 水印打在库路径副本上, 不能修改 Resource 原图.
@@ -887,6 +887,7 @@ index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3
 -            file_info=file_info,
 -            content_type=metadata.content_type,
 -            watermark_dir=watermark_dir,
+-            library=library,
 -        )
 +        try:
 +            outputs = await _download_images_via_store(
@@ -899,6 +900,7 @@ index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3
 +                file_info=file_info,
 +                content_type=metadata.content_type,
 +                watermark_dir=watermark_dir,
++                library=library,
 +                fresh_only=track_outputs,
 +                required_images=required_images,
 +            )
@@ -919,7 +921,7 @@ index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3
  
      org_result = await execute_organize(
          source=source_path,
-@@ -138,7 +165,7 @@ async def execute_file_operations(
+@@ -141,7 +168,7 @@ async def execute_file_operations(
      )
  
      if org_result.outcome is PlaceOutcome.CONFLICT:
@@ -928,7 +930,7 @@ index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3
  
      # 写链接; 失败仍带 dest, 以便回写 MediaFile.path.
      if org_result.outcome is PlaceOutcome.PLACED and org_result.dest and paths.link is not None:
-@@ -157,19 +184,31 @@ async def execute_file_operations(
+@@ -160,19 +187,31 @@ async def execute_file_operations(
                      actor_genders=actor_genders,
                  )
              except ValueError as e:
@@ -963,7 +965,7 @@ index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3
          subtitle_conflicts = await place_subtitles(
              subtitles,
              video_source=source_path,
-@@ -182,15 +221,22 @@ async def execute_file_operations(
+@@ -185,15 +224,22 @@ async def execute_file_operations(
              link_dir=paths.link.parent if paths.link is not None else None,
              link_name=paths.link.stem if paths.link is not None else None,
              actor_genders=actor_genders,
@@ -988,7 +990,7 @@ index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3
  
  
  async def apply_file_operations(
-@@ -220,7 +266,8 @@ async def apply_file_operations(
+@@ -223,7 +269,8 @@ async def apply_file_operations(
  
      # 渲染路径后执行落盘.
      ext = Path(media_file.path).suffix.lstrip(".")
@@ -998,7 +1000,7 @@ index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3
      actor_genders = {a.name: a.gender for a in await repo.get_actors_by_names(metadata.actors)}
      paths = resolve_paths(
          library,
-@@ -231,7 +278,35 @@ async def apply_file_operations(
+@@ -234,7 +281,35 @@ async def apply_file_operations(
          safe_dirs=safe_dirs,
          actor_genders=actor_genders,
      )
@@ -1035,7 +1037,7 @@ index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3
          media_file,
          metadata,
          paths,
-@@ -247,7 +322,24 @@ async def apply_file_operations(
+@@ -250,7 +325,24 @@ async def apply_file_operations(
          safe_dirs=safe_dirs,
          watermark_dir=watermark_dir,
          actor_genders=actor_genders,
@@ -1060,7 +1062,7 @@ index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3
  
  
  async def commit_organized_media_file(
-@@ -284,6 +376,15 @@ async def commit_organized_media_file(
+@@ -287,6 +379,15 @@ async def commit_organized_media_file(
          occupant_updates["oshash"] = media.oshash
      if occupant.number is None and media.number is not None:
          occupant_updates["number"] = media.number
@@ -1076,7 +1078,7 @@ index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3
      if occupant_updates:
          await repo.update_media_file(occupant.id, **occupant_updates)
      await repo.delete_media_file(media.id)
-@@ -395,11 +496,13 @@ def _place_library_images(
+@@ -410,11 +511,13 @@ def _place_library_images(
      file_info: FileInfo | None,
      content_type: ContentType,
      watermark_dir: Path | None,
@@ -1091,7 +1093,7 @@ index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3
      if thumb_local is not None:
          if LibraryResource.thumb in kinds:
              paths.thumb.parent.mkdir(parents=True, exist_ok=True)
-@@ -411,9 +514,11 @@ def _place_library_images(
+@@ -426,9 +529,11 @@ def _place_library_images(
                  content_type=content_type,
                  watermark_dir=watermark_dir,
              )
@@ -1103,7 +1105,7 @@ index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3
  
      if LibraryResource.poster in kinds:
          if poster_local is not None:
-@@ -426,29 +531,42 @@ def _place_library_images(
+@@ -441,29 +546,42 @@ def _place_library_images(
                  content_type=content_type,
                  watermark_dir=watermark_dir,
              )
@@ -1127,11 +1129,11 @@ index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3
          _copy_into_library(trailer_local, paths.trailer)
 +        outputs.append(OutputPath(kind="trailer", path=paths.trailer))
  
-     if extrafanart and LibraryResource.extrafanart in kinds:
+     if extrafanart_targets and LibraryResource.extrafanart in kinds:
          paths.extrafanart_dir.mkdir(parents=True, exist_ok=True)
-         for i, p in enumerate(extrafanart):
-             _copy_library_image(p, paths.extrafanart_dir / f"{i + 1}.jpg", config=config)
-+            outputs.append(OutputPath(kind="extrafanart", path=paths.extrafanart_dir / f"{i + 1}.jpg"))
+         for name, p in extrafanart_targets:
+             _copy_library_image(p, paths.extrafanart_dir / name, config=config)
++            outputs.append(OutputPath(kind="extrafanart", path=paths.extrafanart_dir / name))
  
      # 叠加水印 (thumb / poster).
      wm = config.watermark if config is not None else WatermarkConfig()
@@ -1148,7 +1150,7 @@ index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3
              apply_cover_watermarks_from_info(
                  paths.thumb,
                  file_info,
-@@ -458,7 +576,7 @@ def _place_library_images(
+@@ -473,7 +591,7 @@ def _place_library_images(
                  scale=wm.scale,
                  corners=wm.corners,
              )
@@ -1157,7 +1159,7 @@ index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3
              apply_cover_watermarks_from_info(
                  paths.poster,
                  file_info,
-@@ -468,6 +586,7 @@ def _place_library_images(
+@@ -483,6 +601,7 @@ def _place_library_images(
                  scale=wm.scale,
                  corners=wm.corners,
              )
@@ -1165,23 +1167,22 @@ index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3
  
  
  async def _download_images_via_store(
-@@ -480,7 +599,10 @@ async def _download_images_via_store(
-     file_info: FileInfo | None,
+@@ -496,7 +615,10 @@ async def _download_images_via_store(
      content_type: ContentType,
      watermark_dir: Path | None = None,
+     library: Library | None = None,
 -) -> None:
 +    *,
 +    fresh_only: bool = False,
 +    required_images: frozenset[str] = frozenset(),
 +) -> list[OutputPath]:
-     """优先用 Resource 已有文件; 缺失则现场 acquire."""
-     poster_local = None
-     if LibraryResource.poster in kinds:
-@@ -507,7 +629,36 @@ async def _download_images_via_store(
+     """优先用 Resource 已有文件; 缺失则现场 acquire.
+
+     剧照文件名在这里渲染: 补零宽度取决于本轮剧照数量, 只有拿到文件列表后才定得下来.
+@@ -526,6 +648,36 @@ async def _download_images_via_store(
              priority = list(extrafanart_by_site.keys())
              extrafanart = await store.acquire_extrafanart(extrafanart_by_site, priority, client)
  
--    await _place_library_images(
 +    if fresh_only:
 +        missing: list[str] = []
 +        if (
@@ -1211,11 +1212,20 @@ index edf7d0e99e0c7731cf2bd820cac96b856f4be9c2..1bfde3cc47018b86df424f17c01e9cc3
 +            missing.append("剧照")
 +        if missing:
 +            raise OSError(f"无法取得整理所需的原始资源: {'、'.join(missing)}；旧产物保留，补齐资源后可重新整理")
++
+     # 名字与源文件成对落地: 文件名模板只能在这里渲染, 宽度取决于本轮张数.
+     extrafanart_targets: list[tuple[str, Path]] = []
+     if extrafanart:
+@@ -533,7 +685,7 @@ async def _download_images_via_store(
+         names = render_extrafanart_names(template or EXTRAFANART_NAME_TEMPLATE_DEFAULT, paths.context, len(extrafanart))
+         extrafanart_targets = list(zip(names, extrafanart, strict=True))
+
+-    await _place_library_images(
 +    return await _place_library_images(
          paths,
          thumb_local=thumb_local,
          poster_local=poster_local,
-@@ -518,6 +669,7 @@ async def _download_images_via_store(
+@@ -544,6 +696,7 @@ async def _download_images_via_store(
          file_info=file_info,
          content_type=content_type,
          watermark_dir=watermark_dir,

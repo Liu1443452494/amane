@@ -36,7 +36,7 @@ index ea887633..78533cdb 100644
      poster_ratio: float = Field(default=0.7, ge=0.3, le=1.0)
      """海报裁剪宽高比 (w/h). 从封面右侧裁剪生成海报. 默认 0.7 (贴近常见 379x538 / 高清海报)."""
 diff --git a/src/amane/handlers/file.py b/src/amane/handlers/file.py
-index 1bfde3cc..74f0f2c0 100644
+index bbf6b8d00c727ce466f596af13c090f242dd45fa..81eb12203e796517f2a17fe305830ed456dd9987 100644
 --- a/src/amane/handlers/file.py
 +++ b/src/amane/handlers/file.py
 @@ -18,6 +18,7 @@ from ..library.rules import is_in_trash
@@ -47,7 +47,7 @@ index 1bfde3cc..74f0f2c0 100644
  from ..media.resource_store import internal_url_hash
  from ..net.http import WebClient
  from ..observability.liu1443452494_process_events import file_processing, record_copied_file
-@@ -534,16 +535,27 @@ def _place_library_images(
+@@ -549,16 +550,27 @@ def _place_library_images(
              outputs.append(OutputPath(kind="poster", path=paths.poster))
          elif thumb_local is not None and config is not None and config.scraping.crop_poster:
              paths.poster.parent.mkdir(parents=True, exist_ok=True)
@@ -84,10 +84,10 @@ index 1bfde3cc..74f0f2c0 100644
  
      if trailer_local is not None and LibraryResource.trailer in kinds:
          paths.trailer.parent.mkdir(parents=True, exist_ok=True)
-@@ -604,10 +616,22 @@ async def _download_images_via_store(
-     required_images: frozenset[str] = frozenset(),
- ) -> list[OutputPath]:
-     """优先用 Resource 已有文件; 缺失则现场 acquire."""
+@@ -623,10 +635,22 @@ async def _download_images_via_store(
+
+     剧照文件名在这里渲染: 补零宽度取决于本轮剧照数量, 只有拿到文件列表后才定得下来.
+     """
 +    full_cover_mode = (
 +        config is not None
 +        and config.scraping.crop_poster
@@ -108,7 +108,7 @@ index 1bfde3cc..74f0f2c0 100644
  
      needs_crop = (
          LibraryResource.poster in kinds and poster_local is None and config is not None and config.scraping.crop_poster
-@@ -615,7 +639,13 @@ async def _download_images_via_store(
+@@ -634,7 +658,13 @@ async def _download_images_via_store(
      thumb_local = None
      if LibraryResource.thumb in kinds or LibraryResource.fanart in kinds or needs_crop:
          thumb_urls = metadata.thumb_urls

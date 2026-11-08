@@ -1,21 +1,21 @@
 diff --git a/docs/dev/frontend.md b/docs/dev/frontend.md
-index 4dc1a3b6eaa8ae7878736d6b98009976bb3cfe0d..86a29fbe64132fe4bb9895fe2f8f07ec3f805f7a 100644
+index dce2cc47136c6b7385ee541bbd13020304517a46..873328c67806b6892380a0b693701c3ee7d21c49 100644
 --- a/docs/dev/frontend.md
 +++ b/docs/dev/frontend.md
-@@ -67,6 +67,8 @@ Settings、任务提交、定时创建、metadata 编辑共用 `components/schem
+@@ -71,6 +71,8 @@ Settings、任务提交、定时创建、metadata 编辑共用 `components/schem
  
  `SchemaForm` 双模式 `patch` (dirty 门控, 只提交 diff) / `create` (完整值); dirty 保存条用 `affix` 固定于视口底, 编辑弹窗里必须抬到 Modal 之上. 空值编码统一经 `schema-form/encode.ts` (按 Create / 列 schema 判空), `x-frozen-keys` 必须保留全部 key; 不允许对着 PATCH partial schema 编码, 手写 Library / Feed 表单经同一个编码器出 body. 任务与定时提交用 `DiscriminatedSchemaForm`; 短枚举共用 `EnumToggle`, 定时 cron 用 `CronPicker` (产出 5-field, 与后端 croniter 一致).
  
-+媒体库共同目录仅存在于表单: `web/src/components/library/metadata-directory.ts::collapseMetadataDirectory` 按接口默认模板合并显示, `expandMetadataDirectory` 在提交前还原完整单项; 数据库与 API 不保存共同目录. 编辑入口先取得默认模板, 缺失时不能清空单项或忽略前缀提交.
++媒体库共同目录仅存在于表单: `web/src/components/library/metadata-directory.ts::collapseMetadataDirectory` 按默认模板合并七项路径, `expandMetadataDirectory` 在提交前还原; 剧照文件名独立保存, 不附加目录前缀. 数据库与 API 不保存共同目录; 默认模板缺失时禁止合并显示或忽略前缀提交.
 +
  ## 对话通道
  
  `/` 的实现边界见 [agent.md](agent.md). 前端四点: 对话经 AG-UI (`@ag-ui/client` + `@assistant-ui/react-ag-ui`), 不经 hey-api 也不经 `/ws`, 且 `@ag-ui/client` 必须停留在 0.0.x —— react-ag-ui 的 peer 依赖为 `^0.0.59`, 1.x 调整了 `Message` 内容部件的类型, 与之不兼容; 请求统一经由 `lib/api-token.ts` 的 `apiFetch` (纯透传, 只把 401 转成登录门); 读 assistant-ui 线程状态的 hook (`useAuiState` / `useAgUi*`) 须在 `AssistantRuntimeProvider` 之内 — 持有 provider 的那个组件读不到, 要另起子组件; 展示只认回放行 — `lib/agent/trace.ts::foldTrace` 的产物直接渲染, 本页发起的回合也跟随 `.../agui/events` (从 `after_seq` 接上, 回合未收尾时重开), 运行时的消息虽同步同一份 fold 但不参与渲染, 因此直播与刷新同形, 决不允许另建一份消息状态.
 diff --git a/web/src/components/library/library-form.tsx b/web/src/components/library/library-form.tsx
-index 4eef9a99f2610ba4dcb753344e72863341601378..956c0355c23db72bf88ae1f0f4421e810bcc3e76 100644
+index 8c1a8ae57fcb54fa40e0cdf58ad3d2c3c0513a2a..2e67e5fc3e904cae0633acd4bd870a1e00d34435 100644
 --- a/web/src/components/library/library-form.tsx
 +++ b/web/src/components/library/library-form.tsx
-@@ -42,6 +42,12 @@ import {
+@@ -42,6 +42,11 @@ import {
    LINK_MODES,
  } from "@/lib/exhaustive-maps";
  import classes from "./library-form.module.css";
@@ -23,29 +23,11 @@ index 4eef9a99f2610ba4dcb753344e72863341601378..956c0355c23db72bf88ae1f0f4421e81
 +  collapseMetadataDirectory,
 +  expandMetadataDirectory,
 +  metadataDirectoryDefault,
-+  OPTIONAL_TEMPLATE_KEYS,
 +} from "./metadata-directory";
  import { templateCatalogFromPlaceholders } from "./template-highlight";
  import { TemplateInput } from "./template-input";
  
-@@ -56,16 +62,6 @@ function parseCopyResources(values: string[]): LibraryResource[] {
-   return values.filter(isCopyResource);
- }
- 
--const OPTIONAL_TEMPLATE_KEYS = [
--  "thumb_template",
--  "poster_template",
--  "fanart_template",
--  "extrafanart_template",
--  "nfo_template",
--  "trailer_template",
--  "subtitle_template",
--] as const satisfies readonly (keyof OptionalPathTemplateDefaults)[];
--
- const MOVE_MODES: readonly LibraryResponse["move_mode"][] = ["move", "copy", "hardlink", "symlink"];
- 
- const BYTES_PER_MB = 1024 * 1024;
-@@ -100,6 +96,7 @@ export interface LibraryFormState {
+@@ -101,6 +106,7 @@ export interface LibraryFormState {
    min_file_size: number;
    subtitle_extensions: string;
    video_template: string;
@@ -53,7 +35,7 @@ index 4eef9a99f2610ba4dcb753344e72863341601378..956c0355c23db72bf88ae1f0f4421e81
    thumb_template: string;
    poster_template: string;
    fanart_template: string;
-@@ -134,6 +131,7 @@ export function emptyLibraryForm(schema?: PathTemplateSchemaResponse | null): Li
+@@ -136,6 +142,7 @@ export function emptyLibraryForm(schema?: PathTemplateSchemaResponse | null): Li
        schema?.subtitle_extensions_default ?? [".srt", ".ass", ".ssa", ".vtt", ".sub"]
      ).join(", "),
      video_template: schema?.video_default ?? "{studio}/{number}/{number}[-CD{cd?}][-{sub?}].{ext}",
@@ -61,7 +43,7 @@ index 4eef9a99f2610ba4dcb753344e72863341601378..956c0355c23db72bf88ae1f0f4421e81
      thumb_template: defaults?.thumb_template ?? "",
      poster_template: defaults?.poster_template ?? "",
      fanart_template: defaults?.fanart_template ?? "",
-@@ -149,7 +147,10 @@ export function emptyLibraryForm(schema?: PathTemplateSchemaResponse | null): Li
+@@ -152,7 +159,10 @@ export function emptyLibraryForm(schema?: PathTemplateSchemaResponse | null): Li
    };
  }
  
@@ -73,7 +55,7 @@ index 4eef9a99f2610ba4dcb753344e72863341601378..956c0355c23db72bf88ae1f0f4421e81
    return {
      name: lib.name,
      path: lib.path,
-@@ -166,13 +167,7 @@ export function libraryFormFromResponse(lib: LibraryResponse): LibraryFormState
+@@ -169,14 +179,8 @@ export function libraryFormFromResponse(lib: LibraryResponse): LibraryFormState
      min_file_size: lib.min_file_size ?? 0,
      subtitle_extensions: lib.subtitle_extensions?.join(", ") ?? "",
      video_template: lib.video_template,
@@ -81,14 +63,15 @@ index 4eef9a99f2610ba4dcb753344e72863341601378..956c0355c23db72bf88ae1f0f4421e81
 -    poster_template: lib.poster_template ?? "",
 -    fanart_template: lib.fanart_template ?? "",
 -    extrafanart_template: lib.extrafanart_template ?? "",
++    ...collapseMetadataDirectory(lib, defaults),
+     extrafanart_name_template: lib.extrafanart_name_template ?? "",
 -    nfo_template: lib.nfo_template ?? "",
 -    trailer_template: lib.trailer_template ?? "",
 -    subtitle_template: lib.subtitle_template ?? "",
-+    ...collapseMetadataDirectory(lib, defaults),
      automation: lib.automation,
      auto_organize: lib.auto_organize,
      ingest: lib.ingest,
-@@ -196,7 +191,10 @@ export function parseBlacklistPatterns(s: string): string[] {
+@@ -200,7 +204,10 @@ export function parseBlacklistPatterns(s: string): string[] {
      .filter(Boolean);
  }
  
@@ -100,7 +83,7 @@ index 4eef9a99f2610ba4dcb753344e72863341601378..956c0355c23db72bf88ae1f0f4421e81
    return {
      name: form.name.trim(),
      path: form.path.trim(),
-@@ -213,13 +211,7 @@ function libraryFormValues(form: LibraryFormState): Record<string, unknown> {
+@@ -217,14 +224,8 @@ function libraryFormValues(form: LibraryFormState): Record<string, unknown> {
      min_file_size: form.min_file_size,
      subtitle_extensions: parseLibraryPatterns(form.subtitle_extensions),
      video_template: form.video_template.trim(),
@@ -108,14 +91,15 @@ index 4eef9a99f2610ba4dcb753344e72863341601378..956c0355c23db72bf88ae1f0f4421e81
 -    poster_template: form.poster_template.trim(),
 -    fanart_template: form.fanart_template.trim(),
 -    extrafanart_template: form.extrafanart_template.trim(),
++    ...expandMetadataDirectory(form, defaults),
+     extrafanart_name_template: form.extrafanart_name_template.trim(),
 -    nfo_template: form.nfo_template.trim(),
 -    trailer_template: form.trailer_template.trim(),
 -    subtitle_template: form.subtitle_template.trim(),
-+    ...expandMetadataDirectory(form, defaults),
      automation: form.automation,
      auto_organize: form.auto_organize,
      ingest: form.ingest,
-@@ -228,18 +220,27 @@ function libraryFormValues(form: LibraryFormState): Record<string, unknown> {
+@@ -233,18 +234,27 @@ function libraryFormValues(form: LibraryFormState): Record<string, unknown> {
  }
  
  /** 创建体: 空值按 LibraryCreateRequest schema 编码 (name 可空 → null; patterns → []). */
@@ -147,7 +131,7 @@ index 4eef9a99f2610ba4dcb753344e72863341601378..956c0355c23db72bf88ae1f0f4421e81
  }
  
  const TPL_I18N = {
-@@ -519,25 +520,38 @@ export function LibraryFormFields({ value, onChange, showCreateOnly }: LibraryFo
+@@ -525,25 +535,38 @@ export function LibraryFormFields({ value, onChange, showCreateOnly }: LibraryFo
            <Accordion.Control>{t("advancedTemplates")}</Accordion.Control>
            <Accordion.Panel>
              <Stack gap="sm">
@@ -178,10 +162,10 @@ index 4eef9a99f2610ba4dcb753344e72863341601378..956c0355c23db72bf88ae1f0f4421e81
 -                  />
 -                ))}
 +                {OPTIONAL_TEMPLATE_KEYS.map((key) => {
-+                  const defaultTemplate = metadataDirectoryDefault(
-+                    value.metadata_directory,
-+                    optionalDefaults?.[key],
-+                  );
++                  const defaultTemplate =
++                    key === "extrafanart_name_template"
++                      ? optionalDefaults?.[key]
++                      : metadataDirectoryDefault(value.metadata_directory, optionalDefaults?.[key]);
 +                  return (
 +                    <TemplateInput
 +                      key={key}
@@ -203,13 +187,15 @@ index 4eef9a99f2610ba4dcb753344e72863341601378..956c0355c23db72bf88ae1f0f4421e81
            </Accordion.Panel>
 diff --git a/web/src/components/library/metadata-directory.ts b/web/src/components/library/metadata-directory.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..b8fd7a6113f4d8836f14bd94288c4633a71bbbb7
+index 0000000000000000000000000000000000000000..377e9da8b6b1330be4b1d53f047cf700316a11bd
 --- /dev/null
 +++ b/web/src/components/library/metadata-directory.ts
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,101 @@
 +import type { LibraryResponse, OptionalPathTemplateDefaults } from "@/client/types.gen";
 +
-+export const OPTIONAL_TEMPLATE_KEYS: readonly (keyof OptionalPathTemplateDefaults)[] = [
++type MetadataPathTemplateDefaults = Omit<OptionalPathTemplateDefaults, "extrafanart_name_template">;
++
++export const OPTIONAL_TEMPLATE_KEYS: readonly (keyof MetadataPathTemplateDefaults)[] = [
 +  "thumb_template",
 +  "poster_template",
 +  "fanart_template",
@@ -219,13 +205,13 @@ index 0000000000000000000000000000000000000000..b8fd7a6113f4d8836f14bd94288c4633
 +  "subtitle_template",
 +];
 +
-+export interface MetadataDirectoryFields extends OptionalPathTemplateDefaults {
++export interface MetadataDirectoryFields extends MetadataPathTemplateDefaults {
 +  metadata_directory: string;
 +}
 +
 +function templateValues(
-+  templates: Pick<LibraryResponse, keyof OptionalPathTemplateDefaults>,
-+): OptionalPathTemplateDefaults {
++  templates: Pick<LibraryResponse, keyof MetadataPathTemplateDefaults>,
++): MetadataPathTemplateDefaults {
 +  return {
 +    thumb_template: templates.thumb_template ?? "",
 +    poster_template: templates.poster_template ?? "",
@@ -259,7 +245,7 @@ index 0000000000000000000000000000000000000000..b8fd7a6113f4d8836f14bd94288c4633
 +
 +/** 仅七项可以无损还原为共同目录和默认名称时合并显示。 */
 +export function collapseMetadataDirectory(
-+  templates: Pick<LibraryResponse, keyof OptionalPathTemplateDefaults>,
++  templates: Pick<LibraryResponse, keyof MetadataPathTemplateDefaults>,
 +  defaults?: OptionalPathTemplateDefaults,
 +): MetadataDirectoryFields {
 +  const result = { metadata_directory: "", ...templateValues(templates) };
@@ -282,11 +268,11 @@ index 0000000000000000000000000000000000000000..b8fd7a6113f4d8836f14bd94288c4633
 +  return result;
 +}
 +
-+/** 请求体只包含原有七项；前缀仅展开留空项，显式单项始终优先。 */
++/** 仅返回七项路径；前缀仅展开留空项，显式单项始终优先。 */
 +export function expandMetadataDirectory(
 +  form: MetadataDirectoryFields,
 +  defaults?: OptionalPathTemplateDefaults,
-+): OptionalPathTemplateDefaults {
++): MetadataPathTemplateDefaults {
 +  const result = templateValues(form);
 +  for (const key of OPTIONAL_TEMPLATE_KEYS) {
 +    const value = result[key].trim();
@@ -499,10 +485,10 @@ index 59f2991efc3608abad1f664bd987d5ff0c8734c3..84ff173f6d93799375733b41c1b7bb64
  
 diff --git a/web/tests/library-metadata-directory.test.mjs b/web/tests/library-metadata-directory.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..e20f1d06f70603e233508a9ef2090153369cf88b
+index 0000000000000000000000000000000000000000..ad487d3cb6afe57eee58672b0c6830a4c6fcf625
 --- /dev/null
 +++ b/web/tests/library-metadata-directory.test.mjs
-@@ -0,0 +1,374 @@
+@@ -0,0 +1,398 @@
 +import assert from "node:assert/strict";
 +import test from "node:test";
 +import {
@@ -525,6 +511,7 @@ index 0000000000000000000000000000000000000000..e20f1d06f70603e233508a9ef2090153
 +  poster_template: "{link_dir}/poster.jpg",
 +  fanart_template: "{link_dir}/fanart.jpg",
 +  extrafanart_template: "{link_dir}/extrafanart",
++  extrafanart_name_template: "{index}.jpg",
 +  nfo_template: "{link_dir}/{video_name}.nfo",
 +  trailer_template: "{link_dir}/trailer.mp4",
 +  subtitle_template: "{link_dir}/{raw_srt_name}.{ext}",
@@ -834,6 +821,29 @@ index 0000000000000000000000000000000000000000..e20f1d06f70603e233508a9ef2090153
 +      collapseMetadataDirectory(entry.templates, entry.defaults),
 +      unchangedTemplates(entry.templates),
 +    );
++  });
++}
++
++for (const entry of [
++  { name: "未提供", value: undefined },
++  { name: "空值", value: null },
++  { name: "留空", value: "" },
++  { name: "默认名称", value: "{index}.jpg" },
++  { name: "自定义名称", value: "{number}-{index_padded}.jpg" },
++]) {
++  test(`剧照文件名为${entry.name}时不参与共同目录转换`, () => {
++    const response = Object.freeze({
++      ...templatesIn(USER_DIRECTORY),
++      extrafanart_name_template: entry.value,
++    });
++    const form = Object.freeze({
++      ...formWith(USER_DIRECTORY),
++      extrafanart_name_template: entry.value ?? "",
++    });
++    assert.deepEqual(collapseMetadataDirectory(response, DEFAULTS), formWith(USER_DIRECTORY));
++    assert.deepEqual(expandMetadataDirectory(form, DEFAULTS), templatesIn(USER_DIRECTORY));
++    assert.equal(response.extrafanart_name_template, entry.value);
++    assert.equal(form.extrafanart_name_template, entry.value ?? "");
 +  });
 +}
 +

@@ -14,7 +14,7 @@ index 9c1cfb7..42016e6 100644
  - **目标占用**: 判定分为四态: 空闲 / 已就位 / 被占用 / 无法判定. 源与目标已是同一文件 (含硬链同一 inode) 时视为就位, 只跳过视频落盘, 附属文件照常重写; 被占用时跳过该文件, 不改名、不覆盖、不移动, 视频与字幕一视同仁, 由调用方按冲突记账, 冲突条目 (源路径 + 被占用的目标路径; 字幕冲突的 `path` 记字幕源路径, 不记视频源路径) 写进任务结果供界面显示, 且 `conflicts` 恒为 `conflicted` 条数的前缀 (差额只留在任务日志里), 冲突不自动解决, 未落盘的行留在源路径, 由用户自行处理. 无法判定 (stat 失败, 或两者在两次读取之间被替换) 按失败记账并带上 stat 的错误说明, 不得计入冲突或放宽为空闲. 存在性与占用判定都经 `existing_disk_path` (跟随符号链接; 读不出状态时按不存在处理, 不抛异常): 目标位置是断链符号链接时按空闲处理, MOVE 会替换它, SYMLINK 因 EEXIST 记失败. 判定与落盘之间还有窗口, MOVE / COPY 期间目标被外部写入仍会覆盖, 这条保证是尽力而为.
  - **链接**: `link_template` 非空时视频就位后在库外写 STRM 或符号链接, 指向这次整理后的路径; `MediaFile.path` 仍是真实视频. 链接写入失败时, 目标路径仍在本库内则回写 path, 任务记失败以便重试补链接.
 diff --git a/src/amane/handlers/file.py b/src/amane/handlers/file.py
-index 3cc76ad..edf7d0e 100644
+index c1cb6609b3e25c6b3c675959e695f9cd22c1080a..c54c86508152827467d93abbb7684334ae68999e 100644
 --- a/src/amane/handlers/file.py
 +++ b/src/amane/handlers/file.py
 @@ -3,8 +3,10 @@ from collections.abc import Sequence
@@ -36,7 +36,7 @@ index 3cc76ad..edf7d0e 100644
  from ..media.resource_store import internal_url_hash
  from ..net.http import WebClient
  from ..observability.liu1443452494_process_events import file_processing, record_copied_file
-@@ -301,7 +304,7 @@ async def _acquire_first_local(urls: list[str], store: ResourceStore, client: We
+@@ -304,7 +307,7 @@ async def _acquire_first_local(urls: list[str], store: ResourceStore, client: We
      return None
  
  
@@ -45,7 +45,7 @@ index 3cc76ad..edf7d0e 100644
      """复制到媒体库, 元数据复制失败不算失败.
  
      成功路径保持 copy2 的全部行为 (Windows 的 CopyFile2 与其余平台的 copyfile + copystat).
-@@ -317,7 +320,66 @@ def _copy_into_library(src: Path, dst: Path) -> None:
+@@ -332,7 +335,66 @@ def _copy_into_library(src: Path, dst: Path) -> None:
              shutil.copystat(src, dst)
          except OSError as exc:
              logger.debug("copy metadata skipped", src=str(src), dst=str(dst), error=str(exc))
@@ -112,7 +112,7 @@ index 3cc76ad..edf7d0e 100644
  
  
  @in_thread
-@@ -336,18 +398,34 @@ def _place_library_images(
+@@ -351,18 +413,34 @@ def _place_library_images(
  ) -> None:
      # 复制封面 / 海报 / 预告片 / extrafanart 到库路径, 不判断目标上是否已有产物.
      # fanart 与封面独立选择，共用资源目录中的封面原图。
@@ -150,12 +150,12 @@ index 3cc76ad..edf7d0e 100644
          elif thumb_local is not None and config is not None and config.scraping.crop_poster:
              paths.poster.parent.mkdir(parents=True, exist_ok=True)
              crop_poster(
-@@ -364,13 +442,13 @@ def _place_library_images(
-     if extrafanart and LibraryResource.extrafanart in kinds:
+@@ -379,13 +457,13 @@ def _place_library_images(
+     if extrafanart_targets and LibraryResource.extrafanart in kinds:
          paths.extrafanart_dir.mkdir(parents=True, exist_ok=True)
-         for i, p in enumerate(extrafanart):
--            _copy_into_library(p, paths.extrafanart_dir / f"{i + 1}.jpg")
-+            _copy_library_image(p, paths.extrafanart_dir / f"{i + 1}.jpg", config=config)
+         for name, p in extrafanart_targets:
+-            _copy_into_library(p, paths.extrafanart_dir / name)
++            _copy_library_image(p, paths.extrafanart_dir / name, config=config)
  
      # 叠加水印 (thumb / poster).
      wm = config.watermark if config is not None else WatermarkConfig()
@@ -166,7 +166,7 @@ index 3cc76ad..edf7d0e 100644
              apply_cover_watermarks_from_info(
                  paths.thumb,
                  file_info,
-@@ -380,7 +458,7 @@ def _place_library_images(
+@@ -395,7 +473,7 @@ def _place_library_images(
                  scale=wm.scale,
                  corners=wm.corners,
              )
@@ -252,7 +252,7 @@ index 0eb7c4a..0630bc4 100644
      )
 diff --git a/tests/handlers/test_liu1443452494_library_jpeg.py b/tests/handlers/test_liu1443452494_library_jpeg.py
 new file mode 100644
-index 0000000..7a159cf
+index 0000000000000000000000000000000000000000..9fc347ec01ffb5e925601fb205a3d66d69fd3cfc
 --- /dev/null
 +++ b/tests/handlers/test_liu1443452494_library_jpeg.py
 @@ -0,0 +1,335 @@
@@ -309,7 +309,7 @@ index 0000000..7a159cf
 +            thumb_local=source,
 +            poster_local=source,
 +            trailer_local=trailer,
-+            extrafanart=[source],
++            extrafanart_targets=[("1.jpg", source)],
 +            kinds=set(LibraryResource),
 +            config=HotSettings(watermark=WatermarkConfig(enabled=False)),
 +            file_info=parse_file_info("MIDV-123.mp4"),
@@ -356,7 +356,7 @@ index 0000000..7a159cf
 +        thumb_local=source,
 +        poster_local=source,
 +        trailer_local=None,
-+        extrafanart=[source],
++        extrafanart_targets=[("1.jpg", source)],
 +        kinds={LibraryResource.thumb, LibraryResource.poster, LibraryResource.fanart, LibraryResource.extrafanart},
 +        config=config,
 +        file_info=parse_file_info("MIDV-123-C.mp4") if config is not None else None,
@@ -398,7 +398,7 @@ index 0000000..7a159cf
 +        thumb_local=source,
 +        poster_local=None,
 +        trailer_local=None,
-+        extrafanart=[],
++        extrafanart_targets=[],
 +        kinds={LibraryResource.fanart},
 +        config=None,
 +        file_info=None,
@@ -441,7 +441,7 @@ index 0000000..7a159cf
 +        thumb_local=source,
 +        poster_local=source,
 +        trailer_local=None,
-+        extrafanart=[],
++        extrafanart_targets=[],
 +        kinds={kind},
 +        config=HotSettings(watermark=WatermarkConfig(enabled=True, scale=0.2)),
 +        file_info=parse_file_info("MIDV-123-C.mp4"),
@@ -474,7 +474,7 @@ index 0000000..7a159cf
 +            thumb_local=source,
 +            poster_local=None,
 +            trailer_local=None,
-+            extrafanart=[],
++            extrafanart_targets=[],
 +            kinds={LibraryResource.fanart},
 +            config=None,
 +            file_info=None,
@@ -591,3 +591,66 @@ index 0000000..7a159cf
 +        image.load()
 +        assert image.format == "JPEG" and image.size == (300, 200)
 +    assert client.downloaded == [url]
+diff --git a/tests/handlers/test_liu1443452494_processing_events.py b/tests/handlers/test_liu1443452494_processing_events.py
+index 6300f545012672968a38054ef3d1e8fba088da6d..c2542aa18a156d63de68e0480d8286c4b6c84162 100644
+--- a/tests/handlers/test_liu1443452494_processing_events.py
++++ b/tests/handlers/test_liu1443452494_processing_events.py
+@@ -13,6 +13,7 @@ from amane.db.models import MediaFileStatus, Task, TaskStatus, TaskType
+ from amane.db.repository import Repository
+ from amane.enums import DownloadableResource, MoveMode
+ from amane.handlers import OrganizeHandler, OrganizePayload
++from amane.handlers import file as file_module
+ from amane.media import ResourceStore, materialize_images
+ from amane.net.http import WebClient
+ from amane.observability.liu1443452494_processing_log import build_report, read_log
+@@ -137,3 +138,50 @@ async def test_organize_records_per_file_paths_and_restores_context(
+         assert any(entry.message == "NFO 已写入" for entry in report.entries)
+         other = next(value for value in numbers if value != number)
+         assert str(library_root / f"{other}.mp4") not in report.model_dump_json()
++
++
++@pytest.mark.parametrize("condition", ["copy2", "metadata", "content"])
++@pytest.mark.parametrize("record", [True, False])
++def test_copy_events_follow_final_copy_result(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, condition: str, record: bool
++) -> None:
++    """成功复制仅记录最终目标, 关闭记录或内容复制失败时不产生成功记录。"""
++    source = tmp_path / "原始资源.mp4"
++    source.write_bytes(b"original-resource")
++    target = tmp_path / "整理副本.mp4"
++    copied: list[tuple[Path, Path, bytes]] = []
++    copy_contents = file_module.shutil.copyfile
++    first = PermissionError("模拟首次复制失败")
++    second = OSError("模拟内容复制失败")
++
++    def fail_first(src: Path, dst: Path) -> None:
++        if condition == "metadata":
++            copy_contents(src, dst)
++        raise first
++
++    def fail_metadata(src: Path, dst: Path) -> None:
++        raise first
++
++    def fail_contents(src: Path, dst: Path) -> None:
++        raise second
++
++    def record_copy(src: Path, dst: Path) -> None:
++        copied.append((src, dst, dst.read_bytes()))
++
++    monkeypatch.setattr(file_module, "record_copied_file", record_copy)
++    if condition != "copy2":
++        monkeypatch.setattr(file_module.shutil, "copy2", fail_first)
++    if condition == "metadata":
++        monkeypatch.setattr(file_module.shutil, "copystat", fail_metadata)
++    if condition == "content":
++        monkeypatch.setattr(file_module.shutil, "copyfile", fail_contents)
++        with pytest.raises(OSError, match="模拟内容复制失败") as error:
++            file_module._copy_into_library(source, target, record=record)
++        assert error.value is second
++        assert not target.exists()
++    else:
++        file_module._copy_into_library(source, target, record=record)
++        assert target.read_bytes() == b"original-resource"
++    expected = [(source, target, b"original-resource")] if record and condition != "content" else []
++    assert copied == expected
++    assert source.read_bytes() == b"original-resource"

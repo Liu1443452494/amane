@@ -1,13 +1,13 @@
 diff --git a/docs/dev/data-model.md b/docs/dev/data-model.md
-index b07792c3dae0ffe4a8878a67195316f408c426de..da1a797c007776b6d1d146e8cd0a86c720ea59d0 100644
+index c04f5061259270692b2441c12ebab45a16c413bd..3325ac2b9d518041a3fc6ac3d4e5ab9988273162 100644
 --- a/docs/dev/data-model.md
 +++ b/docs/dev/data-model.md
-@@ -123,7 +123,7 @@
+@@ -123,7 +123,7 @@ PATCH 三态: **省略键** = 不更新 (`exclude_unset`); **显式值** = 写
 
  `link_template` 为空则不创建链接, 非空时 ORGANIZE 在视频就位后按该模板写一条指向真实视频的链接 (`link_mode=strm` 写 `.strm`, `symlink` 做符号链接). 链接必须在库外, 否则 REFRESH 会把链接再扫描为媒体. `.strm` 正文由库级 `strm_content_template` 决定 (空则写一行视频绝对路径); 模板引用 `{video_relpath}` 且整理后路径不在本库内时失败, 不写出错误正文. 默认附属模板用 `{link_dir}`, 因此填链接模板后 NFO / 海报自动跟随链接.
 
--模板语言在 `organize/template.py`, 只约束以下几点: 占位符分相位注入 (`metadata` → file 相位 → `apply_video` → `apply_link`), file 相位未检出是**空串**不是 `Unknown`; 渲染时把 `{title}` / `{actor}` 等分量截到 200 UTF-8 字节 (不切开多字节字符), 但不截断渲染后的路径分量; 可选组 `[...]` 内直接占位符全空则整段丢弃, 有一个非空时其余输出空串. 普通占位符缺失回退 `Unknown`. **段名按 Windows 创建结果对齐**: 每个路径段去掉段尾的 `.` 与空格, 控制字符替换为空格 — 创建与 `os.path.abspath` 对段尾字符的处理不同, 不对齐会让索引记录磁盘上不存在的名字; `.` / `..` 原样保留给逃逸检查. **逃逸防护**: 校验对渲染结果做 realpath (跟随符号链接), 相对模板的真实写出路径必须在本库内 (`ALLOW_ALL` 也不例外), 绝对模板必须位于本库或 `safe_dirs` 内, 否则 `ValueError`; 多盘分存要求目标盘在 `safe_dirs` 内. 细则见 `organize/path_templates.py`.
-+模板语言见 `src/amane/organize/template.py::PathEngine`; `TemplateContext` 保留完整名单, 筛选后超过三人且目录段仅有 `actresses` 占位符时才替换姓名. 调用方区分文件与目录产物, STRM 正文不替换姓名. 其余约束: 占位符分相位注入 (`metadata` → file 相位 → `apply_video` → `apply_link`), file 相位未检出是**空串**不是 `Unknown`; 渲染时把 `{title}` / `{actor}` 等分量截到 200 UTF-8 字节 (不切开多字节字符), 但不截断渲染后的路径分量; 可选组 `[...]` 内直接占位符全空则整段丢弃, 有一个非空时其余输出空串. 普通占位符缺失回退 `Unknown`. **段名按 Windows 创建结果对齐**: 每个路径段去掉段尾的 `.` 与空格, 控制字符替换为空格 — 创建与 `os.path.abspath` 对段尾字符的处理不同, 不对齐会让索引记录磁盘上不存在的名字; `.` / `..` 原样保留给逃逸检查. **逃逸防护**: 校验对渲染结果做 realpath (跟随符号链接), 相对模板的真实写出路径必须在本库内 (`ALLOW_ALL` 也不例外), 绝对模板必须位于本库或 `safe_dirs` 内, 否则 `ValueError`; 多盘分存要求目标盘在 `safe_dirs` 内. 细则见 `organize/path_templates.py`.
+-模板语言在 `organize/template.py`, 只约束以下几点: 占位符分相位注入 (`metadata` → file 相位 → `apply_video` → `apply_link`), file 相位未检出是**空串**不是 `Unknown`; `{index}` / `{index_padded}` 不在这些相位里, 只在剧照文件名模板的写盘渲染中有值 (补零宽度取本轮张数位数), 其它模板输出 `Unknown`, 因此剧照文件名由复制阶段渲染并依赖 `ResolvedPaths.context` 携带同一份取值, 不由 `resolve_paths` 产出; 渲染时把 `{title}` / `{actor}` 等分量截到 200 UTF-8 字节 (不切开多字节字符), 但不截断渲染后的路径分量; 可选组 `[...]` 内直接占位符全空则整段丢弃, 有一个非空时其余输出空串. 普通占位符缺失回退 `Unknown`. **段名按 Windows 创建结果对齐**: 每个路径段去掉段尾的 `.` 与空格, 控制字符替换为空格 — 创建与 `os.path.abspath` 对段尾字符的处理不同, 不对齐会让索引记录磁盘上不存在的名字; `.` / `..` 原样保留给逃逸检查. **逃逸防护**: 校验对渲染结果做 realpath (跟随符号链接), 相对模板的真实写出路径必须在本库内 (`ALLOW_ALL` 也不例外), 绝对模板必须位于本库或 `safe_dirs` 内, 否则 `ValueError`; 多盘分存要求目标盘在 `safe_dirs` 内. 细则见 `organize/path_templates.py`.
++模板语言见 `src/amane/organize/template.py::PathEngine`; `TemplateContext` 保留完整名单, 筛选后超过三人且目录段仅有 `actresses` 占位符时才替换姓名. 调用方区分文件与目录产物, STRM 正文不替换姓名. 其余约束: 占位符分相位注入 (`metadata` → file 相位 → `apply_video` → `apply_link`), file 相位未检出是**空串**不是 `Unknown`; `{index}` / `{index_padded}` 不在这些相位里, 只在剧照文件名模板的写盘渲染中有值 (补零宽度取本轮张数位数), 其它模板输出 `Unknown`, 因此剧照文件名由复制阶段渲染并依赖 `ResolvedPaths.context` 携带同一份取值, 不由 `resolve_paths` 产出; 渲染时把 `{title}` / `{actor}` 等分量截到 200 UTF-8 字节 (不切开多字节字符), 但不截断渲染后的路径分量; 可选组 `[...]` 内直接占位符全空则整段丢弃, 有一个非空时其余输出空串. 普通占位符缺失回退 `Unknown`. **段名按 Windows 创建结果对齐**: 每个路径段去掉段尾的 `.` 与空格, 控制字符替换为空格 — 创建与 `os.path.abspath` 对段尾字符的处理不同, 不对齐会让索引记录磁盘上不存在的名字; `.` / `..` 原样保留给逃逸检查. **逃逸防护**: 校验对渲染结果做 realpath (跟随符号链接), 相对模板的真实写出路径必须在本库内 (`ALLOW_ALL` 也不例外), 绝对模板必须位于本库或 `safe_dirs` 内, 否则 `ValueError`; 多盘分存要求目标盘在 `safe_dirs` 内. 细则见 `organize/path_templates.py`.
 
  ## Resource (一等存储, 非缓存)
 
@@ -29,10 +29,10 @@ index d77bd7d5ae2c5f3b692c705a25e2bd3a62c734ac..3ef81c25d25109a312ebc60230810bc5
      trailer = PathEngine(library.trailer_template or TRAILER_TEMPLATE_DEFAULT).resolve(ctx, base_path, safe_dirs)
 
 diff --git a/src/amane/organize/template.py b/src/amane/organize/template.py
-index 45dbe0a398048bde1b0066eed7dd80b1db5e557a..781409c0ca400ac24e755354f0808b0978a2d371 100644
+index 43d5c6a70911ca8196e852502441a53b8336f299..a9b00307dd00f9b071a8513d0fd1eeaa11f8329f 100644
 --- a/src/amane/organize/template.py
 +++ b/src/amane/organize/template.py
-@@ -85,6 +85,7 @@
+@@ -87,6 +87,7 @@ class _Literal:
  class _Placeholder:
      name: str
      mapping: tuple[tuple[str, str], ...] = ()
@@ -40,7 +40,7 @@ index 45dbe0a398048bde1b0066eed7dd80b1db5e557a..781409c0ca400ac24e755354f0808b09
 
 
  @dataclass(frozen=True, slots=True)
-@@ -203,7 +204,7 @@
+@@ -205,7 +206,7 @@ def _lookup(name: str, variables: dict[str, str]) -> str:
 
  def _resolve(node: _Placeholder, variables: dict[str, str]) -> str:
      """查出值后按映射改写. 空源只在写出 `{name|=缺省}` 时变成非空, 否则仍为空, 可选组省略."""
@@ -49,7 +49,7 @@ index 45dbe0a398048bde1b0066eed7dd80b1db5e557a..781409c0ca400ac24e755354f0808b09
      mapped = dict(node.mapping)
      return mapped.get(raw, raw)
 
-@@ -316,7 +317,7 @@
+@@ -318,7 +319,7 @@ def _build_variables(
      cd: int | None = None,
      actor_genders: Mapping[str, ActorGender] | None = None,
      library_root: Path | None = None,
@@ -58,7 +58,7 @@ index 45dbe0a398048bde1b0066eed7dd80b1db5e557a..781409c0ca400ac24e755354f0808b09
      year = metadata.release[:4] if metadata.release and len(metadata.release) >= 4 else None
      actor = metadata.actors[0] if metadata.actors else None
      actresses = actress_names(metadata.actors, actor_genders)
-@@ -328,7 +329,7 @@
+@@ -330,7 +331,7 @@ def _build_variables(
          cd = file_info.cd
      prefix, suffix = split_number(metadata.number) if metadata.number else ("", "")
 
@@ -67,15 +67,15 @@ index 45dbe0a398048bde1b0066eed7dd80b1db5e557a..781409c0ca400ac24e755354f0808b09
          "number": metadata.number,
          "prefix": prefix,
          "suffix": suffix,
-@@ -360,6 +361,7 @@
-         "link_name": _UNKNOWN,
-         "raw_srt_name": _UNKNOWN,
+@@ -364,6 +365,7 @@ def _build_variables(
+         "index": _UNKNOWN,
+         "index_padded": _UNKNOWN,
      }
 +    return variables, len(actresses)
 
 
  @dataclass
-@@ -369,6 +371,7 @@
+@@ -373,6 +375,7 @@ class TemplateContext:
      variables: dict[str, str]
      library_root: Path | None = None
      dest: Path | None = None
@@ -83,7 +83,7 @@ index 45dbe0a398048bde1b0066eed7dd80b1db5e557a..781409c0ca400ac24e755354f0808b09
 
      @classmethod
      def from_mapping(cls, variables: dict[str, str]) -> TemplateContext:
-@@ -386,11 +389,11 @@
+@@ -390,11 +393,11 @@ class TemplateContext:
          actor_genders: Mapping[str, ActorGender] | None = None,
          library_root: Path | None = None,
      ) -> TemplateContext:
@@ -97,7 +97,7 @@ index 45dbe0a398048bde1b0066eed7dd80b1db5e557a..781409c0ca400ac24e755354f0808b09
 
      def apply_video(self, dest: Path, library_root: Path) -> None:
          self.dest = dest
-@@ -473,12 +476,56 @@
+@@ -477,12 +480,56 @@ class TemplateEngine:
          return self.clean(self.fill(ctx), ctx)
 
 

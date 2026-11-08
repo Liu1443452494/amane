@@ -140,7 +140,7 @@ index 0000000..04ad496
 +        response.notices.append("暂无可关联的处理记录；旧整理日志未记录番号时无法确认归属。")
 +    return response
 diff --git a/src/amane/handlers/file.py b/src/amane/handlers/file.py
-index 366f35a..3cc76ad 100644
+index 7aca66fd8748c44fcb50ab9438a98aca69b966e5..c1cb6609b3e25c6b3c675959e695f9cd22c1080a 100644
 --- a/src/amane/handlers/file.py
 +++ b/src/amane/handlers/file.py
 @@ -16,6 +16,7 @@ from ..media import ResourceStore, apply_cover_watermarks_from_info, crop_poster
@@ -150,8 +150,8 @@ index 366f35a..3cc76ad 100644
 +from ..observability.liu1443452494_process_events import file_processing, record_copied_file
  from ..observability.models import OrganizeConflict, OrganizeConflictReason
  from ..organize import (
-     MoveMode,
-@@ -161,6 +162,7 @@ async def execute_file_operations(
+     EXTRAFANART_NAME_TEMPLATE_DEFAULT,
+@@ -164,6 +165,7 @@ async def execute_file_operations(
      # 写入 NFO.
      if org_result.outcome is PlaceOutcome.PLACED and org_result.dest and write_nfo:
          await write_nfo_file(metadata, paths.nfo, file_info=file_info)
@@ -159,15 +159,31 @@ index 366f35a..3cc76ad 100644
  
      # 字幕按模板落到 video_dest 侧.
      subtitle_conflicts: list[SubtitleConflict] = []
-@@ -315,6 +317,7 @@ def _copy_into_library(src: Path, dst: Path) -> None:
-             shutil.copystat(src, dst)
-         except OSError as exc:
-             logger.debug("copy metadata skipped", src=str(src), dst=str(dst), error=str(exc))
+@@ -312,7 +314,6 @@ def _copy_into_library(src: Path, dst: Path) -> None:
+     """
+     try:
+         shutil.copy2(src, dst)
+-        return
+     except OSError as first:
+         # 内容可能已经写好, 重拷一次以区分内容失败与元数据失败: 内容失败会在此再次抛出.
+         try:
+@@ -327,10 +328,11 @@ def _copy_into_library(src: Path, dst: Path) -> None:
+                 copyfile_error=str(second),
+             )
+             raise
+-    try:
+-        shutil.copystat(src, dst)
+-    except OSError as exc:
+-        logger.debug("copy metadata skipped", src=str(src), dst=str(dst), error=str(exc))
++        try:
++            shutil.copystat(src, dst)
++        except OSError as exc:
++            logger.debug("copy metadata skipped", src=str(src), dst=str(dst), error=str(exc))
 +    record_copied_file(src, dst)
  
  
  @in_thread
-@@ -521,10 +524,26 @@ class OrganizeHandler(TaskHandler[OrganizePayload, OrganizeResult]):
+@@ -548,10 +550,26 @@ class OrganizeHandler(TaskHandler[OrganizePayload, OrganizeResult]):
                      mf_path = Path(mf.path)
                      missing = await existing_disk_path(mf_path, follow_symlinks=False) is None
                      if missing or not is_descendant(mf_path, library_root) or is_in_trash(mf_path):
@@ -194,7 +210,7 @@ index 366f35a..3cc76ad 100644
                              skipped += 1
                          else:
                              # MEDIA, 以及 classify 返回 None 的已索引行 (不在当前扩展名白名单,
-@@ -550,30 +569,47 @@ class OrganizeHandler(TaskHandler[OrganizePayload, OrganizeResult]):
+@@ -577,30 +595,47 @@ class OrganizeHandler(TaskHandler[OrganizePayload, OrganizeResult]):
                  path_str = media_file.path
                  file_path = Path(path_str)
                  if media_file.metadata_id is None:

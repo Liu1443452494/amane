@@ -21,12 +21,12 @@ index ce7cbc30..d485c569 100644
  
  只有 `auto_maintain`: 打开且视觉塔就绪时, 图片变化的条目立即增量重算且视觉塔常驻; 否则只删变动图片的旧向量, 等下次索引重建.
 diff --git a/docs/dev/frontend.md b/docs/dev/frontend.md
-index ebcf808a..7e5828ec 100644
+index 6920260e745a305fe4ee6b7b0e802f015d12407c..e8ed071bcbf1e7d6bec9ead5953abf6c81fb3908 100644
 --- a/docs/dev/frontend.md
 +++ b/docs/dev/frontend.md
 @@ -73,6 +73,8 @@ Settings、任务提交、定时创建、metadata 编辑共用 `components/schem
  
- 媒体库共同目录仅存在于表单: `web/src/components/library/metadata-directory.ts::collapseMetadataDirectory` 按接口默认模板合并显示, `expandMetadataDirectory` 在提交前还原完整单项; 数据库与 API 不保存共同目录. 编辑入口先取得默认模板, 缺失时不能清空单项或忽略前缀提交.
+ 媒体库共同目录仅存在于表单: `web/src/components/library/metadata-directory.ts::collapseMetadataDirectory` 按默认模板合并七项路径, `expandMetadataDirectory` 在提交前还原; 剧照文件名独立保存, 不附加目录前缀. 数据库与 API 不保存共同目录; 默认模板缺失时禁止合并显示或忽略前缀提交.
  
 +媒体服务器附加操作见 `web/src/components/media/liu1443452494-emby-actors-panel.tsx::EmbyActorsPanel`。`SchemaForm` 向操作区传递实际未保存状态；保存完成前禁用选库与提交，连接变化时重置选择，查询缓存键不得包含凭据。任务绑定校验见 [config.md](config.md)。
 +

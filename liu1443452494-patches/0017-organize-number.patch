@@ -1,18 +1,18 @@
 diff --git a/docs/dev/data-model.md b/docs/dev/data-model.md
-index d6ecd8ff..431e6ea1 100644
+index c59c5d0dab6a16a23c549dbd1a57562889e7f3cd..c5e71aa7efc6719544b1584ce545473f5cedb7ac 100644
 --- a/docs/dev/data-model.md
 +++ b/docs/dev/data-model.md
 @@ -27,6 +27,8 @@
  
  类型 (`content_type`) 是**番号的属性**, 落在 `Metadata`: 只在条目创建时落定 (有发现路径时随其路径关键词, 否则只依据番号), 番号不可改, 因此不随文件增删或后续刮削漂移; 它决定刮削路由, 也供「类型」筛选与有码 / 无码角标使用, 不进对外 PATCH. `ContentType.chinese` 是国产, 不是中字.
  
-+整理用番号只覆盖路径模板和 NFO 的番号部分, 原始 `Metadata.number` 继续承担刮削查询、唯一性与历史关联; 来源快照和 STRM 正文的身份字段不使用整理用番号. REST 编辑经 `src/amane/api/support/liu1443452494_organize_number.py::update_organize_number` 在库锁内记录旧产物再保存, 原番号不变使产物追踪跨改名继续有效; 执行边界见 [task-system.md](task-system.md#落盘执行).
++整理用番号覆盖路径、剧照文件名与 NFO 的番号部分, 原始 `Metadata.number` 继续承担刮削查询、唯一性与历史关联; 来源快照和 STRM 正文的身份字段不使用整理用番号. REST 编辑经 `src/amane/api/support/liu1443452494_organize_number.py::update_organize_number` 在库锁内记录旧产物再保存, 原番号不变使产物追踪跨改名继续有效; 执行边界见 [task-system.md](task-system.md#落盘执行).
 +
  文件相位 (`mosaic` / `definition` 与中字的文件名标记列) 是 **path 的投影**, 落在 `MediaFile`: 创建与修改 path 时用同一次 `parse_file_info` 回填, 不纳入对外 PATCH; `cd` 只用于 ORGANIZE 分集配对, 不落库. `mosaic` 只写入文件名与目录整段词表命中的马赛克标记 (无码 / 破解 / 流出); 同一次解析命中多个标记时取破解, 其次流出, 再次无码. 中字是两个来源的并集: 文件名的中字标记 (`has_subtitle_in_name`, path 的投影) 与视频同目录存在库 `subtitle_extensions` 命中的字幕 (`has_external_subtitle`, 在登记 / 修改 path / 库扫描时各检查一次; 外挂字幕只在整理落盘时作为 `parse_file_info` 的入参并进 `FileInfo.has_subtitle`, 不改变入库的路径投影). 两者都不校验语言文字, 与 ORGANIZE 的字幕配对口径相同; 目录读取不到时按无字幕处理. 只删除字幕不会触发复查, 视频重新登记、更换 path 或所在库被扫描时才回退. 并集在 Python 是 `MediaFile.has_subtitle` (property), SQL 侧必须改用 `db/models.py::has_subtitle_predicate`, 两处口径必须一致.
  
  Metadata 列表与 `/media` 文件行的角标与筛选: 有码 / 无码取条目类型 (没有挂载文件也成立), 无码再并上「存在无码标记的文件」; 中字 / 分辨率 / 破解 / 流出按关联 EXISTS 或页级聚合 (`file_phase`) 判定, 任一挂载文件具备即亮, `definition` 取最高档; 布尔取值的口径见 [api.md](api.md). 文件行同样返回派生的 `censored` / `uncensored`: `censored` 取这一份文件的性质 (带无码标记的副本不算有码), `uncensored` 与列表筛选同口径, 未绑定条目的文件只看自身标记. VR 标识与 `GET /metadata` 的 `vr` 筛选不来自文件相位, 也不物化: 只依据 `Metadata.tags` 与 `parsing/file_info.py::VR_TAGS` 的整体相等判定, 番号不参与; Python 与 SQL 两侧共用同一份词表 (`db/models.py::metadata_vr_predicate`, 用法同 `has_subtitle_predicate`), 因此重命名 / 合并标签后判定立即变化, 无需回填. 代价是判定随 `tags` 的单源取值: 字段链首个非空站点不给 VR 标签的条目判为否.
 diff --git a/docs/dev/database.md b/docs/dev/database.md
-index a1d4d79a..6e13b1e4 100644
+index a1d4d79a1ce14fef936d559bf28ca7c3f572e57f..01be408d9e5fc55c36e34300d175a956efb104f3 100644
 --- a/docs/dev/database.md
 +++ b/docs/dev/database.md
 @@ -42,7 +42,7 @@ pysqlite 只在 DML 之前发出 `BEGIN`, 纯 SELECT 落在事务之外 (SQLAlch
@@ -20,12 +20,12 @@ index a1d4d79a..6e13b1e4 100644
  3. **迁移连接**单独 `autocommit=False` + Alembic `transactional_ddl=True`: 单次 revision 内 DDL 与 `alembic_version` 同事务, 失败则回滚, 避免「表已创建但版本未升」的半成品. 业务连接不修改事务模式, 仍只开 WAL + FK.
  
 -自用水印与上游迁移通过 `src/amane/db/migrations/versions/0bbd0974b7c7_合并上游清理任务与自用水印迁移.py::down_revision` 合并为单一终点; 已发布迁移的标识与父版本保持稳定, 保证既有数据库补齐尚未执行的分支.
-+自用水印与上游迁移通过 `src/amane/db/migrations/versions/0bbd0974b7c7_合并上游清理任务与自用水印迁移.py::down_revision` 合并分支; 后续迁移沿合并节点线性追加, 已发布迁移的标识与父版本保持稳定.
++自用与上游迁移经 `src/amane/db/migrations/versions/060a2c478ef0_合并剧照模板与自用迁移.py::down_revision` 合并为单一终点; 已发布迁移的标识与父版本保持稳定, 缺失分支在启动升级时补齐.
  
  迁移内不允许文件系统 I/O 与其它无界等待: 整条链共用一个事务, 中止即整体回滚、重试仍从零开始, 而网盘挂载点上逐目录列举会把启动阻塞数分钟以上且没有可见进度. 需要遍历磁盘的回填由运行期承担 (如 `REFRESH` 库扫描). 迁移内也不允许中途 `commit()`: DDL 会随之提前落盘, 而 `alembic_version` 在 revision 返回后才推进, 失败后重跑报 `duplicate column name`.
  
 diff --git a/docs/dev/task-system.md b/docs/dev/task-system.md
-index 79be0b5d..b8f34da0 100644
+index 79be0b5d468b9de33cfc4701a5cbee7bad172bbb..2393fcc9bb04d0dcabd6deb681ccd49bd6eee035 100644
 --- a/docs/dev/task-system.md
 +++ b/docs/dev/task-system.md
 @@ -94,7 +94,7 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
@@ -33,7 +33,7 @@ index 79be0b5d..b8f34da0 100644
  ## 落盘执行
  
 -所有整理入口在 `src/amane/handlers/file.py::apply_file_operations` 合成有效水印. 编辑过的文件通过 `src/amane/organize/watermark_outputs.py::capture_output_baseline` 和 `finish_output_snapshot` 记录产物位置, 新产物成功后才删除被替代且指纹未变的旧文件, 仅清除因此腾空的目录. 独立元数据目录内已记录的字幕经 `src/amane/organize/subtitles.py::place_subtitles` 按库配置重新放置; 不递归删除目录, 其它版本共用路径和外部修改的文件保留. 固定模板共用目标时报告失败, 原图缺失或输出失败时保留旧产物, 不使用已有水印图作为原图. 未编辑文件保持原整理流程.
-+所有整理入口在 `src/amane/handlers/file.py::apply_file_operations` 合成有效水印. 水印或整理用番号编辑通过 `src/amane/organize/watermark_outputs.py::capture_output_baseline` 和 `finish_output_snapshot` 追踪产物, 新产物成功后才删除被替代且指纹未变的旧文件, 仅清除因此腾空的目录. 独立目录内已记录的字幕经 `src/amane/organize/subtitles.py::place_subtitles` 按库配置重新放置; 不递归删除目录, 其它版本共用路径和外部修改的文件保留. 共用目标时报告失败, 原图缺失或输出失败时保留旧产物, 不使用已有水印图作为原图. 未编辑文件保持原整理流程.
++所有整理入口在 `src/amane/handlers/file.py::apply_file_operations` 合成有效水印. 水印或整理用番号编辑通过 `src/amane/organize/watermark_outputs.py::capture_output_baseline` 和 `finish_output_snapshot` 追踪产物, 新产物成功后才删除被替代且指纹未变的旧文件及因此腾空的目录. 首次剧照基线依赖当前模板、来源张数与番号归属, 无法确认的文件保留. 独立目录内已记录的字幕经 `src/amane/organize/subtitles.py::place_subtitles` 按库配置重新放置; 不递归删除目录, 其它版本共用路径和外部修改的文件保留. 共用目标时报告失败, 原图缺失或输出失败时保留旧产物, 不使用已有水印图作为原图. 未编辑文件保持原整理流程.
  
  `execute_file_operations` 是落盘执行单元, 仅 ORGANIZE 经 `apply_file_operations` 调用. 不变量:
  
@@ -181,7 +181,7 @@ index 00000000..c4608acb
 +def downgrade() -> None:
 +    op.drop_column("metadata", "organize_number")
 diff --git a/src/amane/db/models.py b/src/amane/db/models.py
-index db0cd4a0..f6deda35 100644
+index 5147c4b999868f051d51911071e86110a3b90dff..ef8205c099098bdc6276bbfb3a50dfd678f310e0 100644
 --- a/src/amane/db/models.py
 +++ b/src/amane/db/models.py
 @@ -1,7 +1,8 @@
@@ -199,7 +199,7 @@ index db0cd4a0..f6deda35 100644
      TrailerPattern,
  )
 +from ..liu1443452494_organize_number import normalize_organize_number
- from ..organize.path_templates import VIDEO_TEMPLATE_DEFAULT, PathTemplate
+ from ..organize.path_templates import VIDEO_TEMPLATE_DEFAULT, ExtrafanartNameTemplate, PathTemplate
  from ..organize.strm_content import StrmContentTemplate
  from ..parsing import VR_TAGS, ContentType, Mosaic, MosaicNature, WatermarkMode, is_vr
 @@ -301,6 +303,11 @@ class Metadata(SQLModel, table=True):
@@ -298,10 +298,10 @@ index 00000000..8ea81922
 +        raise ValueError("整理用番号过长，UTF-8 编码后不能超过 200 字节")
 +    return number
 diff --git a/src/amane/media/nfo.py b/src/amane/media/nfo.py
-index 434828f9..948e7cb4 100644
+index 2bace74a8387ba5888615b13f44a4b325b72bb91..022bcb44cd75928886b82eae4399ce54c9d6caed 100644
 --- a/src/amane/media/nfo.py
 +++ b/src/amane/media/nfo.py
-@@ -58,14 +58,13 @@ async def write_nfo(metadata: Metadata, nfo_path: Path, *, file_info: FileInfo |
+@@ -73,10 +73,11 @@ async def write_nfo(metadata: Metadata, nfo_path: Path, *, file_info: FileInfo |
              if year_match:
                  code.write(f"  <year>{year_match.group(1)}</year>\n")
  
@@ -310,17 +310,11 @@ index 434828f9..948e7cb4 100644
 +        code.write(f"  <num>{_escape_xml(number)}</num>\n")
  
          if metadata.title:
--            code.write(f"  <title>{_escape_xml(metadata.number)} {_escape_xml(metadata.title)}</title>\n")
--            code.write(
--                f"  <originaltitle>{_escape_xml(metadata.number)} {_escape_xml(metadata.title)}</originaltitle>\n"
--            )
--            code.write(f"  <sorttitle>{_escape_xml(metadata.number)} {_escape_xml(metadata.title)}</sorttitle>\n")
-+            code.write(f"  <title>{_escape_xml(number)} {_escape_xml(metadata.title)}</title>\n")
-+            code.write(f"  <originaltitle>{_escape_xml(number)} {_escape_xml(metadata.title)}</originaltitle>\n")
-+            code.write(f"  <sorttitle>{_escape_xml(number)} {_escape_xml(metadata.title)}</sorttitle>\n")
- 
-         code.write("  <mpaa>JP-18+</mpaa>\n")
- 
+-            title = _escape_xml(_title_with_number(metadata.number, metadata.title))
++            title = _escape_xml(_title_with_number(number, metadata.title))
+             code.write(f"  <title>{title}</title>\n")
+             code.write(f"  <originaltitle>{title}</originaltitle>\n")
+             code.write(f"  <sorttitle>{title}</sorttitle>\n")
 diff --git a/src/amane/organize/path_templates.py b/src/amane/organize/path_templates.py
 index 3ef81c25..7adab2cd 100644
 --- a/src/amane/organize/path_templates.py
@@ -342,10 +336,43 @@ index 3ef81c25..7adab2cd 100644
          ctx.apply_video(video_dest, base_path)
      else:
 diff --git a/src/amane/organize/watermark_outputs.py b/src/amane/organize/watermark_outputs.py
-index a3f9347c..8f357478 100644
+index a3f9347c838fceaa8749320754adadd291d14c12..36f4bc4d5da3c5ce37376d3fe5912f164ae6bd4e 100644
 --- a/src/amane/organize/watermark_outputs.py
 +++ b/src/amane/organize/watermark_outputs.py
-@@ -145,7 +145,7 @@ def capture_output_baseline(
+@@ -16,7 +16,7 @@ from ..parsing import FileInfo, parse_file_info
+ from ..utils.path import is_descendant, path_is_under, path_key, resolved_path
+ from ..utils.threads import in_thread
+ from .file import video_dest
+-from .path_templates import ResolvedPaths, resolve_paths
++from .path_templates import ResolvedPaths, render_extrafanart_names, resolve_paths
+ from .subtitles import discover_subtitles
+
+ if TYPE_CHECKING:
+@@ -123,6 +123,23 @@ def _nfo_matches(path: Path, number: str) -> bool:
+         return False
+
+
++def _extrafanart_baseline_paths(library: Library, metadata: Metadata, paths: ResolvedPaths) -> list[Path]:
++    legacy = {path for path in paths.extrafanart_dir.glob("*.jpg") if path.stem.isdecimal()}
++    maximum = max((len(urls) for urls in metadata.extrafanart_urls.values()), default=0)
++    if not library.extrafanart_name_template or not maximum:
++        return sorted(legacy)
++    names: set[str] = set()
++    try:
++        # 部分下载成功会改变补零宽度; 候选序号不得超过任一来源提供的最大张数。
++        for width in range(1, len(str(maximum)) + 1):
++            count = min(maximum, 10**width - 1)
++            names.update(render_extrafanart_names(library.extrafanart_name_template, paths.context, count))
++    except ValueError:
++        # 无快照时无法确认非法模板的旧产物归属, 保留未识别的文件。
++        return sorted(legacy)
++    return sorted(legacy | {paths.extrafanart_dir / name for name in names})
++
++
+ @in_thread
+ def capture_output_baseline(
+     library: Library,
+@@ -145,7 +162,7 @@ def capture_output_baseline(
      )
      snapshot = OutputSnapshot(number=metadata.number)
      dest = video_dest(paths.video.parent, paths.video.stem, source)
@@ -354,6 +381,17 @@ index a3f9347c..8f357478 100644
      if not owns_outputs and not paths.nfo.exists():
          with suppress(OSError):
              owns_outputs = source.samefile(dest)
+@@ -154,9 +171,7 @@ def capture_output_baseline(
+     outputs = planned_outputs(paths, write_nfo=library.write_nfo, kinds=library.copy_resources)
+     if LibraryResource.extrafanart in library.copy_resources and paths.extrafanart_dir.is_dir():
+         outputs.extend(
+-            OutputPath(kind="extrafanart", path=path)
+-            for path in paths.extrafanart_dir.glob("*.jpg")
+-            if path.stem.isdecimal()
++            OutputPath(kind="extrafanart", path=path) for path in _extrafanart_baseline_paths(library, metadata, paths)
+         )
+     # 独立元数据目录中的字幕不在视频旁边, 首次编辑时一并记录其位置.
+     subtitle_dirs = {paths.nfo.parent, paths.link.parent if paths.link is not None else paths.nfo.parent}
 diff --git a/tests/api/test_liu1443452494_organize_number.py b/tests/api/test_liu1443452494_organize_number.py
 new file mode 100644
 index 00000000..f9ae6c3c
@@ -520,19 +558,21 @@ index fd3a342c..2d9c0b9b 100644
  _ROUNDTRIP_IDS = ["media", "library", "schedule", "metadata", "feed"]
 diff --git a/tests/db/test_liu1443452494_organize_number_migration.py b/tests/db/test_liu1443452494_organize_number_migration.py
 new file mode 100644
-index 00000000..9d553d76
+index 0000000000000000000000000000000000000000..594dc0ddff578b5670170d917f6e3eb2460ae841
 --- /dev/null
 +++ b/tests/db/test_liu1443452494_organize_number_migration.py
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,156 @@
 +"""整理用番号迁移保留原番号及其唯一约束。"""
 +
 +from pathlib import Path
 +
 +import pytest
 +from alembic import command
++from alembic.script import ScriptDirectory
 +from sqlalchemy import create_engine, inspect, text
 +from sqlalchemy.exc import IntegrityError
 +
++from amane.db.sqlite_migrate import upgrade_sqlite_database
 +from tests.helpers import alembic_config
 +
 +
@@ -571,6 +611,111 @@ index 00000000..9d553d76
 +                "原有标题",
 +                None,
 +            )
++    finally:
++        engine.dispose()
++
++
++@pytest.mark.parametrize(
++    ("starting_revisions", "has_custom_data", "has_extrafanart_template"),
++    [
++        (("c4b12eeaee74",), True, False),
++        (("fb4fd486708c",), False, True),
++        (("c4b12eeaee74", "fb4fd486708c"), True, True),
++    ],
++    ids=["自用终点", "上游终点", "两分支均已升级"],
++)
++def test_startup_merges_extrafanart_and_custom_migrations(
++    tmp_path: Path,
++    starting_revisions: tuple[str, ...],
++    has_custom_data: bool,
++    has_extrafanart_template: bool,
++) -> None:
++    """启动补齐缺失分支，保留整理番号、人工水印与媒体库剧照模板。"""
++    path = tmp_path / "分支合并.db"
++    config = alembic_config(path)
++    for revision in starting_revisions:
++        command.upgrade(config, revision)
++    engine = create_engine(f"sqlite:///{path}")
++    insert = text(
++        "INSERT INTO metadata (number,title,content_type,actors,directors,tags,poster_urls,thumb_urls,"
++        "trailer_urls,extrafanart_urls,scores,external_ids,source_urls,field_sources,raw,created_at,updated_at) "
++        "VALUES (:number,'原有标题','CENSORED','[]','[]','[]','[]','[]','[]','{}','{}','{}','{}','{}','{}',"
++        "CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"
++    )
++    saved_outputs = '{"version":1,"number":"SSIS-345","outputs":[]}'
++    try:
++        with engine.begin() as connection:
++            assert set(connection.execute(text("SELECT version_num FROM alembic_version")).scalars()) == set(
++                starting_revisions
++            )
++            connection.execute(insert, {"number": "SSIS-345"})
++            connection.execute(
++                text(
++                    "INSERT INTO libraries "
++                    "(id,name,path,automation,recursive,patterns,move_mode,link_mode,video_template,"
++                    "write_nfo,copy_resources,trailer_pattern,blacklist_patterns,subtitle_extensions,min_file_size) "
++                    "VALUES (1,'原有媒体库','/原目录','SCRAPE',1,'[]','MOVE','STRM','{number}.{ext}',"
++                    "1,'[]','','[]','[]',0)"
++                )
++            )
++            connection.execute(
++                text(
++                    "INSERT INTO media_files "
++                    "(path,status,library_id,metadata_id,created_at,updated_at,mosaic,definition,"
++                    "has_subtitle_in_name,has_external_subtitle) "
++                    "VALUES ('/原目录/SSIS-345-C-4K.mp4','SCRAPED',1,1,'2026-11-01','2026-11-01',"
++                    "'CENSORED','4K',1,0)"
++                )
++            )
++            if has_custom_data:
++                connection.execute(text("UPDATE metadata SET organize_number='SSIS-345 整理名称'"))
++                connection.execute(
++                    text(
++                        "UPDATE media_files SET watermark_mode='MANUAL',watermark_subtitle=0,"
++                        "watermark_mosaic='LEAKED',watermark_definition=NULL,watermark_definition_locked=1,"
++                        "organized_outputs=:outputs"
++                    ),
++                    {"outputs": saved_outputs},
++                )
++            if has_extrafanart_template:
++                connection.execute(text("UPDATE libraries SET extrafanart_name_template='{number}_{index_padded}.jpg'"))
++
++        backup = upgrade_sqlite_database(path)
++        assert backup is not None and backup.is_file()
++        heads = ScriptDirectory.from_config(config).get_heads()
++        assert len(heads) == 1
++        with engine.connect() as connection:
++            assert connection.execute(text("SELECT version_num FROM alembic_version")).scalars().all() == heads
++            assert connection.execute(text("SELECT number,title,organize_number FROM metadata")).one() == (
++                "SSIS-345",
++                "原有标题",
++                "SSIS-345 整理名称" if has_custom_data else None,
++            )
++            assert connection.execute(text("SELECT name,path,extrafanart_name_template FROM libraries")).one() == (
++                "原有媒体库",
++                "/原目录",
++                "{number}_{index_padded}.jpg" if has_extrafanart_template else None,
++            )
++            assert connection.execute(
++                text("SELECT path,status,library_id,metadata_id,mosaic,definition FROM media_files")
++            ).one() == ("/原目录/SSIS-345-C-4K.mp4", "SCRAPED", 1, 1, "CENSORED", "4K")
++            expected_watermarks = (
++                ("MANUAL", 0, "LEAKED", None, 1, saved_outputs)
++                if has_custom_data
++                else ("AUTO", None, None, None, 0, None)
++            )
++            assert (
++                connection.execute(
++                    text(
++                        "SELECT watermark_mode,watermark_subtitle,watermark_mosaic,watermark_definition,"
++                        "watermark_definition_locked,organized_outputs FROM media_files"
++                    )
++                ).one()
++                == expected_watermarks
++            )
++        with pytest.raises(IntegrityError, match="UNIQUE"), engine.begin() as connection:
++            connection.execute(insert, {"number": "ssis-345"})
++        assert upgrade_sqlite_database(path) is None
 +    finally:
 +        engine.dispose()
 diff --git a/tests/handlers/test_liu1443452494_organize_number.py b/tests/handlers/test_liu1443452494_organize_number.py
@@ -627,10 +772,10 @@ index 00000000..29eb1ed3
 +    assert await repo.get_metadata_by_number(custom) is None
 diff --git a/tests/organize/test_liu1443452494_organize_number.py b/tests/organize/test_liu1443452494_organize_number.py
 new file mode 100644
-index 00000000..248e13b7
+index 0000000000000000000000000000000000000000..77cf5fd22ea0fbe28bd8efd609097e8e4c9142c8
 --- /dev/null
 +++ b/tests/organize/test_liu1443452494_organize_number.py
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,70 @@
 +"""整理用番号的输入边界、路径和 NFO 输出。"""
 +
 +from pathlib import Path
@@ -642,6 +787,7 @@ index 00000000..248e13b7
 +from amane.liu1443452494_organize_number import normalize_organize_number
 +from amane.media import write_nfo
 +from amane.organize import resolve_paths
++from amane.organize.path_templates import render_extrafanart_names
 +from amane.organize.strm_content import render_strm_content
 +
 +
@@ -685,6 +831,10 @@ index 00000000..248e13b7
 +    expected = custom or metadata.number
 +    paths = resolve_paths(library, metadata, ext="mp4")
 +    assert paths.video == tmp_path / expected / f"{expected}.mp4"
++    for template in ("{number}-{index_padded}.jpg", "{video_name}-{index_padded}.jpg"):
++        assert render_extrafanart_names(template, paths.context, 12) == [
++            f"{expected}-{index:02d}.jpg" for index in range(1, 13)
++        ]
 +    assert render_strm_content("https://example.test/{number}", paths.video, tmp_path, metadata) == (
 +        "https://example.test/Vixen.19.05.09\n"
 +    )
@@ -726,3 +876,330 @@ index a54f5ad2..2e2e5ab5 100644
      "title": {
        "label": "标题"
      },
+diff --git a/src/amane/db/migrations/versions/060a2c478ef0_合并剧照模板与自用迁移.py b/src/amane/db/migrations/versions/060a2c478ef0_合并剧照模板与自用迁移.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..cc4cfdc907dd3b96c7f655e58bd88338fcb347bc
+--- /dev/null
++++ b/src/amane/db/migrations/versions/060a2c478ef0_合并剧照模板与自用迁移.py
+@@ -0,0 +1,23 @@
++"""合并剧照模板与自用迁移。
++
++迁移版本：060a2c478ef0
++父版本：c4b12eeaee74、fb4fd486708c
++创建时间：2026-11-08 12:02:13.553315
++
++仅合并版本关系，结构与数据变更由父分支执行。
++"""
++
++from collections.abc import Sequence
++
++revision: str = "060a2c478ef0"
++down_revision: str | Sequence[str] | None = ("c4b12eeaee74", "fb4fd486708c")
++branch_labels: str | Sequence[str] | None = None
++depends_on: str | Sequence[str] | None = None
++
++
++def upgrade() -> None:
++    pass
++
++
++def downgrade() -> None:
++    pass
+diff --git a/tests/handlers/test_liu1443452494_library_jpeg.py b/tests/handlers/test_liu1443452494_library_jpeg.py
+index 9fc347ec01ffb5e925601fb205a3d66d69fd3cfc..30fd5ea829d8a037b6cf35c4fc1bff0b590985bb 100644
+--- a/tests/handlers/test_liu1443452494_library_jpeg.py
++++ b/tests/handlers/test_liu1443452494_library_jpeg.py
+@@ -8,13 +8,14 @@ import pytest
+ from PIL import Image, ImageCms, JpegImagePlugin
+
+ from amane.config import HotSettings, ScrapingConfig, WatermarkConfig
+-from amane.db.models import Metadata
+-from amane.enums import DownloadableResource, LibraryResource
++from amane.db.models import Library, MediaFile, Metadata
++from amane.enums import DownloadableResource, LibraryResource, MoveMode
+ from amane.handlers import file as file_module
+ from amane.handlers.file import _place_library_images
+ from amane.media import ResourceStore, materialize_images
+ from amane.media import images as image_module
+ from amane.net.http import WebClient
++from amane.organize import PlaceOutcome, resolve_paths
+ from amane.parsing import ContentType, parse_file_info
+ from tests.handlers.test_file_ops import _paths
+ from tests.media.test_liu1443452494_image_quality import PosterClient
+@@ -333,3 +334,80 @@ async def test_scrape_caches_webp_and_organize_only_converts_the_library_copy(
+         image.load()
+         assert image.format == "JPEG" and image.size == (300, 200)
+     assert client.downloaded == [url]
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    ("available", "suffix", "first_name", "last_name", "expected_format"),
++    [
++        (10, ".jpeg", "MY-456-01.jpeg", "MY-456-10.jpeg", "JPEG"),
++        (9, ".jpeg", "MY-456-1.jpeg", "MY-456-9.jpeg", "JPEG"),
++        (10, ".webp", "MY-456-01.webp", "MY-456-10.webp", "WEBP"),
++        (9, ".png", "MY-456-1.png", "MY-456-9.png", "WEBP"),
++    ],
++)
++async def test_custom_still_names_preserve_sources_and_track_actual_outputs(
++    resource_store: ResourceStore,
++    tmp_path: Path,
++    available: int,
++    suffix: str,
++    first_name: str,
++    last_name: str,
++    expected_format: str,
++) -> None:
++    """自定义剧照名使用整理用番号及成功下载数量, 转换和快照始终指向实际副本。"""
++    urls = [f"https://images.test/still-{index}.webp" for index in range(1, 11)]
++    originals: dict[str, bytes] = {}
++    for index, url in enumerate(urls[:available], 1):
++        encoded = BytesIO()
++        Image.new("RGB", (60 + index, 40), "blue").save(encoded, format="WEBP")
++        originals[url] = encoded.getvalue()
++    client = PosterClient(images=originals)
++    source = tmp_path / "MIDV-123.mp4"
++    source.write_bytes(b"original-video")
++    library_root = tmp_path / "媒体库"
++    library_root.mkdir()
++    library = Library(
++        name="测试",
++        path=str(library_root),
++        video_template="{number}/{number}.{ext}",
++        extrafanart_name_template="{number}-{index_padded}" + suffix,
++        copy_resources=[LibraryResource.extrafanart],
++    )
++    metadata = Metadata(number="MIDV-123", organize_number="MY-456", extrafanart_urls={"test": urls})
++    file_info = parse_file_info(source)
++    paths = resolve_paths(library, metadata, ext="mp4", source_path=source, file_info=file_info)
++    result = await file_module.execute_file_operations(
++        media_file=MediaFile(path=str(source), library_id=1),
++        metadata=metadata,
++        paths=paths,
++        move_mode=MoveMode.COPY,
++        resource_store=resource_store,
++        file_info=file_info,
++        write_nfo=False,
++        copy_resources=library.copy_resources,
++        web_client=cast(WebClient, client),
++        config=HotSettings(watermark=WatermarkConfig(enabled=False)),
++        library=library,
++        track_outputs=True,
++    )
++    assert result.outcome is PlaceOutcome.PLACED
++    names = sorted(path.name for path in paths.extrafanart_dir.iterdir())
++    assert len(names) == available
++    assert names[0] == first_name and names[-1] == last_name
++    assert len(result.outputs) == available
++    assert all(output.kind == "extrafanart" for output in result.outputs)
++    assert {output.path for output in result.outputs} == set(paths.extrafanart_dir.iterdir())
++    for index, output in enumerate(result.outputs, 1):
++        with Image.open(output.path) as image:
++            image.load()
++            assert image.format == expected_format
++            assert image.size == (60 + index, 40)
++        original = originals[urls[index - 1]]
++        cached = await resource_store.resolve(urls[index - 1])
++        assert cached is not None and cached.read_bytes() == original
++        if expected_format == "WEBP":
++            assert output.path.read_bytes() == original
++    for url in urls[available:]:
++        assert await resource_store.resolve(url) is None
++    assert source.read_bytes() == b"original-video"
+diff --git a/tests/media/test_liu1443452494_nfo.py b/tests/media/test_liu1443452494_nfo.py
+index fb5e8e239f9cd9318b7592b4d5f814636b44d0ef..f7e3bdf92c8b618c4945e26001979e261968d0e5 100644
+--- a/tests/media/test_liu1443452494_nfo.py
++++ b/tests/media/test_liu1443452494_nfo.py
+@@ -1,4 +1,4 @@
+-"""自用 NFO 的文件标签与连续节点顺序。"""
++"""自用 NFO 的有效番号、文件标签与连续节点顺序。"""
+
+ from pathlib import Path
+ from xml.etree import ElementTree
+@@ -14,6 +14,43 @@ from amane.organize import PlaceOutcome, ResolvedPaths
+ from amane.parsing import ContentType, parse_file_info
+
+
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    ("custom", "title", "expected_title"),
++    [
++        (None, "abf-06 标题", "ABF-06 标题"),
++        ("CUSTOM-01", "custom-01 标题", "CUSTOM-01 标题"),
++        ("ABF-06", "ABF-062 标题", "ABF-06 ABF-062 标题"),
++        ("ABF-062", "ABF-06 原始标题", "ABF-062 ABF-06 原始标题"),
++        ("ABF-06 自用名称", "ABF-06 原始标题", "ABF-06 自用名称 ABF-06 原始标题"),
++        ("A.B+01", "a.b+01 标题", "A.B+01 标题"),
++        (
++            "自用 & 名称",
++            "自用 & 名称 标题 <片段> \"说明\" '内容'",
++            "自用 & 名称 标题 <片段> \"说明\" '内容'",
++        ),
++        ("自用番号", "自用番号", "自用番号"),
++        ("CUSTOM-01", "", None),
++        ("CUSTOM-01", "   ", "CUSTOM-01"),
++    ],
++)
++async def test_nfo_effective_number_preserves_metadata(
++    tmp_path: Path,
++    custom: str | None,
++    title: str,
++    expected_title: str | None,
++) -> None:
++    metadata = Metadata(number="ABF-06", organize_number=custom, title=title)
++    target = tmp_path / "影片.nfo"
++    assert await write_nfo(metadata, target)
++    root = ElementTree.parse(target).getroot()
++    assert root.findtext("num") == (custom or "ABF-06")
++    assert [root.findtext(tag) for tag in ("title", "originaltitle", "sorttitle")] == [expected_title] * 3
++    assert metadata.number == "ABF-06"
++    assert metadata.organize_number == custom
++    assert metadata.title == title
++
++
+ @pytest.mark.asyncio
+ @pytest.mark.parametrize(
+     ("filename", "content_type", "external_subtitle", "extra_labels"),
+diff --git a/tests/organize/test_liu1443452494_watermark_outputs.py b/tests/organize/test_liu1443452494_watermark_outputs.py
+index 4fd4718ce212c7aca92f7b9fd705478308644584..5f1d923ea8a98bec7df0889ab67fc65611868592 100644
+--- a/tests/organize/test_liu1443452494_watermark_outputs.py
++++ b/tests/organize/test_liu1443452494_watermark_outputs.py
+@@ -5,6 +5,7 @@ from pathlib import Path
+ import pytest
+
+ from amane.db.models import Library, Metadata
++from amane.enums import LibraryResource
+ from amane.media import write_nfo
+ from amane.organize import resolve_paths
+ from amane.organize.watermark_outputs import (
+@@ -104,3 +105,129 @@ async def test_changed_parent_is_not_followed_during_cleanup(tmp_path: Path) ->
+     )
+     assert paths.nfo.read_text(encoding="utf-8") == "另一个文件"
+     assert (moved / "SSIS-345.nfo").exists()
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    ("template", "site_counts", "existing_names", "matched_names"),
++    [
++        (
++            "{number}-{index_padded}.jpeg",
++            (3, 10),
++            (
++                "SSIS-345-1.jpeg",
++                "SSIS-345-9.jpeg",
++                "SSIS-345-01.jpeg",
++                "SSIS-345-10.jpeg",
++                "SSIS-345-11.jpeg",
++                "SSIS-345-001.jpeg",
++            ),
++            ("SSIS-345-1.jpeg", "SSIS-345-9.jpeg", "SSIS-345-01.jpeg", "SSIS-345-10.jpeg"),
++        ),
++        (
++            "{number}-{index_padded}.jpg",
++            (100,),
++            ("SSIS-345-9.jpg", "SSIS-345-99.jpg", "SSIS-345-100.jpg", "SSIS-345-101.jpg"),
++            ("SSIS-345-9.jpg", "SSIS-345-99.jpg", "SSIS-345-100.jpg"),
++        ),
++        (
++            "{number}-{index}.png",
++            (2,),
++            ("SSIS-345-1.png", "SSIS-345-2.png", "SSIS-345-3.png"),
++            ("SSIS-345-1.png", "SSIS-345-2.png"),
++        ),
++        ("{number}-{index_padded}.jpeg", (), ("SSIS-345-1.jpeg",), ()),
++        (None, (10,), ("SSIS-345-1.jpeg",), ()),
++        (".{index}.jpg", (2,), (".1.jpg", ".2.jpg"), ()),
++        (
++            "{number}-{index_padded|01=重复,02=重复}.jpg",
++            (10,),
++            ("SSIS-345-1.jpg", "SSIS-345-重复.jpg"),
++            (),
++        ),
++    ],
++)
++async def test_custom_stills_baseline_keeps_unverified_files(
++    tmp_path: Path,
++    template: str | None,
++    site_counts: tuple[int, ...],
++    existing_names: tuple[str, ...],
++    matched_names: tuple[str, ...],
++) -> None:
++    """首次编辑仅回收有归属且符合模板数量边界的剧照, 未识别文件继续保留。"""
++    source = tmp_path / "SSIS-345.mp4"
++    source.write_bytes(b"video")
++    library = Library(
++        name="测试",
++        path=str(tmp_path),
++        video_template="{raw_name}.{ext}",
++        extrafanart_name_template=template,
++        copy_resources=[LibraryResource.extrafanart],
++    )
++    metadata = Metadata(
++        number="SSIS-345",
++        extrafanart_urls={
++            str(site): [f"https://images.test/{site}/{index}.jpg" for index in range(count)]
++            for site, count in enumerate(site_counts)
++        },
++    )
++    paths = resolve_paths(library, metadata, ext="mp4", source_path=source, file_info=parse_file_info(source))
++    await write_nfo(metadata, paths.nfo)
++    paths.extrafanart_dir.mkdir()
++    names = {"7.jpg", "自备.jpg", "OTHER-789-1.jpeg", *existing_names}
++    for name in names:
++        (paths.extrafanart_dir / name).write_bytes(b"existing-image")
++
++    baseline = await capture_output_baseline(
++        library, metadata, source, parse_file_info(source), safe_dirs=(), actor_genders={}
++    )
++    previous = read_output_snapshot(baseline, metadata.number)
++    expected = {"7.jpg", *matched_names}
++    assert {output.path.name for output in previous.outputs if output.kind == "extrafanart"} == expected
++
++    replacement = tmp_path / "新剧照.jpg"
++    replacement.write_bytes(b"new-image")
++    await finish_output_snapshot(
++        previous,
++        [OutputPath(kind="extrafanart", path=replacement)],
++        library_root=tmp_path,
++        safe_dirs=(),
++        protection=OutputProtection(),
++        success=True,
++    )
++    for name in names:
++        path = paths.extrafanart_dir / name
++        assert path.exists() is (name not in expected)
++        if path.exists():
++            assert path.read_bytes() == b"existing-image"
++    assert source.read_bytes() == b"video"
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("ownership", ["wrong_nfo", "same_file", "unorganized"])
++async def test_custom_stills_require_existing_output_ownership(tmp_path: Path, ownership: str) -> None:
++    """剧照名称匹配不得绕过 NFO 番号和视频同文件检查。"""
++    library_root = tmp_path / "媒体库"
++    library_root.mkdir()
++    source = (tmp_path if ownership == "unorganized" else library_root) / "SSIS-345.mp4"
++    source.write_bytes(b"video")
++    library = Library(
++        name="测试",
++        path=str(library_root),
++        video_template="{raw_name}.{ext}",
++        extrafanart_name_template="{number}-{index}.jpeg",
++        copy_resources=[LibraryResource.extrafanart],
++    )
++    metadata = Metadata(number="SSIS-345", extrafanart_urls={"test": ["https://images.test/1.jpg"]})
++    paths = resolve_paths(library, metadata, ext="mp4", source_path=source, file_info=parse_file_info(source))
++    if ownership == "wrong_nfo":
++        await write_nfo(Metadata(number="SSIS-999"), paths.nfo)
++    paths.extrafanart_dir.mkdir()
++    for name in ("1.jpg", "SSIS-345-1.jpeg"):
++        (paths.extrafanart_dir / name).write_bytes(b"existing-image")
++    baseline = await capture_output_baseline(
++        library, metadata, source, parse_file_info(source), safe_dirs=(), actor_genders={}
++    )
++    previous = read_output_snapshot(baseline, metadata.number)
++    expected = {"1.jpg", "SSIS-345-1.jpeg"} if ownership == "same_file" else set()
++    assert {output.path.name for output in previous.outputs if output.kind == "extrafanart"} == expected

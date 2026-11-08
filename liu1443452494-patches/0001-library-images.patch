@@ -1,13 +1,13 @@
 diff --git a/docs/dev/data-model.md b/docs/dev/data-model.md
-index 0008f5b5e800d8d2f1095e306f98968e7f9f35bd..c50fef893690c6f1bb3ab8e45b495141d3738a8d 100644
+index c60a1f4489eed1fa83798c7c253c5f2fe4f98583..c6a153d98d1b8f8e1ad9ea74d32f227896d77189 100644
 --- a/docs/dev/data-model.md
 +++ b/docs/dev/data-model.md
-@@ -104,7 +104,7 @@ PATCH 三态: **省略键** = 不更新 (`exclude_unset`); **显式值** = 写
+@@ -105,7 +105,7 @@ PATCH 三态: **省略键** = 不更新 (`exclude_unset`); **显式值** = 写
  
  ## Library 整理布局
  
--每个 Library 持有 `move_mode` (move / copy / hardlink / symlink)、一组按资源类型独立的路径模板与整理默认 (`write_nfo` / `copy_resources`), 因此同一进程里各库可以不同. `copy_resources` 与刮削热配置 `scraping.download_resources` 共用 `DownloadableResource` 枚举但互不读写 — 前者控制复制到库路径, 后者控制写入 Resource 目录. ORGANIZE payload 上对应字段为 `None` 时沿用库设置, 非空则只覆盖该次任务.
-+每个 Library 持有 `move_mode` (move / copy / hardlink / symlink)、一组按资源类型独立的路径模板与整理默认 (`write_nfo` / `copy_resources`), 因此同一进程里各库可以不同. `copy_resources` 使用 `LibraryResource`, 刮削下载仍使用 `DownloadableResource`; 两者互不读写. fanart 独立控制整理输出, 复用 Resource 封面原图; 海报备用裁切直接读取原图, 不依赖库路径的 thumb. 未选择 thumb 时不复制或叠加其水印. ORGANIZE payload 上对应字段为 `None` 时沿用库设置, 非空则只覆盖该次任务.
+-每个 Library 持有 `move_mode` (move / copy / hardlink / symlink)、一组按资源类型独立的路径模板与整理默认 (`write_nfo` / `copy_resources`), 因此同一进程里各库可以不同; 剧照另有一个文件名模板. `copy_resources` 与刮削热配置 `scraping.download_resources` 共用 `DownloadableResource` 枚举但互不读写 — 前者控制复制到库路径, 后者控制写入 Resource 目录. ORGANIZE payload 上对应字段为 `None` 时沿用库设置, 非空则只覆盖该次任务.
++每个 Library 持有 `move_mode` (move / copy / hardlink / symlink)、一组按资源类型独立的路径模板与整理默认 (`write_nfo` / `copy_resources`), 因此同一进程里各库可以不同; 剧照另有一个文件名模板. `copy_resources` 使用 `LibraryResource`, 刮削下载仍使用 `DownloadableResource`; 两者互不读写. fanart 独立控制整理输出, 复用 Resource 封面原图; 海报备用裁切直接读取原图, 不依赖库路径的 thumb. 未选择 thumb 时不复制或叠加其水印. ORGANIZE payload 上对应字段为 `None` 时沿用库设置, 非空则只覆盖该次任务.
  
  `trailer_pattern` 只在库上: 对**文件名 (含扩展名)** 做正则搜索, 命中则 REFRESH 扫描与 watcher 都不把该文件当正片入库; 空串关闭. `min_file_size` (字节, 默认 0 关闭) 只过滤**扫描视频**: 后缀须属于该次扫描的视频扩展名白名单; 图片 / NFO / 字幕不适用, `.strm` 是路径指针也不参与判定; 符号链接跟随目标比较真实大小, 否则已整理的入口会被当作广告. 低于阈值与文件黑名单同语义: REFRESH / watcher 不入库, 整库扫描列为清理候选; stat 失败 (含悬空链接) 视为不匹配.
  
@@ -141,7 +141,7 @@ index 4034b6ea2367f3029f2b4722287ac36442ea24e0..708e8b34f9e3e7ea96b2555a1cda1a28
      TITLE = "title"
      PLOT = "plot"
 diff --git a/src/amane/handlers/file.py b/src/amane/handlers/file.py
-index 9b25b63f9e219186d4801dd63f0974a6d75357d8..852b8976bb1d98faf4b65bc02205a0a9ae3cbf2e 100644
+index 2bcbb11b1aa0de05889d33af128799ebca570cae..2d5ff7b5efa7decb8b0b42e967630e650270e217 100644
 --- a/src/amane/handlers/file.py
 +++ b/src/amane/handlers/file.py
 @@ -9,7 +9,7 @@ import structlog
@@ -153,7 +153,7 @@ index 9b25b63f9e219186d4801dd63f0974a6d75357d8..852b8976bb1d98faf4b65bc02205a0a9
  from ..library import MEDIA_EXTENSIONS, LibraryFileKind, LibraryScan, ancestor_dirs, prune_empty_dirs
  from ..library.rules import is_in_trash
  from ..media import ResourceStore, apply_cover_watermarks_from_info, crop_poster
-@@ -76,7 +76,7 @@ async def execute_file_operations(
+@@ -78,7 +78,7 @@ async def execute_file_operations(
      file_info: FileInfo,
      download_images: bool = True,
      write_nfo: bool = True,
@@ -162,7 +162,7 @@ index 9b25b63f9e219186d4801dd63f0974a6d75357d8..852b8976bb1d98faf4b65bc02205a0a9
      web_client: WebClient | None = None,
      config: HotSettings | None = None,
      library: Library | None = None,
-@@ -108,7 +108,7 @@ async def execute_file_operations(
+@@ -110,7 +110,7 @@ async def execute_file_operations(
      # 下载图片; 水印打在库路径副本上, 不能修改 Resource 原图.
      if web_client and download_images:
          logger.debug("downloading images via store", number=metadata.number)
@@ -171,7 +171,7 @@ index 9b25b63f9e219186d4801dd63f0974a6d75357d8..852b8976bb1d98faf4b65bc02205a0a9
          await _download_images_via_store(
              metadata,
              resource_store,
-@@ -196,7 +196,7 @@ async def apply_file_operations(
+@@ -199,7 +199,7 @@ async def apply_file_operations(
      resource_store: ResourceStore,
      *,
      write_nfo: bool = True,
@@ -180,10 +180,10 @@ index 9b25b63f9e219186d4801dd63f0974a6d75357d8..852b8976bb1d98faf4b65bc02205a0a9
      web_client: WebClient | None = None,
      safe_dirs: Sequence[Path] | None = (),
      watermark_dir: Path | None = None,
-@@ -325,38 +325,40 @@ def _place_library_images(
+@@ -341,38 +341,40 @@ def _place_library_images(
      poster_local: Path | None,
      trailer_local: Path | None,
-     extrafanart: Sequence[Path],
+     extrafanart_targets: Sequence[tuple[str, Path]],
 -    kinds: set[DownloadableResource],
 +    kinds: set[LibraryResource],
      config: HotSettings | None,
@@ -228,12 +228,12 @@ index 9b25b63f9e219186d4801dd63f0974a6d75357d8..852b8976bb1d98faf4b65bc02205a0a9
          paths.trailer.parent.mkdir(parents=True, exist_ok=True)
          _copy_into_library(trailer_local, paths.trailer)
  
--    if extrafanart and DownloadableResource.extrafanart in kinds:
-+    if extrafanart and LibraryResource.extrafanart in kinds:
+-    if extrafanart_targets and DownloadableResource.extrafanart in kinds:
++    if extrafanart_targets and LibraryResource.extrafanart in kinds:
          paths.extrafanart_dir.mkdir(parents=True, exist_ok=True)
-         for i, p in enumerate(extrafanart):
-             _copy_into_library(p, paths.extrafanart_dir / f"{i + 1}.jpg")
-@@ -365,7 +367,7 @@ def _place_library_images(
+         for name, p in extrafanart_targets:
+             _copy_into_library(p, paths.extrafanart_dir / name)
+@@ -381,7 +383,7 @@ def _place_library_images(
      wm = config.watermark if config is not None else WatermarkConfig()
      if wm.enabled and file_info is not None:
          jpeg_quality = config.scraping.jpeg_quality if config is not None else 95
@@ -242,7 +242,7 @@ index 9b25b63f9e219186d4801dd63f0974a6d75357d8..852b8976bb1d98faf4b65bc02205a0a9
              apply_cover_watermarks_from_info(
                  paths.thumb,
                  file_info,
-@@ -393,29 +395,32 @@ async def _download_images_via_store(
+@@ -409,7 +411,7 @@ async def _download_images_via_store(
      client: WebClient,
      paths: ResolvedPaths,
      config: HotSettings | None,
@@ -251,8 +251,10 @@ index 9b25b63f9e219186d4801dd63f0974a6d75357d8..852b8976bb1d98faf4b65bc02205a0a9
      file_info: FileInfo | None,
      content_type: ContentType,
      watermark_dir: Path | None = None,
- ) -> None:
-     """优先用 Resource 已有文件; 缺失则现场 acquire."""
+@@ -419,23 +421,26 @@ async def _download_images_via_store(
+
+     剧照文件名在这里渲染: 补零宽度取决于本轮剧照数量, 只有拿到文件列表后才定得下来.
+     """
 -    thumb_local = None
 -    if DownloadableResource.thumb in kinds:
 -        thumb_urls = metadata.thumb_urls
@@ -667,19 +669,19 @@ index 24f42da65426dcedac73c3b79663b2d82c751446..97d3d7873f8ff71f4268d8e889da9fe5
          (safe_path / "i").mkdir()
          inherited = await client.post("tasks", json={"type": "organize", "library_id": lib3.id})
 diff --git a/tests/handlers/test_file_ops.py b/tests/handlers/test_file_ops.py
-index 07de7ce51753334ea0f35fa26938c83e5c6a0c3d..3cd9bc3af49c8beb412960e0e3d3e1a9ba96884a 100644
+index 4276bd676108612748013d924df32cbe048ae3cf..1b5d863447ef1a6e4d72d61051b5ca5091c50af2 100644
 --- a/tests/handlers/test_file_ops.py
 +++ b/tests/handlers/test_file_ops.py
-@@ -10,7 +10,7 @@ from PIL import Image
+@@ -11,7 +11,7 @@ from PIL import Image
  
  from amane.config import HotSettings, WatermarkConfig
- from amane.db.models import MediaFile, Metadata
+ from amane.db.models import Library, MediaFile, Metadata
 -from amane.enums import DownloadableResource
 +from amane.enums import LibraryResource
  from amane.handlers.file import _copy_into_library, execute_file_operations
  from amane.media import ResourceStore
- from amane.organize import MoveMode, PlaceOutcome, ResolvedPaths
-@@ -199,7 +199,7 @@ async def test_copy_resources_skips_trailer(resource_store: ResourceStore, tmp_p
+ from amane.organize import MoveMode, PlaceOutcome, ResolvedPaths, resolve_paths
+@@ -200,7 +200,7 @@ async def test_copy_resources_skips_trailer(resource_store: ResourceStore, tmp_p
          file_info=parse_file_info(src),
          web_client=client,
          config=HotSettings(),
@@ -688,7 +690,7 @@ index 07de7ce51753334ea0f35fa26938c83e5c6a0c3d..3cd9bc3af49c8beb412960e0e3d3e1a9
      )
      assert result.outcome is PlaceOutcome.PLACED
      assert paths.thumb.exists()
-@@ -333,7 +333,7 @@ async def test_watermark_from_external_subtitle(resource_store: ResourceStore, t
+@@ -334,7 +334,7 @@ async def test_watermark_from_external_subtitle(resource_store: ResourceStore, t
  async def test_in_place_rewrites_existing_artifacts(resource_store: ResourceStore, tmp_path: Path) -> None:
      """源已在目标路径上时仍重写库路径上的旧产物: NFO 按本次元数据, 图片与预告片按本次资源.
  
@@ -697,7 +699,7 @@ index 07de7ce51753334ea0f35fa26938c83e5c6a0c3d..3cd9bc3af49c8beb412960e0e3d3e1a9
      """
      client = cast("WebClient", FakeClient())
  
-@@ -378,10 +378,10 @@ async def test_in_place_rewrites_existing_artifacts(resource_store: ResourceStor
+@@ -379,10 +379,10 @@ async def test_in_place_rewrites_existing_artifacts(resource_store: ResourceStor
  
  @pytest.mark.parametrize("pre_existing", [True, False])
  @pytest.mark.asyncio
@@ -710,7 +712,7 @@ index 07de7ce51753334ea0f35fa26938c83e5c6a0c3d..3cd9bc3af49c8beb412960e0e3d3e1a9
      client = cast("WebClient", FakeClient())
  
      paths = _paths(tmp_path / "out")
-@@ -403,7 +403,7 @@ async def test_fanart_follows_thumb_selection(
+@@ -404,7 +404,7 @@ async def test_fanart_follows_thumb_selection(
          file_info=parse_file_info(paths.video),
          web_client=client,
          config=HotSettings(),

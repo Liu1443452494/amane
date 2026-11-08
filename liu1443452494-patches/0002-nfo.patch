@@ -25,7 +25,7 @@ index 852b8976bb1d98faf4b65bc02205a0a9ae3cbf2e..366f35a3bb302c3154a72a810bad00b9
      # 字幕按模板落到 video_dest 侧.
      subtitle_conflicts: list[SubtitleConflict] = []
 diff --git a/src/amane/media/nfo.py b/src/amane/media/nfo.py
-index 08d19c4b067be72528508758c7c9725d244997d9..c87152488565ba1516f8b4cc3b5d1a02a5c96399 100644
+index ef38f9ab92be1dd14c71b86f180e40aad1b20631..de91f29974638baeb6887110088da520f6026044 100644
 --- a/src/amane/media/nfo.py
 +++ b/src/amane/media/nfo.py
 @@ -7,12 +7,14 @@ from typing import TYPE_CHECKING
@@ -43,8 +43,8 @@ index 08d19c4b067be72528508758c7c9725d244997d9..c87152488565ba1516f8b4cc3b5d1a02
  
  
  logger = structlog.get_logger()
-@@ -35,7 +37,7 @@ def _escape_xml(text: str) -> str:
-     return escaped
+@@ -50,7 +52,7 @@ def _title_with_number(number: str, title: str) -> str:
+     return f"{number} {text}".strip()
  
  
 -async def write_nfo(metadata: Metadata, nfo_path: Path) -> bool:
@@ -52,7 +52,7 @@ index 08d19c4b067be72528508758c7c9725d244997d9..c87152488565ba1516f8b4cc3b5d1a02
      try:
          nfo_path.parent.mkdir(parents=True, exist_ok=True)
  
-@@ -95,11 +97,20 @@ async def write_nfo(metadata: Metadata, nfo_path: Path) -> bool:
+@@ -109,11 +111,20 @@ async def write_nfo(metadata: Metadata, nfo_path: Path) -> bool:
              code.write(f"  <publisher>{_escape_xml(metadata.publisher)}</publisher>\n")
              code.write(f"  <label>{_escape_xml(metadata.publisher)}</label>\n")
  
@@ -78,7 +78,7 @@ index 08d19c4b067be72528508758c7c9725d244997d9..c87152488565ba1516f8b4cc3b5d1a02
  
          if metadata.poster_url:
              code.write(f"  <poster>{_escape_xml(metadata.poster_url)}</poster>\n")
-@@ -110,10 +121,6 @@ async def write_nfo(metadata: Metadata, nfo_path: Path) -> bool:
+@@ -124,10 +135,6 @@ async def write_nfo(metadata: Metadata, nfo_path: Path) -> bool:
          if metadata.trailer_url:
              code.write(f"  <trailer>{_escape_xml(metadata.trailer_url)}</trailer>\n")
  
