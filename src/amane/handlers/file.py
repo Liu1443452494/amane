@@ -18,6 +18,7 @@ from ..media.resource_store import internal_url_hash
 from ..net.http import WebClient
 from ..observability.models import OrganizeConflict, OrganizeConflictReason
 from ..organize import (
+    EXTRAFANART_NAME_TEMPLATE_DEFAULT,
     MoveMode,
     PlaceOutcome,
     ResolvedPaths,
@@ -26,6 +27,7 @@ from ..organize import (
     discover_subtitles,
     execute_organize,
     place_subtitles,
+    render_extrafanart_names,
     render_strm_content,
     resolve_paths,
     target_state,
@@ -119,6 +121,7 @@ async def execute_file_operations(
             file_info=file_info,
             content_type=metadata.content_type,
             watermark_dir=watermark_dir,
+            library=library,
         )
 
     # 发现字幕: 必须在视频移动前检查同目录.
@@ -305,16 +308,29 @@ def _copy_into_library(src: Path, dst: Path) -> None:
     成功路径保持 copy2 的全部行为 (Windows 的 CopyFile2 与其余平台的 copyfile + copystat).
     网盘 / FUSE 挂载 (CloudDrive2 等) 常对 utime、chmod 返回 EPERM: copy2 在内容写入之后
     抛错, 而元数据缺失不影响产物可用, 不应让整个整理任务失败.
+    内容失败时记录两次尝试的原文, 并原样抛出回退那次的错误.
     """
     try:
         shutil.copy2(src, dst)
-    except OSError:
+        return
+    except OSError as first:
         # 内容可能已经写好, 重拷一次以区分内容失败与元数据失败: 内容失败会在此再次抛出.
-        shutil.copyfile(src, dst)
         try:
-            shutil.copystat(src, dst)
-        except OSError as exc:
-            logger.debug("copy metadata skipped", src=str(src), dst=str(dst), error=str(exc))
+            shutil.copyfile(src, dst)
+        except OSError as second:
+            # 回退复制经 CRT 打开文件, Win32 码会被压成 EINVAL, 两次的原文都要留下.
+            logger.error(
+                "library copy failed",
+                src=str(src),
+                dst=str(dst),
+                copy2_error=str(first),
+                copyfile_error=str(second),
+            )
+            raise
+    try:
+        shutil.copystat(src, dst)
+    except OSError as exc:
+        logger.debug("copy metadata skipped", src=str(src), dst=str(dst), error=str(exc))
 
 
 @in_thread
@@ -324,7 +340,7 @@ def _place_library_images(
     thumb_local: Path | None,
     poster_local: Path | None,
     trailer_local: Path | None,
-    extrafanart: Sequence[Path],
+    extrafanart_targets: Sequence[tuple[str, Path]],
     kinds: set[DownloadableResource],
     config: HotSettings | None,
     file_info: FileInfo | None,
@@ -356,10 +372,10 @@ def _place_library_images(
         paths.trailer.parent.mkdir(parents=True, exist_ok=True)
         _copy_into_library(trailer_local, paths.trailer)
 
-    if extrafanart and DownloadableResource.extrafanart in kinds:
+    if extrafanart_targets and DownloadableResource.extrafanart in kinds:
         paths.extrafanart_dir.mkdir(parents=True, exist_ok=True)
-        for i, p in enumerate(extrafanart):
-            _copy_into_library(p, paths.extrafanart_dir / f"{i + 1}.jpg")
+        for name, p in extrafanart_targets:
+            _copy_into_library(p, paths.extrafanart_dir / name)
 
     # 叠加水印 (thumb / poster).
     wm = config.watermark if config is not None else WatermarkConfig()
@@ -397,8 +413,12 @@ async def _download_images_via_store(
     file_info: FileInfo | None,
     content_type: ContentType,
     watermark_dir: Path | None = None,
+    library: Library | None = None,
 ) -> None:
-    """优先用 Resource 已有文件; 缺失则现场 acquire."""
+    """优先用 Resource 已有文件; 缺失则现场 acquire.
+
+    剧照文件名在这里渲染: 补零宽度取决于本轮剧照数量, 只有拿到文件列表后才定得下来.
+    """
     thumb_local = None
     if DownloadableResource.thumb in kinds:
         thumb_urls = metadata.thumb_urls
@@ -421,12 +441,19 @@ async def _download_images_via_store(
             priority = list(extrafanart_by_site.keys())
             extrafanart = await store.acquire_extrafanart(extrafanart_by_site, priority, client)
 
+    # 名字与源文件成对落地: 文件名模板只能在这里渲染, 宽度取决于本轮张数.
+    extrafanart_targets: list[tuple[str, Path]] = []
+    if extrafanart:
+        template = library.extrafanart_name_template if library is not None else None
+        names = render_extrafanart_names(template or EXTRAFANART_NAME_TEMPLATE_DEFAULT, paths.context, len(extrafanart))
+        extrafanart_targets = list(zip(names, extrafanart, strict=True))
+
     await _place_library_images(
         paths,
         thumb_local=thumb_local,
         poster_local=poster_local,
         trailer_local=trailer_local,
-        extrafanart=extrafanart,
+        extrafanart_targets=extrafanart_targets,
         kinds=kinds,
         config=config,
         file_info=file_info,
