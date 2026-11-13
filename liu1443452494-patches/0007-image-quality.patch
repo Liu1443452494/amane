@@ -1,34 +1,34 @@
 diff --git a/docs/dev/data-model.md b/docs/dev/data-model.md
-index 5d3c05d..3082157 100644
+index 6abf9e3998f9cefa97561ea8b68e0081a3c22cb5..2fb724223db69ef13936ae91104428adc366a533 100644
 --- a/docs/dev/data-model.md
 +++ b/docs/dev/data-model.md
 @@ -46,7 +46,7 @@ Metadata 列表与 `/media` 文件行的角标与筛选: 有码 / 无码取条
  | 字段类型 | 存储方式 | 取舍 |
  |----------|---------|----------|
  | 单源字段 (`title`, `studio`, `plot`, ...) | 沿链取首个非空值; 列表型 (演员 / 标签 / 导演) 整份列表取首个非空 | 覆盖大多数场景 | 覆盖大多数场景 |
--| 聚合类 URL (`poster_urls`, `thumb_urls`, ...) | list, 按字段站点顺序拼接各站非空值 (相同 URL 保留首次), 物化后按下载成功重排 (见 [task-system.md](task-system.md)) | 下载时顺序尝试, 某站失效不需重新刮削 |
+-| 聚合类 URL (`poster_urls`, `thumb_urls`, ...) | list, 按字段站点顺序拼接各站非空值 (相同 URL 保留首次), 物化后成功者前置 (见 [task-system.md](task-system.md)) | 下载时顺序尝试, 某站失效不需重新刮削 |
 +| 聚合类 URL (`poster_urls`, `thumb_urls`, ...) | list, 按字段站点顺序拼接各站非空值 (相同 URL 保留首次), 物化后按可用性与图片质量重排 (见 [task-system.md](task-system.md)) | 保留回退地址, 某站失效不需重新刮削 |
  | `extrafanart_urls` | `dict[site, list[url]]` 按站点分组 | 剧照集合是站点特异的, 扁平合并会丢失站点上下文 |
  | `scores` | `dict[site, score]` | 不同评分体系 (5 分 vs 100 分) 需保留来源供前端分列展示 |
  | `raw` | `{site: {field: value}}` 原始快照 | 支持离线重新聚合与站点级复用 (见 [task-system.md](task-system.md)) |
 diff --git a/docs/dev/task-system.md b/docs/dev/task-system.md
-index 7b91355..8be9975 100644
+index a1ff2f159062de842683ce621436dff5961c9c87..00558633670cba38be94785af0aa87257aeab624 100644
 --- a/docs/dev/task-system.md
 +++ b/docs/dev/task-system.md
-@@ -121,8 +121,9 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
+@@ -124,8 +124,9 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
  `ScrapeHandler` 在聚合后、`upsert_metadata` 前调用 `materialize_images` (`src/amane/media/pipeline.py`) — 二进制写入 Resource 目录的主路径, 与是否整理无关:
  
  - **`scraping.download_resources`** 控制本步下载哪些类型 (thumb / poster / extrafanart / trailer).
--- **URL 重排契约**: 被下载类型的 URL 列表按本次下载成功 (含缓存命中) 稳定分区 — 成功者保序前置, 失败者保序沉底. 死 URL 不再占据首位, 但保留在尾部, 来源恢复后下次物化可重新尝试. 未选中下载的类型无成败信息, 保持聚合优先级原序; extrafanart 为站点分组 dict, 不重排. `raw` 快照保持站点原始数据.
--- 裁剪海报 → 按 `scraping.poster_ratio` 从 thumb 右侧裁切; 超分就地覆盖. 失败不阻断刮削.
-+- **URL 重排契约**: 封面与海报由 `src/amane/media/liu1443452494_image_quality.py::ImagePool` 完整解码后按实际文件字节数降序排列; 海报等大小优先日亚, 其余沿用候选顺序. 预告片仍按成功者保序前置, 失败地址保留在尾部供后续重试. 未下载类型与剧照分组不重排; 新图均失败时保留旧图, 图片锁定字段不自动下载.
+-- **候选按序尝试, 命中即停**: 候选是同一张图的回退链, 首选成功后再下载后续地址只会把它在 Resource 里存成多份. 命中的那个置首位, 其余候选 (下载失败与未尝试) 保序留在尾部, 来源恢复后下次物化可重新尝试; 全部失败时列表保持原序. 未选中下载的类型无成败信息, 保持聚合优先级原序; extrafanart 为站点分组 dict, 不重排. `raw` 快照保持站点原始数据.
+-- 裁剪海报 → 有码与无码按 `scraping.poster_ratio` 从 thumb 右侧裁切; 超分就地覆盖. 失败不阻断刮削.
++- **URL 重排契约**: 封面与海报由 `src/amane/media/liu1443452494_image_quality.py::ImagePool` 完整解码后按实际文件字节数降序排列; 海报等大小优先日亚, 其余沿用候选顺序. 预告片命中即停止并前置成功地址, 其余候选保序留待后续重试. 未下载类型与剧照分组不重排; 新图均失败时保留旧图, 图片锁定字段不自动下载.
 +- **高清海报**: `ScrapeHandler` 从来源 `raw` 按 DMM、AVBase、JavBus 顺序选取日文, 再回退其他合格原文, 禁止使用翻译或姓名映射结果. `src/amane/media/liu1443452494_posters.py::PosterResolver.resolve` 经 Tenhow 商品号核实 ASIN 后查询日亚; 标题搜索清除当前番号与末尾演员名, 最多缩短重试一次, 光盘与数字视频均按完整原题和演员核对. 同一地址去重, 同 ASIN 新图片仍参与比较; `raw` 不变.
-+- **裁剪海报**: 保留原触发条件与右侧裁剪比例, 仅当裁剪结果宽高均不减小且至少一项增大时替换下载海报; 失败保留下载结果. 超分就地覆盖, 失败不阻断刮削.
++- **裁剪海报**: 有码与无码沿用右侧裁剪比例, 仅当裁剪结果宽高均不减小且至少一项增大时替换下载海报; 失败保留下载结果. 超分就地覆盖, 失败不阻断刮削.
  
  手动裁切复用同一派生通道 (`op=crop`, `args=box:…`), 见 [data-model.md](data-model.md).
  
 diff --git a/src/amane/handlers/scrape.py b/src/amane/handlers/scrape.py
-index c2e2b07..ae3cdc0 100644
+index 0a841fc2f0962e8f2fa67746ab2a993aaa0ca42b..4d597a76c0974c6f2f73fab64162181935fed81c 100644
 --- a/src/amane/handlers/scrape.py
 +++ b/src/amane/handlers/scrape.py
 @@ -10,6 +10,7 @@ from ..db.models import TaskType
@@ -49,9 +49,9 @@ index c2e2b07..ae3cdc0 100644
          if db_data is not None and db_data.raw:
              rec.write_raw_cache(db_data.raw)
  
-@@ -163,11 +165,18 @@ class ScrapeHandler(TaskHandler[ScrapePayload, ScrapeResult]):
-                     self._config,
+@@ -164,11 +166,18 @@ class ScrapeHandler(TaskHandler[ScrapePayload, ScrapeResult]):
                      self._resource_store.data_dir,
+                     content_type=content_type,
                      extrafanart_urls=result.metadata.extrafanart_urls,
 +                    poster_query=make_poster_query(payload.number, result.raw),
 +                    previous_poster_urls=existing.poster_urls if existing else None,
@@ -70,7 +70,7 @@ index c2e2b07..ae3cdc0 100644
          await self.report_progress(len(SCALAR_FIELDS) + 1, progress_total, "materialize")
 diff --git a/src/amane/media/liu1443452494_image_quality.py b/src/amane/media/liu1443452494_image_quality.py
 new file mode 100644
-index 0000000..c0b0149
+index 0000000000000000000000000000000000000000..c0b0149895adac82eeaaab36b521e585f391f8cc
 --- /dev/null
 +++ b/src/amane/media/liu1443452494_image_quality.py
 @@ -0,0 +1,122 @@
@@ -198,7 +198,7 @@ index 0000000..c0b0149
 +        ]
 diff --git a/src/amane/media/liu1443452494_posters.py b/src/amane/media/liu1443452494_posters.py
 new file mode 100644
-index 0000000..2c5b1b5
+index 0000000000000000000000000000000000000000..2c5b1b5bb5d3497651c943c3abea837467f4dcb2
 --- /dev/null
 +++ b/src/amane/media/liu1443452494_posters.py
 @@ -0,0 +1,505 @@
@@ -708,10 +708,10 @@ index 0000000..2c5b1b5
 +        if not success:
 +            await self._search(query, {match.asin for match in matches})
 diff --git a/src/amane/media/pipeline.py b/src/amane/media/pipeline.py
-index 0301d25..08552a2 100644
+index 1fe98e9011bc0a68a483f47e5bdb7a41f7bf9c18..b43e29607caf6c374c7c46ead56d368362c8ec62 100644
 --- a/src/amane/media/pipeline.py
 +++ b/src/amane/media/pipeline.py
-@@ -23,12 +23,17 @@ from .images import (
+@@ -25,12 +25,17 @@ from .images import (
      should_crop_poster,
      validate_crop_box,
  )
@@ -729,9 +729,18 @@ index 0301d25..08552a2 100644
      from .resource_store import ResourceStore
  
  logger = structlog.get_logger()
-@@ -93,78 +98,87 @@ async def materialize_images(
-     data_dir: Path,
+@@ -55,7 +60,7 @@ def _winner_first(urls: list[str], winner: str | None) -> list[str]:
+ 
+ 
+ async def _acquire_first(urls: list[str], store: ResourceStore, client: WebClient) -> tuple[str | None, Path | None]:
+-    """按序尝试候选, 命中即停. 候选是同一张图的回退链, 逐个下载只会把它在 Resource 里存成多份."""
++    """预告片候选按顺序尝试，首次成功后停止，保留后续地址供下次回退。"""
+     for url in urls:
+         local = await store.acquire(url, client)
+         if local:
+@@ -105,66 +110,87 @@ async def materialize_images(
      *,
+     content_type: ContentType,
      extrafanart_urls: dict[str, list[str]] | None = None,
 +    poster_query: PosterQuery | None = None,
 +    previous_poster_urls: list[str] | None = None,
@@ -740,29 +749,28 @@ index 0301d25..08552a2 100644
  ) -> MaterializedImages:
      """仅下载集合内的类型; 未选中的保留聚合 URL.
  
--    死 URL 保序置于尾部, 供来源恢复后重试.
+-    候选按序尝试, 命中即停; 未命中的候选保序留在尾部, 供来源恢复后重试.
 +    封面与海报按有效文件大小排序；失败地址保序置于尾部，供后续重试。
      extrafanart 仅下载到 Resource, 站点分组结构不重排.
+     海报裁切只对 ``allows_poster_crop`` 放行的类型执行.
      """
      kinds = set(config.scraping.download_resources)
+     crop_enabled = config.scraping.crop_poster and allows_poster_crop(content_type)
 -
 -    # 下载 thumb.
--    thumb_ok: set[str] = set()
--    thumb_local: Path | None = None
+-    thumb_winner: str | None = None
 -    thumb_src: str | None = None
+-    thumb_local: Path | None = None
 -    if DownloadableResource.thumb in kinds:
--        for url in thumb_urls:
--            local = await store.acquire(url, client)
--            if local:
--                thumb_ok.add(url)
--                if thumb_local is None:
--                    thumb_local, thumb_src = local, url
--                    res = await store.get_by_url(url)
--                    if res:
--                        await _maybe_upscale(store, res, config, data_dir)
+-        thumb_src, thumb_local = await _acquire_first(thumb_urls, store, client)
+-        thumb_winner = thumb_src  # 下面的兜底裁剪会改写 thumb_src, 排序只认本步下载到的那个
+-        if thumb_src:
+-            res = await store.get_by_url(thumb_src)
+-            if res:
+-                await _maybe_upscale(store, res, config, data_dir)
 -
 -    # 下载 poster; 候选偏矮则从 thumb 裁剪.
--    poster_ok: set[str] = set()
+-    poster_winner: str | None = None
 -    poster_candidate_local: Path | None = None
 -    result_poster_urls = list(poster_urls)
 +    if "thumb_urls" in locked_fields:
@@ -772,9 +780,7 @@ index 0301d25..08552a2 100644
 +
 +    # 裁剪使用同一份按文件大小选定的封面，包括未选择输出封面的情况。
 +    thumbs = ImagePool(store, client)
-+    need_thumb = DownloadableResource.thumb in kinds or (
-+        DownloadableResource.poster in kinds and config.scraping.crop_poster
-+    )
++    need_thumb = DownloadableResource.thumb in kinds or (DownloadableResource.poster in kinds and crop_enabled)
 +    if need_thumb:
 +        if "thumb_urls" in locked_fields:
 +            await thumbs.restore_cached(previous_thumb_urls or thumb_urls)
@@ -791,20 +797,11 @@ index 0301d25..08552a2 100644
 +        list(previous_poster_urls or poster_urls) if "poster_urls" in locked_fields else list(poster_urls)
 +    )
      if DownloadableResource.poster in kinds:
--        for url in poster_urls:
--            local = await store.acquire(url, client)
--            if local:
--                poster_ok.add(url)
--                if poster_candidate_local is None:
--                    poster_candidate_local = local
+-        poster_winner, poster_candidate_local = await _acquire_first(poster_urls, store, client)
 -
--        # 裁剪需要 thumb 本地文件; 若未选 thumb 下载, 为裁剪临时 acquire 首个 thumb.
--        if thumb_local is None and thumb_urls and config.scraping.crop_poster:
--            for url in thumb_urls:
--                local = await store.acquire(url, client)
--                if local:
--                    thumb_local, thumb_src = local, url
--                    break
+-        # 裁剪需要 thumb 本地文件; 若未选 thumb 下载, 为裁切临时 acquire 首个 thumb.
+-        if thumb_local is None and thumb_urls and crop_enabled:
+-            thumb_src, thumb_local = await _acquire_first(thumb_urls, store, client)
 -
 -        thumb_size = probe_size(thumb_local) if thumb_local else None
 -        cand_size = probe_size(poster_candidate_local) if poster_candidate_local else None
@@ -826,7 +823,7 @@ index 0301d25..08552a2 100644
 +        cropped = False
  
          if (
-             config.scraping.crop_poster
+             crop_enabled
              and should_crop_poster(thumb_size, cand_size, skip_ratio=config.scraping.poster_crop_skip_ratio)
 -            and thumb_local
 +            and thumb is not None
@@ -850,15 +847,13 @@ index 0301d25..08552a2 100644
 -                await _maybe_upscale(store, crop_res, config, data_dir)
 -                result_poster_urls = [_internal_url(store, crop_res.url)]
 -            else:
--                result_poster_urls = _success_first(poster_urls, poster_ok)
+-                result_poster_urls = _winner_first(poster_urls, poster_winner)
 -        else:
--            result_poster_urls = _success_first(poster_urls, poster_ok)
--            if poster_candidate_local:
--                for url in poster_urls:
--                    res = await store.get_by_url(url)
--                    if res:
--                        await _maybe_upscale(store, res, config, data_dir)
--                        break
+-            result_poster_urls = _winner_first(poster_urls, poster_winner)
+-            if poster_winner:
+-                res = await store.get_by_url(poster_winner)
+-                if res:
+-                    await _maybe_upscale(store, res, config, data_dir)
 +                candidate = inspect_image(crop_res.url, crop_res.url, store.full_path(crop_res))
 +                if candidate is not None and dimensions_improve(candidate.dimensions, cand_size):
 +                    await _maybe_upscale(store, crop_res, config, data_dir)
@@ -870,12 +865,12 @@ index 0301d25..08552a2 100644
 +                await _maybe_upscale(store, res, config, data_dir)
  
      # 下载预告片.
-     trailer_ok: set[str] = set()
-@@ -181,7 +195,13 @@ async def materialize_images(
+     trailer_winner: str | None = None
+@@ -178,7 +204,13 @@ async def materialize_images(
  
      out = MaterializedImages(
          poster_urls=result_poster_urls,
--        thumb_urls=_success_first(thumb_urls, thumb_ok),
+-        thumb_urls=_winner_first(thumb_urls, thumb_winner),
 +        thumb_urls=(
 +            thumbs.ordered_urls(previous_thumb_urls or [])
 +            if DownloadableResource.thumb in kinds
@@ -883,12 +878,12 @@ index 0301d25..08552a2 100644
 +            if "thumb_urls" in locked_fields
 +            else list(thumb_urls)
 +        ),
-         trailer_urls=_success_first(trailer_urls, trailer_ok),
+         trailer_urls=_winner_first(trailer_urls, trailer_winner),
      )
      logger.debug(
 diff --git a/tests/handlers/test_liu1443452494_image_quality.py b/tests/handlers/test_liu1443452494_image_quality.py
 new file mode 100644
-index 0000000..b68c6d5
+index 0000000000000000000000000000000000000000..b68c6d5d395550a2c0ba558fa3c299ea5d1b16df
 --- /dev/null
 +++ b/tests/handlers/test_liu1443452494_image_quality.py
 @@ -0,0 +1,111 @@
@@ -1005,10 +1000,10 @@ index 0000000..b68c6d5
 +        assert client.downloaded == [new_thumb, new_poster]
 diff --git a/tests/media/test_liu1443452494_image_quality.py b/tests/media/test_liu1443452494_image_quality.py
 new file mode 100644
-index 0000000..a6f511c
+index 0000000000000000000000000000000000000000..ea2822289d3ac1c81c5207465e72b48fc2e5f2cb
 --- /dev/null
 +++ b/tests/media/test_liu1443452494_image_quality.py
-@@ -0,0 +1,553 @@
+@@ -0,0 +1,659 @@
 +"""图片文件大小择优、高清海报检索分支与裁剪覆盖保护。"""
 +
 +from collections.abc import Mapping
@@ -1030,6 +1025,7 @@ index 0000000..a6f511c
 +from amane.media.liu1443452494_posters import PosterQuery
 +from amane.net.errors import FailureKind, RequestError, RequestFailure
 +from amane.net.http import RateLimiters, WebClient
++from amane.parsing import ContentType
 +from tests.media.test_pipeline import FakeClient
 +
 +
@@ -1126,7 +1122,14 @@ index 0000000..a6f511c
 +    config = HotSettings()
 +    config.scraping.crop_poster = False
 +    result = await materialize_images(
-+        urls, [*urls, urls[1]], [], resource_store, cast("WebClient", client), config, tmp_path
++        urls,
++        [*urls, urls[1]],
++        [],
++        resource_store,
++        cast("WebClient", client),
++        config,
++        tmp_path,
++        content_type=ContentType.CENSORED,
 +    )
 +    expected = [urls[1], urls[2], urls[0], urls[3], urls[4]]
 +    assert result.poster_urls == result.thumb_urls == expected
@@ -1182,7 +1185,15 @@ index 0000000..a6f511c
 +    config = HotSettings()
 +    config.scraping.crop_poster = False
 +    result = await materialize_images(
-+        [ordinary], [], [], resource_store, cast("WebClient", client), config, tmp_path, poster_query=poster_query()
++        [ordinary],
++        [],
++        [],
++        resource_store,
++        cast("WebClient", client),
++        config,
++        tmp_path,
++        content_type=ContentType.CENSORED,
++        poster_query=poster_query(),
 +    )
 +    assert result.poster_urls[0] == {"ordinary": ordinary, "tenhow": tenhow, "amazon": amazon}[winner]
 +    assert client.page_requests == [index, actor, detail]
@@ -1216,7 +1227,15 @@ index 0000000..a6f511c
 +        },
 +    )
 +    result = await materialize_images(
-+        [], [], [], resource_store, cast("WebClient", client), HotSettings(), tmp_path, poster_query=query
++        [],
++        [],
++        [],
++        resource_store,
++        cast("WebClient", client),
++        HotSettings(),
++        tmp_path,
++        content_type=ContentType.CENSORED,
++        poster_query=query,
 +    )
 +    assert result.poster_urls[0] == new_image
 +    assert client.page_requests.count(detail) == 1
@@ -1239,7 +1258,15 @@ index 0000000..a6f511c
 +        images={amazon: image_bytes(minimum_bytes=5000) if amazon_available else None, tenhow: image_bytes()},
 +    )
 +    result = await materialize_images(
-+        [], [], [], resource_store, cast("WebClient", client), HotSettings(), tmp_path, poster_query=query
++        [],
++        [],
++        [],
++        resource_store,
++        cast("WebClient", client),
++        HotSettings(),
++        tmp_path,
++        content_type=ContentType.CENSORED,
++        poster_query=query,
 +    )
 +    assert result.poster_urls[0] == (amazon if amazon_available else tenhow)
 +    assert (tenhow in client.downloaded) is not amazon_available
@@ -1258,7 +1285,15 @@ index 0000000..a6f511c
 +        images={wrong: image_bytes(minimum_bytes=50000)},
 +    )
 +    result = await materialize_images(
-+        [], [], [], resource_store, cast("WebClient", client), HotSettings(), tmp_path, poster_query=query
++        [],
++        [],
++        [],
++        resource_store,
++        cast("WebClient", client),
++        HotSettings(),
++        tmp_path,
++        content_type=ContentType.CENSORED,
++        poster_query=query,
 +    )
 +    assert result.poster_urls == []
 +    assert client.downloaded == []
@@ -1292,7 +1327,14 @@ index 0000000..a6f511c
 +    config = HotSettings()
 +    config.scraping.crop_poster = crop_enabled
 +    result = await materialize_images(
-+        [poster], [thumb], [], resource_store, cast("WebClient", client), config, tmp_path
++        [poster],
++        [thumb],
++        [],
++        resource_store,
++        cast("WebClient", client),
++        config,
++        tmp_path,
++        content_type=ContentType.CENSORED,
 +    )
 +    source = await resource_store.resolve_source(result.poster_urls[0], cast("WebClient", client))
 +    assert source is not None
@@ -1320,7 +1362,14 @@ index 0000000..a6f511c
 +    poster, thumb = "https://images.test/poster.jpg", "https://images.test/thumb.jpg"
 +    client = PosterClient(images={poster: image_bytes((300, 420)), thumb: image_bytes((800, 538))})
 +    result = await materialize_images(
-+        [poster], [thumb], [], resource_store, cast("WebClient", client), HotSettings(), tmp_path
++        [poster],
++        [thumb],
++        [],
++        resource_store,
++        cast("WebClient", client),
++        HotSettings(),
++        tmp_path,
++        content_type=ContentType.CENSORED,
 +    )
 +    assert result.poster_urls == [poster]
 +
@@ -1331,7 +1380,9 @@ index 0000000..a6f511c
 +    client = PosterClient(images={thumbs[0]: image_bytes((800, 538)), thumbs[1]: image_bytes((1600, 1076))})
 +    config = HotSettings()
 +    config.scraping.download_resources = [DownloadableResource.poster]
-+    result = await materialize_images([], thumbs, [], resource_store, cast("WebClient", client), config, tmp_path)
++    result = await materialize_images(
++        [], thumbs, [], resource_store, cast("WebClient", client), config, tmp_path, content_type=ContentType.CENSORED
++    )
 +    assert result.thumb_urls == thumbs
 +    assert client.downloaded == thumbs
 +    source = await resource_store.resolve_source(result.poster_urls[0], cast("WebClient", client))
@@ -1356,6 +1407,7 @@ index 0000000..a6f511c
 +        cast("WebClient", client),
 +        HotSettings(),
 +        tmp_path,
++        content_type=ContentType.CENSORED,
 +        previous_poster_urls=[old_poster],
 +        previous_thumb_urls=[old_thumb],
 +    )
@@ -1381,6 +1433,7 @@ index 0000000..a6f511c
 +        cast("WebClient", client),
 +        config,
 +        tmp_path,
++        content_type=ContentType.CENSORED,
 +        poster_query=poster_query(),
 +        locked_fields=["poster_urls", "thumb_urls"] if locked else [],
 +    )
@@ -1403,7 +1456,15 @@ index 0000000..a6f511c
 +        images={amazon: image_bytes()},
 +    )
 +    result = await materialize_images(
-+        [], [], [], resource_store, cast("WebClient", client), HotSettings(), tmp_path, poster_query=poster_query()
++        [],
++        [],
++        [],
++        resource_store,
++        cast("WebClient", client),
++        HotSettings(),
++        tmp_path,
++        content_type=ContentType.CENSORED,
++        poster_query=poster_query(),
 +    )
 +    assert result.poster_urls[0] == amazon
 +    assert client.page_requests == [
@@ -1432,7 +1493,15 @@ index 0000000..a6f511c
 +        redirects={eligibility: search},
 +    )
 +    result = await materialize_images(
-+        [], [], [], resource_store, cast("WebClient", client), HotSettings(), tmp_path, poster_query=query
++        [],
++        [],
++        [],
++        resource_store,
++        cast("WebClient", client),
++        HotSettings(),
++        tmp_path,
++        content_type=ContentType.CENSORED,
++        poster_query=query,
 +    )
 +    assert result.poster_urls[0] == amazon
 +    assert client.page_requests.count(eligibility) == 1
@@ -1478,7 +1547,15 @@ index 0000000..a6f511c
 +        images={first: image_bytes(minimum_bytes=3000), second: image_bytes(minimum_bytes=5000)},
 +    )
 +    result = await materialize_images(
-+        [], [], [], resource_store, cast("WebClient", client), HotSettings(), tmp_path, poster_query=query
++        [],
++        [],
++        [],
++        resource_store,
++        cast("WebClient", client),
++        HotSettings(),
++        tmp_path,
++        content_type=ContentType.CENSORED,
++        poster_query=query,
 +    )
 +    assert result.poster_urls == [second, first]
 +    assert client.downloaded == [first, second]
@@ -1497,7 +1574,15 @@ index 0000000..a6f511c
 +        images={amazon: image_bytes()},
 +    )
 +    result = await materialize_images(
-+        [], [], [], resource_store, cast("WebClient", client), HotSettings(), tmp_path, poster_query=query
++        [],
++        [],
++        [],
++        resource_store,
++        cast("WebClient", client),
++        HotSettings(),
++        tmp_path,
++        content_type=ContentType.CENSORED,
++        poster_query=query,
 +    )
 +    assert result.poster_urls == [amazon]
 +
@@ -1518,7 +1603,15 @@ index 0000000..a6f511c
 +    )
 +    client = PosterClient(pages={search_url(): card}, images={amazon: image_bytes()})
 +    result = await materialize_images(
-+        [], [], [], resource_store, cast("WebClient", client), HotSettings(), tmp_path, poster_query=poster_query()
++        [],
++        [],
++        [],
++        resource_store,
++        cast("WebClient", client),
++        HotSettings(),
++        tmp_path,
++        content_type=ContentType.CENSORED,
++        poster_query=poster_query(),
 +    )
 +    assert result.poster_urls == ([amazon] if accepted else [])
 +    assert client.downloaded == ([amazon] if accepted else [])
@@ -1549,7 +1642,15 @@ index 0000000..a6f511c
 +        images={amazon: image_bytes()},
 +    )
 +    result = await materialize_images(
-+        [], [], [], resource_store, cast("WebClient", client), HotSettings(), tmp_path, poster_query=query
++        [],
++        [],
++        [],
++        resource_store,
++        cast("WebClient", client),
++        HotSettings(),
++        tmp_path,
++        content_type=ContentType.CENSORED,
++        poster_query=query,
 +    )
 +    accepted = outcome in {"recovered", "first_success"}
 +    assert result.poster_urls == ([amazon] if accepted else [])
@@ -1564,7 +1665,7 @@ index 0000000..a6f511c
 +        assert client.downloaded == []
 diff --git a/tests/media/test_liu1443452494_posters.py b/tests/media/test_liu1443452494_posters.py
 new file mode 100644
-index 0000000..b9311a7
+index 0000000000000000000000000000000000000000..b9311a7e21f9c1a5ab81731ab789ed0f201fb0a2
 --- /dev/null
 +++ b/tests/media/test_liu1443452494_posters.py
 @@ -0,0 +1,235 @@
@@ -1803,3 +1904,54 @@ index 0000000..b9311a7
 +        PosterPage(url="https://www.amazon.co.jp/dp/B000000001", html=html.replace(dynamic, "无效JSON")), "B000000001"
 +    )
 +    assert malformed is not None and malformed.image_urls == [large, scaled]
+diff --git a/tests/media/test_pipeline.py b/tests/media/test_pipeline.py
+index f62e1a295bbd0a043ad757fce9508fbd4ee5f0c7..24244a8c2bd35c540d9d23a9dd94ca37f859a6c9 100644
+--- a/tests/media/test_pipeline.py
++++ b/tests/media/test_pipeline.py
+@@ -373,22 +373,36 @@ async def test_download_resources_gates_acquire(resource_store: ResourceStore, t
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_redundant_candidate_not_downloaded(resource_store: ResourceStore, tmp_path: Path):
+-    """首选候选成功即停: 同一张图的后续地址不下载, 只在元数据里留作回退."""
+-    client = FakeClient(sizes={"https://s/hi.jpg": (800, 538), "https://s/std.jpg": (800, 538)})
++@pytest.mark.parametrize(
++    ("kind", "compare_all"),
++    [(DownloadableResource.poster, True), (DownloadableResource.thumb, True), (DownloadableResource.trailer, False)],
++)
++async def test_image_candidates_compared_and_trailer_stops_after_success(
++    resource_store: ResourceStore, tmp_path: Path, kind: DownloadableResource, compare_all: bool
++) -> None:
++    """图片完整比较有效候选；预告片首次成功后停止，后续地址继续保留。"""
++    suffix = "jpg" if compare_all else "mp4"
++    urls = [f"https://s/first.{suffix}", f"https://s/second.{suffix}"]
++    client = FakeClient(sizes=dict.fromkeys(urls, (800, 538)) if compare_all else {})
++    config = HotSettings(scraping=ScrapingConfig(download_resources=[kind], crop_poster=False))
+     out = await materialize_images(
+-        ["https://s/hi.jpg", "https://s/std.jpg"],
+-        [],
+-        [],
++        urls if kind is DownloadableResource.poster else [],
++        urls if kind is DownloadableResource.thumb else [],
++        urls if kind is DownloadableResource.trailer else [],
+         resource_store,
+         cast("WebClient", client),
+-        HotSettings(),
++        config,
+         tmp_path,
+         content_type=ContentType.CENSORED,
+     )
+-    assert out.poster_urls == ["https://s/hi.jpg", "https://s/std.jpg"]
+-    assert client.downloaded == ["https://s/hi.jpg"]
+-    assert await resource_store.get_by_url("https://s/std.jpg") is None
++    selected = {
++        DownloadableResource.poster: out.poster_urls,
++        DownloadableResource.thumb: out.thumb_urls,
++        DownloadableResource.trailer: out.trailer_urls,
++    }[kind]
++    assert selected == urls
++    assert client.downloaded == (urls if compare_all else urls[:1])
++    assert (await resource_store.get_by_url(urls[1]) is not None) is compare_all
+ 
+ 
+ @pytest.mark.asyncio

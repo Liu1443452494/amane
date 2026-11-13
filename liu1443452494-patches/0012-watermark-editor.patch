@@ -1,9 +1,9 @@
 diff --git a/docs/dev/api.md b/docs/dev/api.md
-index 95569c8e6d8788eedf798b00f5e493ed9c8cadd9..9b0b6e89bdac368b23dac2357b75a1931c134473 100644
+index 95aca3ed9a780ca53d658a5d16f2cc0a30ccc1ea..e53a5ec1245c3bc68ecc6eb733cfc888b873ab90 100644
 --- a/docs/dev/api.md
 +++ b/docs/dev/api.md
 @@ -44,6 +44,7 @@ OpenAPI 列出参数, 不表达组合语义:
- - GET `/media` 的相位 query 作用在单行列上; `uncensored` 与 `content_type` 是例外: 两者都按所属条目判定 (`uncensored` = 条目无码或这一份带无码标记, `content_type` = 条目类型), 未绑定条目的文件只看自身标记、不命中任何类型; 布尔侧按空值安全比较. 未知 `definition` → 422; 相位列不纳入 PATCH.
+ - GET `/media` 的相位 query 作用在单行列上; `uncensored` 与 `content_type` 是例外: 两者都按所属条目判定 (`uncensored` = 条目无码或这一份带无码标记, `content_type` = 条目类型), 未绑定条目的文件只看自身标记、不命中任何类型; 布尔侧按空值安全比较. 未知 `definition` → 422; `SD` / `HD` 是 `480p` / `720p` 的别名 (大小写不敏感, web 侧同名映射在 `web/src/lib/exhaustive-maps.ts`, 改一处须同步另一处), 归一后照常筛选; 相位列不纳入 PATCH.
  - 手动裁切基准是源图**当前本地文件**像素 (含就地超分后尺寸): 海报以 `thumb_urls[0]` 为源并替换 `poster_urls`, 演员头像以 `image_urls[0]` 为源并前插保留原图; 库路径海报不受影响. locator 见 [data-model.md](data-model.md).
  - `PUT /metadata/{id}/locks` 与 `PUT /actors/{id}/locks` 整体替换锁定字段集合; 锁语义见 [data-model.md](data-model.md)「字段锁定」.
 +- `src/amane/api/routes/media.py::update_media_watermarks` 与整理共用库级锁, 首次编辑前只读取旧产物位置; 保存不修改磁盘, 也不提交整理任务. 自动模式保存时重新检查路径和同目录字幕; 手动按实际变化保护字段, 有效值口径见 [data-model.md](data-model.md).
@@ -11,7 +11,7 @@ index 95569c8e6d8788eedf798b00f5e493ed9c8cadd9..9b0b6e89bdac368b23dac2357b75a193
  - 注册顺序有约束的五处: `/facets/{kind}/rules` 先于 `/{facet_id}` (否则 `rules` 被当成 facet_id); `/plugins/reload` 先于 `/plugins/{plugin_id}` (否则 `reload` 被当成插件 ID); `/tasks/batch` 与 `/tasks/worker*` 先于 `/{task_id}` (否则被当成非法整数 id); `/feeds/items` 先于 `/{feed_id}`; `/playback/sources` 先于 `/{source_id}`.
  - 播放端点的形状 (流的一行、`available` / `key` / `detail` 的三种组合、Range、HLS 分片与字幕路径、404 / 502 语义) 见 [plugins.md](plugins.md)「播放源」.
 diff --git a/docs/dev/data-model.md b/docs/dev/data-model.md
-index 21f50a34c7f9d44d35d07f490d0dbe40cfcdea42..22c4d76202f5814cdc243df6806e5c7d7abbb1c0 100644
+index 2fb724223db69ef13936ae91104428adc366a533..1c55cf2c842c76a7c05d2b85d982037925d28faa 100644
 --- a/docs/dev/data-model.md
 +++ b/docs/dev/data-model.md
 @@ -4,7 +4,7 @@
@@ -35,12 +35,12 @@ index 21f50a34c7f9d44d35d07f490d0dbe40cfcdea42..22c4d76202f5814cdc243df6806e5c7d
  ## Library 归属
  
 diff --git a/docs/dev/database.md b/docs/dev/database.md
-index 9fd9c134307bfdea7a0506ef81291af9da75e728..0aa9d83a0cf7c2052e457cacdd245fb2d8ff200f 100644
+index dd23afda7dec37ba664729b0e9ae85211e0467e9..42cdfd930d1becf33c208051cf3c25c9f1b4d84f 100644
 --- a/docs/dev/database.md
 +++ b/docs/dev/database.md
-@@ -42,6 +42,8 @@ pysqlite 只在 DML 之前发出 `BEGIN`, 纯 SELECT 落在事务之外 (SQLAlch
- 2. **落后 head**: 先用 sqlite3 **online backup API** 写 `{db}.pre-migrate-{oldrev}-{utc}.bak` (含 WAL 一致快照; 同目录保留最近 5 份), 再升级.
- 3. **迁移连接**单独 `autocommit=False` + Alembic `transactional_ddl=True`: 单次 revision 内 DDL 与 `alembic_version` 同事务, 失败则回滚, 避免「表已创建但版本未升」的半成品. 业务连接不修改事务模式, 仍只开 WAL + FK.
+@@ -43,6 +43,8 @@ r18 库由项目导入 / 管理但 schema 不受我们控制, **不能纳入 Ale
+ 3. **落后 head**: 先用 sqlite3 **online backup API** 写 `{db}.pre-migrate-{oldrev}-{utc}.bak` (含 WAL 一致快照; 同目录保留最近 5 份), 再升级.
+ 4. **迁移连接**单独 `autocommit=False` + Alembic `transactional_ddl=True`: 单次 revision 内 DDL 与 `alembic_version` 同事务, 失败则回滚, 避免「表已创建但版本未升」的半成品. 业务连接不修改事务模式, 仍只开 WAL + FK.
  
 +自用水印与上游迁移通过 `src/amane/db/migrations/versions/610da6db7500_合并水印与上游数据库升级.py::down_revision` 合并为单一终点; 已发布迁移的标识与父版本保持稳定, 保证既有数据库补齐尚未执行的分支.
 +
@@ -48,10 +48,10 @@ index 9fd9c134307bfdea7a0506ef81291af9da75e728..0aa9d83a0cf7c2052e457cacdd245fb2
  
  CLI (`uv run alembic …`) 使用同一套 `env.py` 事务性 DDL, 但**不会**自动备份 — 依赖启动路径或手工 backup. `env.py` 自行创建的引擎在 upgrade 结束后必须 `dispose()`, 否则同一进程内多次升级 (测试) 会留下未关闭的连接.
 diff --git a/docs/dev/frontend.md b/docs/dev/frontend.md
-index 86a29fbe64132fe4bb9895fe2f8f07ec3f805f7a..aba59bd8f8a4b0f63268d78701564a1b8ae742c5 100644
+index 94e1c44a5cf68e0daf9c662f975282c89247ff08..5bf7d37bccdb1aa96fd8ccb2cdec8c48b5e2c852 100644
 --- a/docs/dev/frontend.md
 +++ b/docs/dev/frontend.md
-@@ -79,6 +79,8 @@ Settings、任务提交、定时创建、metadata 编辑共用 `components/schem
+@@ -83,6 +83,8 @@ Settings、任务提交、定时创建、metadata 编辑共用 `components/schem
  
  影片详情处理日志见 `web/src/components/media/liu1443452494-processing-log.tsx::ProcessingLogButton`；来源结果与过程共用滚动区，合并记录沿用首次标识。读取与归属见 [observability.md](observability.md)。
  
@@ -61,10 +61,10 @@ index 86a29fbe64132fe4bb9895fe2f8f07ec3f805f7a..aba59bd8f8a4b0f63268d78701564a1b
  
  | 数据 | 存储位置 |
 diff --git a/docs/dev/task-system.md b/docs/dev/task-system.md
-index 42016e6ce1fe271f596c32e0be064c78707af0ca..5d82efee0d974249581b3b2237e0fdf569583716 100644
+index d6eadc1566d140c01705d5ca7198bfeb6d42ce64..20de60b400a709f9ef260d8ff93c8ab59aa92b6a 100644
 --- a/docs/dev/task-system.md
 +++ b/docs/dev/task-system.md
-@@ -83,7 +83,7 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
+@@ -84,7 +84,7 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
  | ------ | ------ | -------- | ------ |
  | `LibraryScan` | `library/scan.py` | REFRESH / watcher / ORGANIZE / SCAN_INVALID | 单路径分类 (跳过 / 无效 / 媒体), `unwanted_kind` 给出无效原因; 规则常量与校验在 `library/rules.py` |
  | `scan_library` | `handlers/_common.py` | clouddrive 巡检 | 库目录遍历; `@in_thread` 包装 glob / stat. 入库扫描与清理清单改走 `library/cleanup/inventory.py::scan_inventory` 的显式递归 (能收集读错误并产出目录条目) |
@@ -73,7 +73,7 @@ index 42016e6ce1fe271f596c32e0be064c78707af0ca..5d82efee0d974249581b3b2237e0fdf5
  | `finalize_media_file` | `handlers/_common.py` | SCRAPE (缓存 / 主路径) | 标记 SCRAPED + 关联 Metadata |
  | `apply_file_operations` | `handlers/file.py` | ORGANIZE | 读取 MediaFile→读取 Library→渲染路径→执行 file ops; 库路径 I/O 经 `@in_thread` |
  
-@@ -93,6 +93,8 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
+@@ -94,6 +94,8 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
  
  ## 落盘执行
  
@@ -81,7 +81,7 @@ index 42016e6ce1fe271f596c32e0be064c78707af0ca..5d82efee0d974249581b3b2237e0fdf5
 +
  `execute_file_operations` 是落盘执行单元, 仅 ORGANIZE 经 `apply_file_operations` 调用. 不变量:
  
- - **整理图片**: 优先用 Resource 原图, 缺失才 `acquire`; `Library.copy_resources` 或 payload 决定写出类型并覆盖选中产物. fanart 独立选择并复用 thumb 原图. `src/amane/handlers/file.py::_copy_library_image` 对 JPG 输出复制 JPEG, 其余仅转换库路径副本, 与角标共用刮削质量设置; 刮削缓存和候选排序不参与转换.
+ - **整理图片**: 优先用 Resource 原图, 缺失才 `acquire`; `Library.copy_resources` 或 payload 决定写出类型并覆盖选中产物. 临时文件替换使权限与 ACL 取自库目录, NFO 同理. fanart 独立选择并复用 thumb 原图. `src/amane/handlers/file.py::_copy_library_image` 对 JPG 输出复制 JPEG, 其余仅转换库路径副本, 与角标共用刮削质量设置; 刮削缓存和候选排序不参与转换.
 diff --git a/src/amane/api/models/media.py b/src/amane/api/models/media.py
 index bdd0531a52220ff628a147344146f860598947f9..b77ad4fcbe060b800c28ba4cb2c881b90d294e6c 100644
 --- a/src/amane/api/models/media.py
@@ -146,7 +146,7 @@ index bdd0531a52220ff628a147344146f860598947f9..b77ad4fcbe060b800c28ba4cb2c881b9
      items: list[MediaFileResponse]
      total: int
 diff --git a/src/amane/api/routes/media.py b/src/amane/api/routes/media.py
-index 6b488a1ce7de5c687bd97f3940459f7e16f7a260..7300223878d0352e2671c2fe3f8711939fce3141 100644
+index 59a31a1dca5b1cd0a21829ccc8d9e4bbb22a3937..ebc6462777a8ce56c894f3d6a5132fe2ad256b5c 100644
 --- a/src/amane/api/routes/media.py
 +++ b/src/amane/api/routes/media.py
 @@ -1,12 +1,16 @@
@@ -158,17 +158,17 @@ index 6b488a1ce7de5c687bd97f3940459f7e16f7a260..7300223878d0352e2671c2fe3f871193
  from fastapi import APIRouter, HTTPException, Query, Response
  
  from ...db.models import MediaFile, MediaFileStatus, MediaSortField, SortOrder
--from ...parsing import DEFINITION_VALUES, ContentType, Mosaic
+-from ...parsing import ContentType, Mosaic
 -from ..deps import RepoDep
 +from ...db.watermarks import effective_file_info
 +from ...library import has_companion_subtitle
 +from ...organize.watermark_outputs import capture_output_baseline
-+from ...parsing import DEFINITION_VALUES, ContentType, Mosaic, WatermarkMode, parse_file_info
++from ...parsing import ContentType, Mosaic, WatermarkMode, parse_file_info
 +from ..deps import RepoDep, RuntimeDep
  from ..models import (
      MediaBatchDeleteRequest,
      MediaBatchDeleteResponse,
-@@ -15,8 +19,15 @@ from ..models import (
+@@ -15,9 +19,16 @@ from ..models import (
      MediaListResponse,
      to_media_file_response,
  )
@@ -178,13 +178,14 @@ index 6b488a1ce7de5c687bd97f3940459f7e16f7a260..7300223878d0352e2671c2fe3f871193
 +    MediaWatermarkUpdateResponse,
 +    to_media_watermark_response,
 +)
+ from ..support.metadata_filters import require_known_definition
  
  if TYPE_CHECKING:
 +    from ...app.runtime import AppRuntime
      from ...db.repo_types import MediaFileUpdates
      from ...db.repository import Repository
  
-@@ -102,6 +113,72 @@ async def get_media(media_id: int, repo: RepoDep) -> MediaFileResponse:
+@@ -97,6 +108,72 @@ async def get_media(media_id: int, repo: RepoDep) -> MediaFileResponse:
      return (await _phase_responses(repo, [media]))[0]
  
  
@@ -311,11 +312,11 @@ index 0000000000000000000000000000000000000000..0139c516e13bd7298b61a9c739d03e46
 +    op.drop_column("media_files", "watermark_mosaic")
 +    op.drop_column("media_files", "watermark_subtitle")
 +    op.drop_column("media_files", "watermark_mode")
-diff --git a/src/amane/db/migrations/versions/610da6db7500_合并水印与上游数据库升级.py b/src/amane/db/migrations/versions/610da6db7500_合并水印与上游数据库升级.py
+diff --git "a/src/amane/db/migrations/versions/610da6db7500_\345\220\210\345\271\266\346\260\264\345\215\260\344\270\216\344\270\212\346\270\270\346\225\260\346\215\256\345\272\223\345\215\207\347\272\247.py" "b/src/amane/db/migrations/versions/610da6db7500_\345\220\210\345\271\266\346\260\264\345\215\260\344\270\216\344\270\212\346\270\270\346\225\260\346\215\256\345\272\223\345\215\207\347\272\247.py"
 new file mode 100644
 index 0000000000000000000000000000000000000000..b55c1290c332a9fd9f6bbd3c3a7490e60d681fe5
 --- /dev/null
-+++ b/src/amane/db/migrations/versions/610da6db7500_合并水印与上游数据库升级.py
++++ "b/src/amane/db/migrations/versions/610da6db7500_\345\220\210\345\271\266\346\260\264\345\215\260\344\270\216\344\270\212\346\270\270\346\225\260\346\215\256\345\272\223\345\215\207\347\272\247.py"
 @@ -0,0 +1,20 @@
 +"""合并水印与上游数据库升级。
 +
@@ -338,7 +339,7 @@ index 0000000000000000000000000000000000000000..b55c1290c332a9fd9f6bbd3c3a7490e6
 +def downgrade() -> None:
 +    pass
 diff --git a/src/amane/db/models.py b/src/amane/db/models.py
-index 7e3d9d0781748585ced464849808b427a53865ca..5147c4b999868f051d51911071e86110a3b90dff 100644
+index bc34d6d833d1b6d227ac7008816e4029eef925ac..0dd169e8b69ea8d01823f20fc6c332998d4e57ab 100644
 --- a/src/amane/db/models.py
 +++ b/src/amane/db/models.py
 @@ -2,7 +2,7 @@ from datetime import UTC, datetime
@@ -436,7 +437,7 @@ index 7e3d9d0781748585ced464849808b427a53865ca..5147c4b999868f051d51911071e86110
  
  class _VrProperty(property):
 diff --git a/src/amane/db/repo_types.py b/src/amane/db/repo_types.py
-index 3ddf48b88d212d88114ec12501565eac94b5d355..2ac22731c0b08e19edb4d2498eb2b5662ddefedc 100644
+index 0c276db07ac3ed2939ee4212df055c763547ebe7..8cbd2e24bf0a1a479b9d67cd97d7a9426d8a823b 100644
 --- a/src/amane/db/repo_types.py
 +++ b/src/amane/db/repo_types.py
 @@ -3,13 +3,13 @@ from enum import StrEnum
@@ -650,10 +651,10 @@ index 757c84a23c2d94951cdbfacb9680e96be3672c95..49cabcc611b30a3fd22406250e7d6c39
          async with self._session() as session:
              media = await session.get(MediaFile, media_id)
 diff --git a/src/amane/db/repos/metadata.py b/src/amane/db/repos/metadata.py
-index 791ada146b9b579619c91bcc3b0adb56814a6015..5ebc00408c4ae1e339ffd7fb7b2024ef0bf1c883 100644
+index bd732b18a93fe2dd1a8f356139d23892b81ff7f3..08ef15d9240a1d9956941451168f6e54d959cd4d 100644
 --- a/src/amane/db/repos/metadata.py
 +++ b/src/amane/db/repos/metadata.py
-@@ -28,6 +28,8 @@ from ..models import (
+@@ -29,6 +29,8 @@ from ..models import (
      SortOrder,
      Studio,
      has_subtitle_predicate,
@@ -662,7 +663,7 @@ index 791ada146b9b579619c91bcc3b0adb56814a6015..5ebc00408c4ae1e339ffd7fb7b2024ef
      metadata_number_predicate,
      metadata_vr_predicate,
  )
-@@ -216,12 +218,12 @@ class MetadataRepoMixin(RepositoryMixinBase):
+@@ -236,12 +238,12 @@ class MetadataRepoMixin(RepositoryMixinBase):
          elif has_subtitle is False:
              conditions.append(~_metadata_linked_file_exists(has_subtitle_predicate()))
          if mosaic is not None:
@@ -679,10 +680,10 @@ index 791ada146b9b579619c91bcc3b0adb56814a6015..5ebc00408c4ae1e339ffd7fb7b2024ef
          if updated_before is not None:
 diff --git a/src/amane/db/watermarks.py b/src/amane/db/watermarks.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..4dade740a3bee643b430d70897ebef663c61293b
+index 0000000000000000000000000000000000000000..bb5c4cff8833d176e25cc05ec4b6f6c4d2cd71ef
 --- /dev/null
 +++ b/src/amane/db/watermarks.py
-@@ -0,0 +1,135 @@
+@@ -0,0 +1,138 @@
 +"""媒体文件的人工水印设置与统一生效值."""
 +
 +from dataclasses import replace
@@ -691,13 +692,13 @@ index 0000000000000000000000000000000000000000..4dade740a3bee643b430d70897ebef66
 +from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 +
 +from ..parsing import (
-+    DEFINITION_VALUES,
 +    ContentType,
 +    FileInfo,
 +    Mosaic,
 +    MosaicNature,
 +    WatermarkField,
 +    WatermarkMode,
++    canonical_definition,
 +    mosaic_nature,
 +)
 +from .models import MediaFile
@@ -714,9 +715,12 @@ index 0000000000000000000000000000000000000000..4dade740a3bee643b430d70897ebef66
 +    @field_validator("definition")
 +    @classmethod
 +    def known_definition(cls, value: str | None) -> str | None:
-+        if value is not None and value not in DEFINITION_VALUES:
++        if value is None:
++            return None
++        normalized = canonical_definition(value)
++        if normalized is None:
 +            raise ValueError(f"未知分辨率: {value}")
-+        return value
++        return normalized
 +
 +    @model_validator(mode="after")
 +    def validate_fields(self) -> Self:
@@ -819,7 +823,7 @@ index 0000000000000000000000000000000000000000..4dade740a3bee643b430d70897ebef66
 +        media.watermark_definition = update.definition
 +        media.watermark_definition_locked = True
 diff --git a/src/amane/handlers/file.py b/src/amane/handlers/file.py
-index c54c86508152827467d93abbb7684334ae68999e..bbf6b8d00c727ce466f596af13c090f242dd45fa 100644
+index ecf5efabab129bbedd7fa51397f26d87a2ee9ab9..23e239f0e7101d6cd3fd80f890ae6b5906aec0d2 100644
 --- a/src/amane/handlers/file.py
 +++ b/src/amane/handlers/file.py
 @@ -11,6 +11,7 @@ from PIL import Image
@@ -1078,7 +1082,7 @@ index c54c86508152827467d93abbb7684334ae68999e..bbf6b8d00c727ce466f596af13c090f2
      if occupant_updates:
          await repo.update_media_file(occupant.id, **occupant_updates)
      await repo.delete_media_file(media.id)
-@@ -410,11 +511,13 @@ def _place_library_images(
+@@ -401,11 +502,13 @@ def _place_library_images(
      file_info: FileInfo | None,
      content_type: ContentType,
      watermark_dir: Path | None,
@@ -1093,7 +1097,7 @@ index c54c86508152827467d93abbb7684334ae68999e..bbf6b8d00c727ce466f596af13c090f2
      if thumb_local is not None:
          if LibraryResource.thumb in kinds:
              paths.thumb.parent.mkdir(parents=True, exist_ok=True)
-@@ -426,9 +529,11 @@ def _place_library_images(
+@@ -417,9 +520,11 @@ def _place_library_images(
                  content_type=content_type,
                  watermark_dir=watermark_dir,
              )
@@ -1105,12 +1109,17 @@ index c54c86508152827467d93abbb7684334ae68999e..bbf6b8d00c727ce466f596af13c090f2
  
      if LibraryResource.poster in kinds:
          if poster_local is not None:
-@@ -441,29 +546,42 @@ def _place_library_images(
+@@ -432,6 +537,7 @@ def _place_library_images(
                  content_type=content_type,
                  watermark_dir=watermark_dir,
              )
 +            outputs.append(OutputPath(kind="poster", path=paths.poster))
-         elif thumb_local is not None and config is not None and config.scraping.crop_poster:
+         elif (
+             thumb_local is not None
+             and config is not None
+@@ -439,27 +545,39 @@ def _place_library_images(
+             and allows_poster_crop(content_type)
+         ):
              paths.poster.parent.mkdir(parents=True, exist_ok=True)
 -            crop_poster(
 +            cropped = crop_poster(
@@ -1126,7 +1135,7 @@ index c54c86508152827467d93abbb7684334ae68999e..bbf6b8d00c727ce466f596af13c090f2
  
      if trailer_local is not None and LibraryResource.trailer in kinds:
          paths.trailer.parent.mkdir(parents=True, exist_ok=True)
-         _copy_into_library(trailer_local, paths.trailer)
+         _write_into_library(trailer_local, paths.trailer)
 +        outputs.append(OutputPath(kind="trailer", path=paths.trailer))
  
      if extrafanart_targets and LibraryResource.extrafanart in kinds:
@@ -1150,7 +1159,7 @@ index c54c86508152827467d93abbb7684334ae68999e..bbf6b8d00c727ce466f596af13c090f2
              apply_cover_watermarks_from_info(
                  paths.thumb,
                  file_info,
-@@ -473,7 +591,7 @@ def _place_library_images(
+@@ -469,7 +587,7 @@ def _place_library_images(
                  scale=wm.scale,
                  corners=wm.corners,
              )
@@ -1159,7 +1168,7 @@ index c54c86508152827467d93abbb7684334ae68999e..bbf6b8d00c727ce466f596af13c090f2
              apply_cover_watermarks_from_info(
                  paths.poster,
                  file_info,
-@@ -483,6 +601,7 @@ def _place_library_images(
+@@ -479,6 +597,7 @@ def _place_library_images(
                  scale=wm.scale,
                  corners=wm.corners,
              )
@@ -1167,7 +1176,7 @@ index c54c86508152827467d93abbb7684334ae68999e..bbf6b8d00c727ce466f596af13c090f2
  
  
  async def _download_images_via_store(
-@@ -496,7 +615,10 @@ async def _download_images_via_store(
+@@ -492,7 +611,10 @@ async def _download_images_via_store(
      content_type: ContentType,
      watermark_dir: Path | None = None,
      library: Library | None = None,
@@ -1177,7 +1186,7 @@ index c54c86508152827467d93abbb7684334ae68999e..bbf6b8d00c727ce466f596af13c090f2
 +    required_images: frozenset[str] = frozenset(),
 +) -> list[OutputPath]:
      """优先用 Resource 已有文件; 缺失则现场 acquire.
-
+ 
      剧照文件名在这里渲染: 补零宽度取决于本轮剧照数量, 只有拿到文件列表后才定得下来.
 @@ -526,6 +648,36 @@ async def _download_images_via_store(
              priority = list(extrafanart_by_site.keys())
@@ -1219,7 +1228,7 @@ index c54c86508152827467d93abbb7684334ae68999e..bbf6b8d00c727ce466f596af13c090f2
 @@ -533,7 +685,7 @@ async def _download_images_via_store(
          names = render_extrafanart_names(template or EXTRAFANART_NAME_TEMPLATE_DEFAULT, paths.context, len(extrafanart))
          extrafanart_targets = list(zip(names, extrafanart, strict=True))
-
+ 
 -    await _place_library_images(
 +    return await _place_library_images(
          paths,
@@ -1234,7 +1243,7 @@ index c54c86508152827467d93abbb7684334ae68999e..bbf6b8d00c727ce466f596af13c090f2
  
  
 diff --git a/src/amane/media/images.py b/src/amane/media/images.py
-index 0630bc4eee88d04f4894eadf8b90e3be19cd551c..2c79f39e8c33743b2799bee3c915d06915cfa84a 100644
+index b9fedd573464253f513be3093fef78e8285be079..d3c015ab45c9ec704ed28784ac3ca4578a451e60 100644
 --- a/src/amane/media/images.py
 +++ b/src/amane/media/images.py
 @@ -8,7 +8,7 @@ import structlog
@@ -1246,7 +1255,7 @@ index 0630bc4eee88d04f4894eadf8b90e3be19cd551c..2c79f39e8c33743b2799bee3c915d069
  from .watermarks import load_stamp
  
  logger = structlog.get_logger()
-@@ -364,11 +364,11 @@ def apply_cover_watermarks_from_info(
+@@ -373,11 +373,11 @@ def apply_cover_watermarks_from_info(
      corners: Mapping[WatermarkKind, WatermarkCorner] | None = None,
      preserve_details: bool = False,
  ) -> bool:
@@ -1261,7 +1270,7 @@ index 0630bc4eee88d04f4894eadf8b90e3be19cd551c..2c79f39e8c33743b2799bee3c915d069
          definition=info.definition,
          jpeg_quality=jpeg_quality,
 diff --git a/src/amane/media/nfo.py b/src/amane/media/nfo.py
-index 9c3807fe0a7c805d3d7f9aa1658ed5458f9545e2..434828f97216bc89c47ed22bc4fc1d4b18c81727 100644
+index 4910e08f5560878335c726655ba23054ba572e70..2bace74a8387ba5888615b13f44a4b325b72bb91 100644
 --- a/src/amane/media/nfo.py
 +++ b/src/amane/media/nfo.py
 @@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
@@ -1273,7 +1282,7 @@ index 9c3807fe0a7c805d3d7f9aa1658ed5458f9545e2..434828f97216bc89c47ed22bc4fc1d4b
  from ..utils.text import strip_illegal_xml_chars
  
  if TYPE_CHECKING:
-@@ -98,15 +98,33 @@ async def write_nfo(metadata: Metadata, nfo_path: Path, *, file_info: FileInfo |
+@@ -112,15 +112,33 @@ async def write_nfo(metadata: Metadata, nfo_path: Path, *, file_info: FileInfo |
              code.write(f"  <label>{_escape_xml(metadata.publisher)}</label>\n")
  
          labels = list(metadata.tags)
@@ -1331,7 +1340,7 @@ index dea692c8461d5d50c76fae8fe98e450e85821736..d99df04bedaf0f059ee4cc0669a434c5
                  logger.warning("subtitle target occupied", source=str(sub), dest=str(dest))
                  conflicted.append(SubtitleConflict(source=sub, target=dest))
 diff --git a/src/amane/organize/template.py b/src/amane/organize/template.py
-index 134feeb406b45e2d5610c20d5e144ec86d3f81a6..c3bb768af81aa983a9587a42743a613ee35e838a 100644
+index a9b00307dd00f9b071a8513d0fd1eeaa11f8329f..0e0eb7df21cade8746f8f8ef334f27d534ad369e 100644
 --- a/src/amane/organize/template.py
 +++ b/src/amane/organize/template.py
 @@ -15,6 +15,7 @@ from ..parsing.file_info import (
@@ -1342,7 +1351,7 @@ index 134feeb406b45e2d5610c20d5e144ec86d3f81a6..c3bb768af81aa983a9587a42743a613e
      mosaic_nature,
      split_number,
  )
-@@ -350,7 +351,11 @@ def _build_variables(
+@@ -353,7 +354,11 @@ def _build_variables(
          "sub?": "C" if file_info is not None and file_info.has_subtitle else "",
          "content_type": str(metadata.content_type),
          "mosaic?": str(nature)
@@ -1676,15 +1685,16 @@ index 0000000000000000000000000000000000000000..a3f9347c838fceaa8749320754adadd2
 +            logger.warning("旧整理产物删除失败", path=str(old.path), error=str(exc))
 +    return OutputSnapshot(number=previous.number, outputs=[*remaining, *current]).model_dump_json()
 diff --git a/src/amane/parsing/__init__.py b/src/amane/parsing/__init__.py
-index 695bb6fcc9511de3100aa377aae1d6ee90aded94..58deef3eca7d3e0ff83cc66f1522cab8a38c4f7a 100644
+index 609c363130b6c2554d781c35588aed060b4bdf4b..115abf8f1b228cf310b6dc61d3e6e1dc1d25ec62 100644
 --- a/src/amane/parsing/__init__.py
 +++ b/src/amane/parsing/__init__.py
-@@ -11,9 +11,13 @@ from .file_info import (
+@@ -12,10 +12,14 @@ from .file_info import (
      FilePhaseSummary,
      Mosaic,
      MosaicNature,
 +    WatermarkField,
 +    WatermarkMode,
+     canonical_definition,
      detect_cd,
      extract_number,
 +    file_mosaic_nature,
@@ -1693,12 +1703,13 @@ index 695bb6fcc9511de3100aa377aae1d6ee90aded94..58deef3eca7d3e0ff83cc66f1522cab8
      infer_content_type,
      is_amateur,
      is_uncensored,
-@@ -38,9 +42,13 @@ __all__ = [
+@@ -41,10 +45,14 @@ __all__ = [
      "FilePhaseSummary",
      "Mosaic",
      "MosaicNature",
 +    "WatermarkField",
 +    "WatermarkMode",
+     "canonical_definition",
      "detect_cd",
      "extract_number",
 +    "file_mosaic_nature",
@@ -1708,7 +1719,7 @@ index 695bb6fcc9511de3100aa377aae1d6ee90aded94..58deef3eca7d3e0ff83cc66f1522cab8
      "is_amateur",
      "is_uncensored",
 diff --git a/src/amane/parsing/file_info.py b/src/amane/parsing/file_info.py
-index 79e4b9493f3e69e564cc2a5875228afa4576fffd..0a324b0ebbf403f77fed7256a1558688cf7b54c8 100644
+index 93d4d5a39335efc720382bc0f213aeb8f784f730..c38a47875625ea74446ed5a630803bc4a1d33d72 100644
 --- a/src/amane/parsing/file_info.py
 +++ b/src/amane/parsing/file_info.py
 @@ -16,7 +16,7 @@ from collections.abc import Iterable
@@ -1765,7 +1776,7 @@ index 79e4b9493f3e69e564cc2a5875228afa4576fffd..0a324b0ebbf403f77fed7256a1558688
  
  
  @dataclass(frozen=True)
-@@ -383,6 +398,18 @@ def mosaic_nature(mosaic: Mosaic | None, content_type: ContentType | None) -> Mo
+@@ -400,6 +415,18 @@ def mosaic_nature(mosaic: Mosaic | None, content_type: ContentType | None) -> Mo
      return None
  
  
@@ -1784,7 +1795,7 @@ index 79e4b9493f3e69e564cc2a5875228afa4576fffd..0a324b0ebbf403f77fed7256a1558688
  def max_definition(values: Iterable[str | None]) -> str | None:
      """按 DEFINITION_VALUES 顺序取最高档; 未知值忽略."""
      rank = {name: index for index, name in enumerate(DEFINITION_VALUES)}
-@@ -404,8 +431,22 @@ def summarize_file_phases(phases: Iterable[FilePhase], content_type: ContentType
+@@ -421,8 +448,22 @@ def summarize_file_phases(phases: Iterable[FilePhase], content_type: ContentType
      mosaic_present = {phase["mosaic"] for phase in items if phase["mosaic"] is not None}
      return FilePhaseSummary(
          has_subtitle=any(phase["has_subtitle"] for phase in items),
@@ -2002,10 +2013,10 @@ index 0000000000000000000000000000000000000000..bc77436209caef87bfb309b2ceccf193
 +        engine.dispose()
 diff --git a/tests/db/test_liu1443452494_watermarks.py b/tests/db/test_liu1443452494_watermarks.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..57ad3154aa30d3b4bb1d80b07a2d084016498be0
+index 0000000000000000000000000000000000000000..ef28e8bb8cb7d4a34e8c8f3a6c0828f357ec90d1
 --- /dev/null
 +++ b/tests/db/test_liu1443452494_watermarks.py
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,185 @@
 +"""人工水印的部分更新、否定值、自动恢复及查询一致性."""
 +
 +import asyncio
@@ -2030,6 +2041,8 @@ index 0000000000000000000000000000000000000000..57ad3154aa30d3b4bb1d80b07a2d0840
 +        ({"mode": "manual", "mosaic": None}, "马赛克性质必须"),
 +        ({"mode": "manual", "mosaic": "unknown"}, "censored"),
 +        ({"mode": "manual", "definition": "未知档位"}, "未知分辨率"),
++        ({"mode": "manual", "definition": ""}, "未知分辨率"),
++        ({"mode": "manual", "definition": 720}, "valid string"),
 +        ({"mode": "manual", "title": "不允许修改"}, "Extra inputs"),
 +        ({"has_subtitle": True}, "mode"),
 +    ],
@@ -2037,6 +2050,38 @@ index 0000000000000000000000000000000000000000..57ad3154aa30d3b4bb1d80b07a2d0840
 +def test_watermark_validation(body: dict[str, object], message: str) -> None:
 +    with pytest.raises(ValidationError, match=message):
 +        WatermarkUpdate.model_validate(body)
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    ("definition", "expected"),
++    [("HD", "720p"), ("SD", "480p"), ("hd", "720p"), ("sd", "480p"), ("8K", "8K"), (None, None)],
++)
++async def test_manual_definition_matches_filters(
++    repo: Repository, tmp_path: Path, definition: str | None, expected: str | None
++) -> None:
++    """人工档位统一后与响应、筛选和汇总一致，明确清空不恢复文件名中的档位。"""
++    metadata = await repo.upsert_metadata(number="SSIS-345")
++    assert metadata.id is not None
++    media = await repo.create_media_file(1, path=str(tmp_path / "SSIS-345-4K.mp4"), metadata_id=metadata.id)
++    assert media.id is not None
++    result = await repo.update_media_watermarks(
++        media.id, WatermarkUpdate(mode=WatermarkMode.MANUAL, definition=definition)
++    )
++    assert result is not None and result.changed
++    assert result.media.watermark_definition == expected and result.media.watermark_definition_locked
++    assert to_media_file_response(result.media, metadata.content_type).definition == expected
++    assert await repo.count_media_files(definition="4K") == 0
++    if expected is not None:
++        assert await repo.count_media_files(definition=expected) == 1
++        _, total = await repo.list_metadata(definition=expected)
++        assert total == 1
++    summary = (await repo.summarize_media_by_metadata([metadata]))[metadata.id].phase
++    assert summary.definition == expected
++    repeated = await repo.update_media_watermarks(
++        media.id, WatermarkUpdate(mode=WatermarkMode.MANUAL, definition=expected)
++    )
++    assert repeated is not None and not repeated.changed
 +
 +
 +@pytest.mark.asyncio
@@ -3017,10 +3062,10 @@ index 0000000000000000000000000000000000000000..a07b0e5fc6317630da060654912551fd
 +  return changed ? update : null;
 +}
 diff --git a/web/src/i18n/locales/en/metadata.json b/web/src/i18n/locales/en/metadata.json
-index 9c5f7fb568a52d94e2a6f2cae8834c5a6f4d675b..a77a45fbbc195cd31259c2ddfe5090c1645a3ea3 100644
+index 4aba35f751238502428f97e50f465b16ec6397d0..2d8798aa8007fa7de1babe32c63e62b7b421b077 100644
 --- a/web/src/i18n/locales/en/metadata.json
 +++ b/web/src/i18n/locales/en/metadata.json
-@@ -406,6 +406,24 @@
+@@ -423,6 +423,24 @@
      "loadImages": "Load images",
      "loadAllImages": "Load all images"
    },
@@ -3046,10 +3091,10 @@ index 9c5f7fb568a52d94e2a6f2cae8834c5a6f4d675b..a77a45fbbc195cd31259c2ddfe5090c1
      "manage": "Field Locks",
      "all": "Lock All",
 diff --git a/web/src/i18n/locales/zh-CN/metadata.json b/web/src/i18n/locales/zh-CN/metadata.json
-index f9542a965c8d5ffe141d2b1849275aed1d32005f..a83ed3c816d3d4f07faca810facc922c1eb839e6 100644
+index aab1296b933a1d69f73ee5a587b022092a370893..01484361503a51db40e12c484d4a9199f7ef2ad0 100644
 --- a/web/src/i18n/locales/zh-CN/metadata.json
 +++ b/web/src/i18n/locales/zh-CN/metadata.json
-@@ -383,6 +383,24 @@
+@@ -396,6 +396,24 @@
      "loadImages": "加载图片",
      "loadAllImages": "加载全部图片"
    },

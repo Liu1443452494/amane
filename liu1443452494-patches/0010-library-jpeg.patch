@@ -1,56 +1,56 @@
 diff --git a/docs/dev/task-system.md b/docs/dev/task-system.md
-index 9c1cfb7..42016e6 100644
+index edb09f800416b490bfe1377fb8ee36cab4c6fd60..d6eadc1566d140c01705d5ca7198bfeb6d42ce64 100644
 --- a/docs/dev/task-system.md
 +++ b/docs/dev/task-system.md
-@@ -95,8 +95,8 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
+@@ -96,9 +96,9 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
  
  `execute_file_operations` 是落盘执行单元, 仅 ORGANIZE 经 `apply_file_operations` 调用. 不变量:
  
--- **整理 = 复制到库路径**: 优先用 Resource 已有文件, 缺失才现场 `acquire`; 复制哪些类型由 `Library.copy_resources` (或 payload 覆盖) 决定 (见 [data-model.md](data-model.md)). 目标路径上已有的产物一律按本次内容覆盖, NFO 同理, 不判断是否已存在; fanart 没有刮削来源, 内容取 thumb, 因此随 thumb 一同重写, 该路径上的自备背景图会被覆盖, 也没有单独的关闭途径.
+-- **整理 = 复制到库路径**: 优先用 Resource 已有文件, 缺失才现场 `acquire`; 复制哪些类型由 `Library.copy_resources` (或 payload 覆盖) 决定 (见 [data-model.md](data-model.md)). 目标路径上已有的产物一律按本次内容覆盖, 落盘按新文件处理 (临时文件加改名, 权限与 ACL 取自库目录而非 Resource), NFO 同理, 不判断是否已存在; fanart 没有刮削来源, 内容取 thumb, 因此随 thumb 一同重写, 该路径上的自备背景图会被覆盖, 也没有单独的关闭途径.
 -- **封面角标**: `watermark.enabled` 时 poster / thumb 副本按源文件 FileInfo 与条目类型叠 PNG; Resource 原图与 fanart 不修改.
-+- **整理图片**: 优先用 Resource 原图, 缺失才 `acquire`; `Library.copy_resources` 或 payload 决定写出类型并覆盖选中产物. fanart 独立选择并复用 thumb 原图. `src/amane/handlers/file.py::_copy_library_image` 对 JPG 输出复制 JPEG, 其余仅转换库路径副本, 与角标共用刮削质量设置; 刮削缓存和候选排序不参与转换.
+-- **海报缺失**: 有码与无码在 `scraping.crop_poster` 开启时从已落盘 thumb 裁剪兜底; 其余类型不裁.
++- **整理图片**: 优先用 Resource 原图, 缺失才 `acquire`; `Library.copy_resources` 或 payload 决定写出类型并覆盖选中产物. 临时文件替换使权限与 ACL 取自库目录, NFO 同理. fanart 独立选择并复用 thumb 原图. `src/amane/handlers/file.py::_copy_library_image` 对 JPG 输出复制 JPEG, 其余仅转换库路径副本, 与角标共用刮削质量设置; 刮削缓存和候选排序不参与转换.
 +- **封面角标**: `watermark.enabled` 时 poster / thumb 按 FileInfo 与条目类型叠 PNG; 非 JPEG 转换与角标合并编码, 保留颜色配置和显示方向. `src/amane/media/images.py::_save_jpeg` 的整理参数不影响裁剪等既有调用; Resource 原图与 fanart 不叠角标.
- - **海报缺失**: 按 `scraping.crop_poster` 从已落盘 thumb 裁剪兜底.
++- **海报缺失**: 有码与无码在 `scraping.crop_poster` 开启时从 Resource 封面原图裁切; 其余类型不裁切.
  - **目标占用**: 判定分为四态: 空闲 / 已就位 / 被占用 / 无法判定. 源与目标已是同一文件 (含硬链同一 inode) 时视为就位, 只跳过视频落盘, 附属文件照常重写; 被占用时跳过该文件, 不改名、不覆盖、不移动, 视频与字幕一视同仁, 由调用方按冲突记账, 冲突条目 (源路径 + 被占用的目标路径; 字幕冲突的 `path` 记字幕源路径, 不记视频源路径) 写进任务结果供界面显示, 且 `conflicts` 恒为 `conflicted` 条数的前缀 (差额只留在任务日志里), 冲突不自动解决, 未落盘的行留在源路径, 由用户自行处理. 无法判定 (stat 失败, 或两者在两次读取之间被替换) 按失败记账并带上 stat 的错误说明, 不得计入冲突或放宽为空闲. 存在性与占用判定都经 `existing_disk_path` (跟随符号链接; 读不出状态时按不存在处理, 不抛异常): 目标位置是断链符号链接时按空闲处理, MOVE 会替换它, SYMLINK 因 EEXIST 记失败. 判定与落盘之间还有窗口, MOVE / COPY 期间目标被外部写入仍会覆盖, 这条保证是尽力而为.
  - **链接**: `link_template` 非空时视频就位后在库外写 STRM 或符号链接, 指向这次整理后的路径; `MediaFile.path` 仍是真实视频. 链接写入失败时, 目标路径仍在本库内则回写 path, 任务记失败以便重试补链接.
+ - **索引写回**: 整理后路径仍在本库内则更新 `MediaFile.path`; 已不在本库内且源路径不在磁盘上则删除该行. 不改 `library_id`, 不写其它库的行. 目标路径已被本库另一行占用时删除本行, 占用行缺少刮削字段则补上.
 diff --git a/src/amane/handlers/file.py b/src/amane/handlers/file.py
-index c1cb6609b3e25c6b3c675959e695f9cd22c1080a..c54c86508152827467d93abbb7684334ae68999e 100644
+index 3c0231cf34a0852b37f316d869d0a7e74aa98698..ecf5efabab129bbedd7fa51397f26d87a2ee9ab9 100644
 --- a/src/amane/handlers/file.py
 +++ b/src/amane/handlers/file.py
-@@ -3,8 +3,10 @@ from collections.abc import Sequence
- from dataclasses import dataclass, field
- from pathlib import Path
- from typing import TYPE_CHECKING
-+from uuid import uuid4
+@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
+ from uuid import uuid4
  
  import structlog
 +from PIL import Image
  
  from ..config import HotSettings, WatermarkConfig
  from ..db.models import Library, MediaFile
-@@ -14,6 +16,7 @@ from ..library import MEDIA_EXTENSIONS, LibraryFileKind, LibraryScan, ancestor_d
+@@ -15,6 +16,7 @@ from ..library import MEDIA_EXTENSIONS, LibraryFileKind, LibraryScan, ancestor_d
  from ..library.rules import is_in_trash
- from ..media import ResourceStore, apply_cover_watermarks_from_info, crop_poster
+ from ..media import ResourceStore, allows_poster_crop, apply_cover_watermarks_from_info, crop_poster
  from ..media import write_nfo as write_nfo_file
 +from ..media.images import _save_jpeg
  from ..media.resource_store import internal_url_hash
  from ..net.http import WebClient
  from ..observability.liu1443452494_process_events import file_processing, record_copied_file
-@@ -304,7 +307,7 @@ async def _acquire_first_local(urls: list[str], store: ResourceStore, client: We
+@@ -305,7 +307,7 @@ async def _acquire_first_local(urls: list[str], store: ResourceStore, client: We
      return None
  
  
--def _copy_into_library(src: Path, dst: Path) -> None:
-+def _copy_into_library(src: Path, dst: Path, *, record: bool = True) -> None:
-     """复制到媒体库, 元数据复制失败不算失败.
+-def _write_into_library(source: Path, target: Path) -> None:
++def _write_into_library(source: Path, target: Path, *, record: bool = True) -> None:
+     """按新文件落盘库内产物: 模式位与 ACL 由目标目录决定, 不继承源文件.
  
-     成功路径保持 copy2 的全部行为 (Windows 的 CopyFile2 与其余平台的 copyfile + copystat).
-@@ -332,7 +335,66 @@ def _copy_into_library(src: Path, dst: Path) -> None:
-             shutil.copystat(src, dst)
+     源在 data 目录, 那里通常只授予容器用户访问; 带上源的元数据会把这张 ACL 搬进媒体库,
+@@ -324,7 +326,66 @@ def _write_into_library(source: Path, target: Path) -> None:
+             tmp.unlink(missing_ok=True)
          except OSError as exc:
-             logger.debug("copy metadata skipped", src=str(src), dst=str(dst), error=str(exc))
+             logger.debug("temp file cleanup skipped", path=str(tmp), error=str(exc))
+-    record_copied_file(source, target)
 +    if record:
-+        record_copied_file(src, dst)
++        record_copied_file(source, target)
 +
 +
 +def _copy_library_image(
@@ -63,11 +63,11 @@ index c1cb6609b3e25c6b3c675959e695f9cd22c1080a..c54c86508152827467d93abbb7684334
 +    watermark_dir: Path | None = None,
 +) -> bool:
 +    """非 JPEG 原图仅在整理输出 JPG 时转换；返回值表示已完成转换及所需角标。"""
-+    if dst.suffix.lower() not in {".jpg", ".jpeg"}:
-+        _copy_into_library(src, dst)
-+        return False
 +    if dst.exists() and src.samefile(dst):
 +        raise OSError("整理图片的目标不能与缓存源图相同")
++    if dst.suffix.lower() not in {".jpg", ".jpeg"}:
++        _write_into_library(src, dst)
++        return False
 +    try:
 +        with Image.open(src) as image:
 +            image.load()
@@ -75,7 +75,7 @@ index c1cb6609b3e25c6b3c675959e695f9cd22c1080a..c54c86508152827467d93abbb7684334
 +    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
 +        raise OSError(f"整理图片无法读取: {src}") from exc
 +    if not needs_conversion:
-+        _copy_into_library(src, dst)
++        _write_into_library(src, dst)
 +        return False
 +
 +    temporary = dst.with_name(f".{dst.stem}.{uuid4().hex}.jpg")
@@ -103,16 +103,16 @@ index c1cb6609b3e25c6b3c675959e695f9cd22c1080a..c54c86508152827467d93abbb7684334
 +            image.load()
 +            if image.format != "JPEG":
 +                raise OSError("整理图片转换后不是 JPEG 格式")
-+        # 编码完成后沿用库路径复制，兼容拒绝写入文件元数据的网盘。
-+        _copy_into_library(temporary, dst, record=False)
++        # 编码完成后按新文件写入库路径，权限由目标目录决定。
++        _write_into_library(temporary, dst, record=False)
 +    finally:
 +        temporary.unlink(missing_ok=True)
-     record_copied_file(src, dst)
++    record_copied_file(src, dst)
 +    return True
  
  
  @in_thread
-@@ -351,18 +413,34 @@ def _place_library_images(
+@@ -343,18 +404,34 @@ def _place_library_images(
  ) -> None:
      # 复制封面 / 海报 / 预告片 / extrafanart 到库路径, 不判断目标上是否已有产物.
      # fanart 与封面独立选择，共用资源目录中的封面原图。
@@ -121,7 +121,7 @@ index c1cb6609b3e25c6b3c675959e695f9cd22c1080a..c54c86508152827467d93abbb7684334
      if thumb_local is not None:
          if LibraryResource.thumb in kinds:
              paths.thumb.parent.mkdir(parents=True, exist_ok=True)
--            _copy_into_library(thumb_local, paths.thumb)
+-            _write_into_library(thumb_local, paths.thumb)
 +            converted_thumb = _copy_library_image(
 +                thumb_local,
 +                paths.thumb,
@@ -132,13 +132,13 @@ index c1cb6609b3e25c6b3c675959e695f9cd22c1080a..c54c86508152827467d93abbb7684334
 +            )
          if LibraryResource.fanart in kinds:
              paths.fanart.parent.mkdir(parents=True, exist_ok=True)
--            _copy_into_library(thumb_local, paths.fanart)
+-            _write_into_library(thumb_local, paths.fanart)
 +            _copy_library_image(thumb_local, paths.fanart, config=config)
  
      if LibraryResource.poster in kinds:
          if poster_local is not None:
              paths.poster.parent.mkdir(parents=True, exist_ok=True)
--            _copy_into_library(poster_local, paths.poster)
+-            _write_into_library(poster_local, paths.poster)
 +            converted_poster = _copy_library_image(
 +                poster_local,
 +                paths.poster,
@@ -147,14 +147,14 @@ index c1cb6609b3e25c6b3c675959e695f9cd22c1080a..c54c86508152827467d93abbb7684334
 +                content_type=content_type,
 +                watermark_dir=watermark_dir,
 +            )
-         elif thumb_local is not None and config is not None and config.scraping.crop_poster:
-             paths.poster.parent.mkdir(parents=True, exist_ok=True)
-             crop_poster(
-@@ -379,13 +457,13 @@ def _place_library_images(
+         elif (
+             thumb_local is not None
+             and config is not None
+@@ -376,13 +453,13 @@ def _place_library_images(
      if extrafanart_targets and LibraryResource.extrafanart in kinds:
          paths.extrafanart_dir.mkdir(parents=True, exist_ok=True)
          for name, p in extrafanart_targets:
--            _copy_into_library(p, paths.extrafanart_dir / name)
+-            _write_into_library(p, paths.extrafanart_dir / name)
 +            _copy_library_image(p, paths.extrafanart_dir / name, config=config)
  
      # 叠加水印 (thumb / poster).
@@ -166,7 +166,7 @@ index c1cb6609b3e25c6b3c675959e695f9cd22c1080a..c54c86508152827467d93abbb7684334
              apply_cover_watermarks_from_info(
                  paths.thumb,
                  file_info,
-@@ -395,7 +473,7 @@ def _place_library_images(
+@@ -392,7 +469,7 @@ def _place_library_images(
                  scale=wm.scale,
                  corners=wm.corners,
              )
@@ -176,10 +176,10 @@ index c1cb6609b3e25c6b3c675959e695f9cd22c1080a..c54c86508152827467d93abbb7684334
                  paths.poster,
                  file_info,
 diff --git a/src/amane/media/images.py b/src/amane/media/images.py
-index 0eb7c4a..0630bc4 100644
+index 780ab64e867b5a8835962416622e3182a8b88435..b9fedd573464253f513be3093fef78e8285be079 100644
 --- a/src/amane/media/images.py
 +++ b/src/amane/media/images.py
-@@ -36,13 +36,28 @@ _TRANSPOSE_BY_ROTATION: dict[int, Image.Transpose] = {
+@@ -40,13 +40,28 @@ _TRANSPOSE_BY_ROTATION: dict[int, Image.Transpose] = {
  CropRotation = Literal[0, 90, 180, 270]
  
  
@@ -210,7 +210,7 @@ index 0eb7c4a..0630bc4 100644
  
  
  def format_crop_box_args(left: int, top: int, right: int, bottom: int, *, rotation: CropRotation = 0) -> str:
-@@ -303,6 +318,7 @@ def apply_cover_watermarks(
+@@ -312,6 +327,7 @@ def apply_cover_watermarks(
      watermark_dir: Path | None = None,
      scale: float = _DEFAULT_SCALE,
      corners: Mapping[WatermarkKind, WatermarkCorner] | None = None,
@@ -218,7 +218,7 @@ index 0eb7c4a..0630bc4 100644
  ) -> bool:
      """叠到库路径封面/海报. 无标记或无图则不动. 不修改 Resource 原图."""
      stems = _stamp_stems(has_subtitle=has_subtitle, uncensored=uncensored, mosaic=mosaic, definition=definition)
-@@ -310,7 +326,7 @@ def apply_cover_watermarks(
+@@ -319,7 +335,7 @@ def apply_cover_watermarks(
          return False
      try:
          with Image.open(path) as src:
@@ -227,7 +227,7 @@ index 0eb7c4a..0630bc4 100644
          width, height = img.size
          if width <= 0 or height <= 0:
              return False
-@@ -330,7 +346,7 @@ def apply_cover_watermarks(
+@@ -339,7 +355,7 @@ def apply_cover_watermarks(
          if not any(grouped.values()):
              return False
          _paste_stamps(img, grouped, pad=pad, gap=gap)
@@ -236,7 +236,7 @@ index 0eb7c4a..0630bc4 100644
          return True
      except Exception as e:
          logger.warning("cover watermark failed", path=str(path), error=str(e))
-@@ -346,6 +362,7 @@ def apply_cover_watermarks_from_info(
+@@ -355,6 +371,7 @@ def apply_cover_watermarks_from_info(
      watermark_dir: Path | None = None,
      scale: float = _DEFAULT_SCALE,
      corners: Mapping[WatermarkKind, WatermarkCorner] | None = None,
@@ -244,7 +244,7 @@ index 0eb7c4a..0630bc4 100644
  ) -> bool:
      """``content_type`` 是条目类型: 无码章与列表角标同用 ``parsing/file_info.py::shows_uncensored`` 的口径."""
      return apply_cover_watermarks(
-@@ -358,4 +375,5 @@ def apply_cover_watermarks_from_info(
+@@ -367,4 +384,5 @@ def apply_cover_watermarks_from_info(
          watermark_dir=watermark_dir,
          scale=scale,
          corners=corners,
@@ -252,10 +252,10 @@ index 0eb7c4a..0630bc4 100644
      )
 diff --git a/tests/handlers/test_liu1443452494_library_jpeg.py b/tests/handlers/test_liu1443452494_library_jpeg.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..9fc347ec01ffb5e925601fb205a3d66d69fd3cfc
+index 0000000000000000000000000000000000000000..49675ebc8d7293aea703319772a77b3ffd8206cb
 --- /dev/null
 +++ b/tests/handlers/test_liu1443452494_library_jpeg.py
-@@ -0,0 +1,335 @@
+@@ -0,0 +1,338 @@
 +"""整理图片的真实格式、原图保留与单次 JPEG 编码。"""
 +
 +from io import BytesIO
@@ -547,8 +547,9 @@ index 0000000000000000000000000000000000000000..9fc347ec01ffb5e925601fb205a3d66d
 +    assert source.read_bytes() == original
 +
 +
-+def test_output_cannot_overwrite_its_cached_source(tmp_path: Path) -> None:
-+    source = tmp_path / "后缀错误的缓存.jpg"
++@pytest.mark.parametrize("suffix", [".jpg", ".jpeg", ".webp", ".png"])
++def test_output_cannot_overwrite_its_cached_source(tmp_path: Path, suffix: str) -> None:
++    source = tmp_path / f"缓存原图{suffix}"
 +    Image.new("RGB", (60, 40), "blue").save(source, format="WEBP")
 +    original = source.read_bytes()
 +    with pytest.raises(OSError, match="不能与缓存源图相同"):
@@ -570,7 +571,9 @@ index 0000000000000000000000000000000000000000..9fc347ec01ffb5e925601fb205a3d66d
 +        scraping=ScrapingConfig(download_resources=[DownloadableResource.thumb], crop_poster=False),
 +        watermark=WatermarkConfig(enabled=False),
 +    )
-+    materialized = await materialize_images([], [url], [], resource_store, web, config, tmp_path)
++    materialized = await materialize_images(
++        [], [url], [], resource_store, web, config, tmp_path, content_type=ContentType.CENSORED
++    )
 +    cached = await resource_store.resolve(url)
 +    assert cached is not None and cached.read_bytes() == original
 +    paths = _paths(tmp_path / "整理")
@@ -592,7 +595,7 @@ index 0000000000000000000000000000000000000000..9fc347ec01ffb5e925601fb205a3d66d
 +        assert image.format == "JPEG" and image.size == (300, 200)
 +    assert client.downloaded == [url]
 diff --git a/tests/handlers/test_liu1443452494_processing_events.py b/tests/handlers/test_liu1443452494_processing_events.py
-index 6300f545012672968a38054ef3d1e8fba088da6d..c2542aa18a156d63de68e0480d8286c4b6c84162 100644
+index 9d993bbf4cca2aac86b098c5c262823a70af1b97..4a15a8c638b4f8066ca392aeaaa82b8773b4bcb4 100644
 --- a/tests/handlers/test_liu1443452494_processing_events.py
 +++ b/tests/handlers/test_liu1443452494_processing_events.py
 @@ -13,6 +13,7 @@ from amane.db.models import MediaFileStatus, Task, TaskStatus, TaskType
@@ -603,54 +606,49 @@ index 6300f545012672968a38054ef3d1e8fba088da6d..c2542aa18a156d63de68e0480d8286c4
  from amane.media import ResourceStore, materialize_images
  from amane.net.http import WebClient
  from amane.observability.liu1443452494_processing_log import build_report, read_log
-@@ -137,3 +138,50 @@ async def test_organize_records_per_file_paths_and_restores_context(
+@@ -139,3 +140,45 @@ async def test_organize_records_per_file_paths_and_restores_context(
          assert any(entry.message == "NFO 已写入" for entry in report.entries)
          other = next(value for value in numbers if value != number)
          assert str(library_root / f"{other}.mp4") not in report.model_dump_json()
 +
 +
-+@pytest.mark.parametrize("condition", ["copy2", "metadata", "content"])
++@pytest.mark.parametrize("condition", ["success", "content", "replace"])
 +@pytest.mark.parametrize("record", [True, False])
 +def test_copy_events_follow_final_copy_result(
 +    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, condition: str, record: bool
 +) -> None:
-+    """成功复制仅记录最终目标, 关闭记录或内容复制失败时不产生成功记录。"""
++    """成功写入仅记录最终目标，复制或替换失败时保留旧产物并清除临时文件。"""
 +    source = tmp_path / "原始资源.mp4"
 +    source.write_bytes(b"original-resource")
 +    target = tmp_path / "整理副本.mp4"
++    target.write_bytes(b"previous-resource")
 +    copied: list[tuple[Path, Path, bytes]] = []
-+    copy_contents = file_module.shutil.copyfile
-+    first = PermissionError("模拟首次复制失败")
-+    second = OSError("模拟内容复制失败")
-+
-+    def fail_first(src: Path, dst: Path) -> None:
-+        if condition == "metadata":
-+            copy_contents(src, dst)
-+        raise first
-+
-+    def fail_metadata(src: Path, dst: Path) -> None:
-+        raise first
++    failure = OSError("模拟内容复制或目标替换失败")
 +
 +    def fail_contents(src: Path, dst: Path) -> None:
-+        raise second
++        dst.write_bytes(b"partial-resource")
++        raise failure
++
++    def fail_replace(self: Path, destination: Path) -> Path:
++        raise failure
 +
 +    def record_copy(src: Path, dst: Path) -> None:
 +        copied.append((src, dst, dst.read_bytes()))
 +
 +    monkeypatch.setattr(file_module, "record_copied_file", record_copy)
-+    if condition != "copy2":
-+        monkeypatch.setattr(file_module.shutil, "copy2", fail_first)
-+    if condition == "metadata":
-+        monkeypatch.setattr(file_module.shutil, "copystat", fail_metadata)
 +    if condition == "content":
 +        monkeypatch.setattr(file_module.shutil, "copyfile", fail_contents)
-+        with pytest.raises(OSError, match="模拟内容复制失败") as error:
-+            file_module._copy_into_library(source, target, record=record)
-+        assert error.value is second
-+        assert not target.exists()
++    elif condition == "replace":
++        monkeypatch.setattr(Path, "replace", fail_replace)
++    if condition != "success":
++        with pytest.raises(OSError, match="模拟内容复制或目标替换失败") as error:
++            file_module._write_into_library(source, target, record=record)
++        assert error.value is failure
++        assert target.read_bytes() == b"previous-resource"
 +    else:
-+        file_module._copy_into_library(source, target, record=record)
++        file_module._write_into_library(source, target, record=record)
 +        assert target.read_bytes() == b"original-resource"
-+    expected = [(source, target, b"original-resource")] if record and condition != "content" else []
++    expected = [(source, target, b"original-resource")] if record and condition == "success" else []
 +    assert copied == expected
 +    assert source.read_bytes() == b"original-resource"
++    assert set(tmp_path.iterdir()) == {source, target}

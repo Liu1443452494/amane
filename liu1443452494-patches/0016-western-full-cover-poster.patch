@@ -1,56 +1,64 @@
 diff --git a/docs/dev/task-system.md b/docs/dev/task-system.md
-index d84d62fc..79be0b5d 100644
+index 20de60b400a709f9ef260d8ff93c8ab59aa92b6a..f1e098133e8bb07026b8570eff4915f7d1f7f34a 100644
 --- a/docs/dev/task-system.md
 +++ b/docs/dev/task-system.md
 @@ -100,7 +100,7 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
  
- - **整理图片**: 优先用 Resource 原图, 缺失才 `acquire`; `Library.copy_resources` 或 payload 决定写出类型并覆盖选中产物. fanart 独立选择并复用 thumb 原图. `src/amane/handlers/file.py::_copy_library_image` 对 JPG 输出复制 JPEG, 其余仅转换库路径副本, 与角标共用刮削质量设置; 刮削缓存和候选排序不参与转换.
+ - **整理图片**: 优先用 Resource 原图, 缺失才 `acquire`; `Library.copy_resources` 或 payload 决定写出类型并覆盖选中产物. 临时文件替换使权限与 ACL 取自库目录, NFO 同理. fanart 独立选择并复用 thumb 原图. `src/amane/handlers/file.py::_copy_library_image` 对 JPG 输出复制 JPEG, 其余仅转换库路径副本, 与角标共用刮削质量设置; 刮削缓存和候选排序不参与转换.
  - **封面角标**: `watermark.enabled` 时 poster / thumb 按 FileInfo 与条目类型叠 PNG; 非 JPEG 转换与角标合并编码, 保留颜色配置和显示方向. `src/amane/media/images.py::_save_jpeg` 的整理参数不影响裁剪等既有调用; Resource 原图与 fanart 不叠角标.
--- **海报缺失**: 按 `scraping.crop_poster` 从已落盘 thumb 裁剪兜底.
+-- **海报缺失**: 有码与无码在 `scraping.crop_poster` 开启时从 Resource 封面原图裁切; 其余类型不裁切.
 +- **海报缺失**: 直接读取 Resource 封面原图, 规则与[刮削期资源物化](#刮削期资源物化)一致, 不依赖 thumb 输出.
  - **目标占用**: 判定分为四态: 空闲 / 已就位 / 被占用 / 无法判定. 源与目标已是同一文件 (含硬链同一 inode) 时视为就位, 只跳过视频落盘, 附属文件照常重写; 被占用时跳过该文件, 不改名、不覆盖、不移动, 视频与字幕一视同仁, 由调用方按冲突记账, 冲突条目 (源路径 + 被占用的目标路径; 字幕冲突的 `path` 记字幕源路径, 不记视频源路径) 写进任务结果供界面显示, 且 `conflicts` 恒为 `conflicted` 条数的前缀 (差额只留在任务日志里), 冲突不自动解决, 未落盘的行留在源路径, 由用户自行处理. 无法判定 (stat 失败, 或两者在两次读取之间被替换) 按失败记账并带上 stat 的错误说明, 不得计入冲突或放宽为空闲. 存在性与占用判定都经 `existing_disk_path` (跟随符号链接; 读不出状态时按不存在处理, 不抛异常): 目标位置是断链符号链接时按空闲处理, MOVE 会替换它, SYMLINK 因 EEXIST 记失败. 判定与落盘之间还有窗口, MOVE / COPY 期间目标被外部写入仍会覆盖, 这条保证是尽力而为.
  - **链接**: `link_template` 非空时视频就位后在库外写 STRM 或符号链接, 指向这次整理后的路径; `MediaFile.path` 仍是真实视频. 链接写入失败时, 目标路径仍在本库内则回写 path, 任务记失败以便重试补链接.
  - **索引写回**: 整理后路径仍在本库内则更新 `MediaFile.path`; 已不在本库内且源路径不在磁盘上则删除该行. 不改 `library_id`, 不写其它库的行. 目标路径已被本库另一行占用时删除本行, 占用行缺少刮削字段则补上.
 @@ -129,6 +129,7 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
- - **URL 重排契约**: 封面与海报由 `src/amane/media/liu1443452494_image_quality.py::ImagePool` 完整解码后按实际文件字节数降序排列; 海报等大小优先日亚, 其余沿用候选顺序. 预告片仍按成功者保序前置, 失败地址保留在尾部供后续重试. 未下载类型与剧照分组不重排; 新图均失败时保留旧图, 图片锁定字段不自动下载.
+ - **URL 重排契约**: 封面与海报由 `src/amane/media/liu1443452494_image_quality.py::ImagePool` 完整解码后按实际文件字节数降序排列; 海报等大小优先日亚, 其余沿用候选顺序. 预告片命中即停止并前置成功地址, 其余候选保序留待后续重试. 未下载类型与剧照分组不重排; 新图均失败时保留旧图, 图片锁定字段不自动下载.
  - **高清海报**: `ScrapeHandler` 从 `raw` 按 DMM、AVBase、JavBus 再到其他合格来源选取日文, 禁止使用翻译或映射姓名. `src/amane/media/liu1443452494_posters.py::PosterResolver.resolve` 经 Tenhow 核实 ASIN 后查询日亚; 标题搜索清除当前番号与末尾演员名, 最多缩短一次. 数字版本去除已知版式后须与完整原题全等, 演员和商品身份继续核对. 地址去重, 同 ASIN 新图仍参与排序; `raw` 不变.
- - **裁剪海报**: 保留原触发条件与右侧裁剪比例, 仅当裁剪结果宽高均不减小且至少一项增大时替换下载海报; 失败保留下载结果. 超分就地覆盖, 失败不阻断刮削.
+ - **裁剪海报**: 有码与无码沿用右侧裁剪比例, 仅当裁剪结果宽高均不减小且至少一项增大时替换下载海报; 失败保留下载结果. 超分就地覆盖, 失败不阻断刮削.
 +- **欧美完整海报**: 裁切主开关与完整封面选项同时启用时, 按番号条目的持久类型判定; 新条目采用任务类型. 缺少可用海报时与选定封面共用 Resource, 整理沿用独立输出与 JPEG / 水印规则. 重新刮削可替换未锁定的自动比例裁切, 可用来源海报与手动裁切优先保留.
  
  手动裁切复用同一派生通道 (`op=crop`, `args=box:…`), 见 [data-model.md](data-model.md).
  
 diff --git a/src/amane/config/manager.py b/src/amane/config/manager.py
-index ea887633..78533cdb 100644
+index 3e7a5d0436a16c8e2daf7e397b86dcb8e344b45a..887072d819fb81862d2cfcdab665abd0a5e3be3e 100644
 --- a/src/amane/config/manager.py
 +++ b/src/amane/config/manager.py
-@@ -331,6 +331,11 @@ class ScrapingConfig(BaseModel):
-         description="刮削时自动下载到 Resource 目录的资源类型",
-     )
+@@ -365,6 +365,12 @@ class ScrapingConfig(BaseModel):
      crop_poster: bool = True
+     """仅有码与无码从封面自动裁切生成海报."""
+ 
 +    western_full_cover_poster: bool = Field(
 +        default=False,
 +        title="欧美缺失海报时使用完整封面",
 +        description="仅在启用裁切海报时生效；欧美影片缺少可用海报时使用完整封面，保留已有海报。",
 +    )
- 
++
      poster_ratio: float = Field(default=0.7, ge=0.3, le=1.0)
      """海报裁剪宽高比 (w/h). 从封面右侧裁剪生成海报. 默认 0.7 (贴近常见 379x538 / 高清海报)."""
+ 
 diff --git a/src/amane/handlers/file.py b/src/amane/handlers/file.py
-index bbf6b8d00c727ce466f596af13c090f242dd45fa..81eb12203e796517f2a17fe305830ed456dd9987 100644
+index 23e239f0e7101d6cd3fd80f890ae6b5906aec0d2..e84eb9f224c55ccbb3637eb59fee70a5904ef428 100644
 --- a/src/amane/handlers/file.py
 +++ b/src/amane/handlers/file.py
 @@ -18,6 +18,7 @@ from ..library.rules import is_in_trash
- from ..media import ResourceStore, apply_cover_watermarks_from_info, crop_poster
+ from ..media import ResourceStore, allows_poster_crop, apply_cover_watermarks_from_info, crop_poster
  from ..media import write_nfo as write_nfo_file
  from ..media.images import _save_jpeg
 +from ..media.liu1443452494_image_quality import ImagePool
  from ..media.resource_store import internal_url_hash
  from ..net.http import WebClient
  from ..observability.liu1443452494_process_events import file_processing, record_copied_file
-@@ -549,16 +550,27 @@ def _place_library_images(
+@@ -538,23 +539,30 @@ def _place_library_images(
+                 watermark_dir=watermark_dir,
+             )
              outputs.append(OutputPath(kind="poster", path=paths.poster))
-         elif thumb_local is not None and config is not None and config.scraping.crop_poster:
-             paths.poster.parent.mkdir(parents=True, exist_ok=True)
+-        elif (
+-            thumb_local is not None
+-            and config is not None
+-            and config.scraping.crop_poster
+-            and allows_poster_crop(content_type)
+-        ):
+-            paths.poster.parent.mkdir(parents=True, exist_ok=True)
 -            cropped = crop_poster(
 -                thumb_local,
 -                paths.poster,
@@ -58,7 +66,9 @@ index bbf6b8d00c727ce466f596af13c090f242dd45fa..81eb12203e796517f2a17fe305830ed4
 -                jpeg_quality=config.scraping.jpeg_quality,
 -            )
 -            if cropped:
++        elif thumb_local is not None and config is not None and config.scraping.crop_poster:
 +            if config.scraping.western_full_cover_poster and content_type is ContentType.WESTERN:
++                paths.poster.parent.mkdir(parents=True, exist_ok=True)
 +                converted_poster = _copy_library_image(
 +                    thumb_local,
 +                    paths.poster,
@@ -70,7 +80,8 @@ index bbf6b8d00c727ce466f596af13c090f242dd45fa..81eb12203e796517f2a17fe305830ed4
                  outputs.append(OutputPath(kind="poster", path=paths.poster))
 -            elif fresh_only:
 -                raise OSError(f"海报裁切失败: {thumb_local}")
-+            else:
++            elif allows_poster_crop(content_type):
++                paths.poster.parent.mkdir(parents=True, exist_ok=True)
 +                cropped = crop_poster(
 +                    thumb_local,
 +                    paths.poster,
@@ -84,8 +95,8 @@ index bbf6b8d00c727ce466f596af13c090f242dd45fa..81eb12203e796517f2a17fe305830ed4
  
      if trailer_local is not None and LibraryResource.trailer in kinds:
          paths.trailer.parent.mkdir(parents=True, exist_ok=True)
-@@ -623,10 +635,22 @@ async def _download_images_via_store(
-
+@@ -619,22 +627,40 @@ async def _download_images_via_store(
+ 
      剧照文件名在这里渲染: 补零宽度取决于本轮剧照数量, 只有拿到文件列表后才定得下来.
      """
 +    full_cover_mode = (
@@ -107,8 +118,13 @@ index bbf6b8d00c727ce466f596af13c090f242dd45fa..81eb12203e796517f2a17fe305830ed4
 +            poster_local = await _acquire_first_local(poster_urls, store, client) if poster_urls else None
  
      needs_crop = (
-         LibraryResource.poster in kinds and poster_local is None and config is not None and config.scraping.crop_poster
-@@ -634,7 +658,13 @@ async def _download_images_via_store(
+         LibraryResource.poster in kinds
+         and poster_local is None
+         and config is not None
+         and config.scraping.crop_poster
+-        and allows_poster_crop(content_type)
++        and (allows_poster_crop(content_type) or full_cover_mode)
+     )
      thumb_local = None
      if LibraryResource.thumb in kinds or LibraryResource.fanart in kinds or needs_crop:
          thumb_urls = metadata.thumb_urls
@@ -124,19 +140,20 @@ index bbf6b8d00c727ce466f596af13c090f242dd45fa..81eb12203e796517f2a17fe305830ed4
      trailer_local = None
      if LibraryResource.trailer in kinds:
 diff --git a/src/amane/handlers/scrape.py b/src/amane/handlers/scrape.py
-index 26c5b908..866b8c63 100644
+index 2cb4e5f4003d027582f6e5d89055ff11cfdd0883..dbd568c364a304d002442cd6264f0eced290c1e2 100644
 --- a/src/amane/handlers/scrape.py
 +++ b/src/amane/handlers/scrape.py
-@@ -175,6 +175,7 @@ class ScrapeHandler(TaskHandler[ScrapePayload, ScrapeResult]):
-                     previous_poster_urls=existing.poster_urls if existing else None,
-                     previous_thumb_urls=existing.thumb_urls if existing else None,
-                     locked_fields=existing.locked_fields if existing else (),
+@@ -170,7 +170,7 @@ class ScrapeHandler(TaskHandler[ScrapePayload, ScrapeResult]):
+                     self._web_client,
+                     self._config,
+                     self._resource_store.data_dir,
+-                    content_type=content_type,
 +                    content_type=existing.content_type if existing else payload.content_type,
-                 )
-                 poster_out = materialized.poster_urls
-                 thumb_out = materialized.thumb_urls
+                     extrafanart_urls=result.metadata.extrafanart_urls,
+                     poster_query=make_poster_query(payload.number, result.raw),
+                     previous_poster_urls=existing.poster_urls if existing else None,
 diff --git a/src/amane/media/liu1443452494_image_quality.py b/src/amane/media/liu1443452494_image_quality.py
-index 70a3df3d..d1291c1a 100644
+index 70a3df3d494c07b292971c1659c0d0ccbd8c7318..d1291c1a854ecd2c220a1fecc0ec8c03e33fb5f2 100644
 --- a/src/amane/media/liu1443452494_image_quality.py
 +++ b/src/amane/media/liu1443452494_image_quality.py
 @@ -86,7 +86,7 @@ class ImagePool:
@@ -161,26 +178,10 @@ index 70a3df3d..d1291c1a 100644
                      locator = found[0].url if found else url
                  else:
 diff --git a/src/amane/media/pipeline.py b/src/amane/media/pipeline.py
-index 5fa5b75f..cd6293b0 100644
+index 99598ec6764b49897c9caca5e41708688be3dcb5..0f31fab952bb9013255eb33a6b3ccb81e3578714 100644
 --- a/src/amane/media/pipeline.py
 +++ b/src/amane/media/pipeline.py
-@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
- import structlog
- 
- from ..config import DownloadableResource
-+from ..parsing import ContentType
- from ..sr import get_preset_meta, run_SR
- from .images import (
-     CropRotation,
-@@ -102,6 +103,7 @@ async def materialize_images(
-     previous_poster_urls: list[str] | None = None,
-     previous_thumb_urls: list[str] | None = None,
-     locked_fields: Collection[str] = (),
-+    content_type: ContentType | None = None,
- ) -> MaterializedImages:
-     """仅下载集合内的类型; 未选中的保留聚合 URL.
- 
-@@ -113,6 +115,11 @@ async def materialize_images(
+@@ -127,11 +127,18 @@ async def materialize_images(
          kinds.discard(DownloadableResource.thumb)
      if "poster_urls" in locked_fields:
          kinds.discard(DownloadableResource.poster)
@@ -192,7 +193,15 @@ index 5fa5b75f..cd6293b0 100644
  
      # 裁剪使用同一份按文件大小选定的封面，包括未选择输出封面的情况。
      logger.info("图片处理设置", download_kinds=sorted(kinds), locked_fields=sorted(locked_fields))
-@@ -143,7 +150,9 @@ async def materialize_images(
+     thumbs = ImagePool(store, client, image_kind="封面")
+-    need_thumb = DownloadableResource.thumb in kinds or (DownloadableResource.poster in kinds and crop_enabled)
++    need_thumb = DownloadableResource.thumb in kinds or (
++        DownloadableResource.poster in kinds and (crop_enabled or full_cover_mode)
++    )
+     if need_thumb:
+         if "thumb_urls" in locked_fields:
+             await thumbs.restore_cached(previous_thumb_urls or thumb_urls)
+@@ -155,7 +162,9 @@ async def materialize_images(
                  await PosterResolver(client, posters).resolve(poster_query)
              except Exception as exc:
                  logger.warning("高清海报检索失败，保留已取得的图片", number=poster_query.number, error=str(exc))
@@ -203,7 +212,7 @@ index 5fa5b75f..cd6293b0 100644
          poster = posters.best
          result_poster_urls = posters.ordered_urls(previous_poster_urls or [])
  
-@@ -152,10 +161,26 @@ async def materialize_images(
+@@ -164,10 +173,26 @@ async def materialize_images(
          ratio = config.scraping.poster_ratio
          crop_size = (min(thumb_size[0], int(thumb_size[1] * ratio)), thumb_size[1]) if thumb_size else (0, 0)
          cropped = False
@@ -227,18 +236,18 @@ index 5fa5b75f..cd6293b0 100644
              crop_reason = "裁剪功能未启用"
 +        elif full_cover_mode:
 +            crop_reason = "欧美影片保留可用海报，缺失时使用完整封面"
+         elif not allows_poster_crop(content_type):
+             crop_reason = "该内容类型不执行自动裁切"
          elif thumb is None:
-             crop_reason = "没有有效封面原图"
-         elif not should_crop_poster(thumb_size, cand_size, skip_ratio=config.scraping.poster_crop_skip_ratio):
-@@ -172,6 +197,7 @@ async def materialize_images(
+@@ -186,6 +211,7 @@ async def materialize_images(
  
          if (
-             config.scraping.crop_poster
+             crop_enabled
 +            and not full_cover_mode
              and should_crop_poster(thumb_size, cand_size, skip_ratio=config.scraping.poster_crop_skip_ratio)
              and thumb is not None
              and dimensions_improve(crop_size, cand_size)
-@@ -202,7 +228,7 @@ async def materialize_images(
+@@ -216,7 +242,7 @@ async def materialize_images(
                      )
                  else:
                      crop_reason = "裁剪结果校验未通过或实际尺寸没有改善"
@@ -248,7 +257,7 @@ index 5fa5b75f..cd6293b0 100644
                  "保留下载海报" if poster else "未生成有效海报", url=poster.url if poster else None, reason=crop_reason
              )
 diff --git a/tests/api/test_config_routes.py b/tests/api/test_config_routes.py
-index be3baaa2..8a05ea94 100644
+index be3baaa2909c086d8ed03c330915372a77821d11..8a05ea94326d6efb1afec7443cb322e70983523b 100644
 --- a/tests/api/test_config_routes.py
 +++ b/tests/api/test_config_routes.py
 @@ -14,7 +14,7 @@ if TYPE_CHECKING:
@@ -283,10 +292,10 @@ index be3baaa2..8a05ea94 100644
          got = await client.get("config")
 diff --git a/tests/handlers/test_liu1443452494_western_poster.py b/tests/handlers/test_liu1443452494_western_poster.py
 new file mode 100644
-index 00000000..795df3e2
+index 0000000000000000000000000000000000000000..e765d65a2c0d2c9367d0ba8af7dc94e20e16ec74
 --- /dev/null
 +++ b/tests/handlers/test_liu1443452494_western_poster.py
-@@ -0,0 +1,237 @@
+@@ -0,0 +1,239 @@
 +"""欧美整图海报在刮削保存与独立整理输出中的行为。"""
 +
 +from io import BytesIO
@@ -369,9 +378,11 @@ index 00000000..795df3e2
 +        (["poster", "fanart"], True, True, ContentType.WESTERN, "invalid", (800, 400)),
 +        (["poster", "fanart"], True, True, ContentType.WESTERN, "missing", (800, 400)),
 +        (["poster", "fanart"], True, True, ContentType.WESTERN, "cover", (800, 400)),
-+        (["poster", "fanart"], False, True, ContentType.WESTERN, "absent", (280, 400)),
++        (["poster", "fanart"], False, True, ContentType.WESTERN, "absent", None),
 +        (["poster", "fanart"], True, False, ContentType.WESTERN, "absent", None),
 +        (["poster", "fanart"], True, True, ContentType.CENSORED, "absent", (280, 400)),
++        (["poster", "fanart"], True, True, ContentType.UNCENSORED, "absent", (280, 400)),
++        (["poster", "fanart"], True, True, ContentType.FC2, "absent", None),
 +    ],
 +)
 +async def test_organize_full_cover_without_thumb_output(
@@ -526,10 +537,10 @@ index 00000000..795df3e2
 +    assert client.downloaded.count(cover_url) == 1
 diff --git a/tests/media/test_liu1443452494_western_poster.py b/tests/media/test_liu1443452494_western_poster.py
 new file mode 100644
-index 00000000..c0176043
+index 0000000000000000000000000000000000000000..bea9ea62c158178921845756b38980ceccd2dfca
 --- /dev/null
 +++ b/tests/media/test_liu1443452494_western_poster.py
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,166 @@
 +"""欧美完整海报的启用条件、图片有效性与历史裁切保护。"""
 +
 +from pathlib import Path
@@ -556,15 +567,19 @@ index 00000000..c0176043
 +        (ContentType.WESTERN, True, True, "missing", True, "full"),
 +        (ContentType.WESTERN, True, True, "absent", False, "none"),
 +        (ContentType.WESTERN, False, True, "absent", True, "none"),
-+        (ContentType.WESTERN, True, False, "absent", True, "crop"),
-+        (None, True, True, "absent", True, "crop"),
-+        *[(kind, True, True, "absent", True, "crop") for kind in ContentType if kind is not ContentType.WESTERN],
++        (ContentType.WESTERN, True, False, "absent", True, "none"),
++        (ContentType.CENSORED, True, True, "absent", True, "crop"),
++        (ContentType.UNCENSORED, True, True, "absent", True, "crop"),
++        (ContentType.CHINESE, True, True, "absent", True, "none"),
++        (ContentType.FC2, True, True, "absent", True, "none"),
++        (ContentType.AMATEUR, True, True, "absent", True, "none"),
++        (ContentType.HENTAI, True, True, "absent", True, "none"),
 +    ],
 +)
 +async def test_western_poster_selection(
 +    resource_store: ResourceStore,
 +    tmp_path: Path,
-+    content_type: ContentType | None,
++    content_type: ContentType,
 +    crop: bool,
 +    enabled: bool,
 +    poster_kind: Literal["absent", "valid", "invalid", "missing"],
@@ -656,7 +671,14 @@ index 00000000..c0176043
 +    config = HotSettings()
 +    if origin == "automatic":
 +        previous = await materialize_images(
-+            [], [cover_url], [], resource_store, cast("WebClient", client), config, tmp_path
++            [],
++            [cover_url],
++            [],
++            resource_store,
++            cast("WebClient", client),
++            config,
++            tmp_path,
++            content_type=ContentType.CENSORED,
 +        )
 +        previous_url = previous.poster_urls[0]
 +    elif origin == "manual":
@@ -686,12 +708,12 @@ index 00000000..c0176043
 +        with Image.open(source.path) as image:
 +            assert image.size == (800, 400)
 diff --git a/web/src/i18n/locales/en/settings.json b/web/src/i18n/locales/en/settings.json
-index 3785a86d..6fd88354 100644
+index 1762aa5930471e1a658bb4dce8d18622298e28bd..8c570565bf62a96bc6e880da08deeab599203f6f 100644
 --- a/web/src/i18n/locales/en/settings.json
 +++ b/web/src/i18n/locales/en/settings.json
 @@ -55,6 +55,10 @@
          "label": "Crop Poster",
-         "description": "Auto-crop poster from the cover image"
+         "description": "Auto-crop a poster from the cover image, censored and uncensored only"
        },
 +      "western_full_cover_poster": {
 +        "label": "欧美缺失海报时使用完整封面",
@@ -701,12 +723,12 @@ index 3785a86d..6fd88354 100644
          "label": "Poster crop skip threshold",
          "description": "Skip cropping when the existing poster's height exceeds this fraction of the cover height"
 diff --git a/web/src/i18n/locales/zh-CN/settings.json b/web/src/i18n/locales/zh-CN/settings.json
-index b76a5453..0dbf2fe2 100644
+index d14ba352067d9a87a1e92748ac94cf64adc3e46c..b44f378b1ed283cb3a834548d0049837509a129c 100644
 --- a/web/src/i18n/locales/zh-CN/settings.json
 +++ b/web/src/i18n/locales/zh-CN/settings.json
 @@ -55,6 +55,10 @@
          "label": "裁切海报",
-         "description": "从封面自动裁切生成海报"
+         "description": "从封面自动裁切生成海报, 仅有码与无码生效"
        },
 +      "western_full_cover_poster": {
 +        "label": "欧美缺失海报时使用完整封面",

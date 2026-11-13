@@ -1,8 +1,8 @@
 diff --git a/docs/dev/data-model.md b/docs/dev/data-model.md
-index ac2eba10a8d1ae23ca955233529041742ec04759..5d3c05d43fc89f330eaf159ba163987a3b7d3f0d 100644
+index 238c02b92134e9408e76854c8c1bd1a3fc0db6ab..6abf9e3998f9cefa97561ea8b68e0081a3c22cb5 100644
 --- a/docs/dev/data-model.md
 +++ b/docs/dev/data-model.md
-@@ -142,14 +142,14 @@ PATCH 三态: **省略键** = 不更新 (`exclude_unset`); **显式值** = 写
+@@ -147,14 +147,14 @@ PATCH 三态: **省略键** = 不更新 (`exclude_unset`); **显式值** = 写
  
  写入时先清洗 `Metadata.actors` 的 `name(alias1, alias2)` 形式: 展示名留真值, 别名并入对应演员的 `ActorAlias` 行. 每个名字经 `resolve_actor_by_name` 解析 (展示名精确命中 → 别名唯一命中 → 歧义 / 无命中以名字本身为展示名新建实体), 因此站点给的**裸别名**会折到已认定演员, 不再另建重复实体; block 判定在解析前后各执行一次. 影片名单顺序由第一成功源锁定, 其后已抓源按展示名填空性别. 写入时若带 `FilmActor.gender`, 只对 `Actor.gender == unknown` 且 gender 未锁的行填空, 不覆盖已有值, 不写入 `field_sources`. `Metadata.actors` 存库始终是展示名, 站点 `raw` 快照保留原始带括号形式.
  
@@ -14,12 +14,12 @@ index ac2eba10a8d1ae23ca955233529041742ec04759..5d3c05d43fc89f330eaf159ba163987a
  | `alias` | 源名映射到目标名; **表内保持单跳规范形** (写入时压缩入边, apply 不递归). 演员不使用该规则, 由 `ActorAlias` 行承担 |
  | `block` | 源名永久剔除; 指向该名的 alias 入边一并压成 block |
  
--规则在投影重建之前对六个分类真值字段执行 (不修改 `raw`); 演员只有 block 会命中. 目录 API 的 rename / merge 对非演员写 alias 并修改已有 Metadata, delete 写 block 后从真值剔除再删实体. `user_tag` 与刮削隔离, 硬删且不写入规则表. 名称大小写敏感, 与源站原样一致, 不做模糊合并. `Actor` / `Director` 为一等实体, 无影片关联时**不自动删除**, 用户显式删除时删除实体并写 block. 删 `Metadata` 时清理关联 / 评论 / 用户 tag 挂载, 人物与目录实体保留.
-+规则在投影重建之前对六个分类真值字段执行 (不修改 `raw`); 演员仅应用已有 block. 目录 API 的 rename / merge 对非演员写 alias 并修改已有 Metadata, delete 对非演员爬取侧分类写 block 后从真值剔除再删实体. `user_tag` 与刮削隔离, 硬删且不写规则. 名称大小写敏感, 与源站原样一致, 不做模糊合并. `Actor` / `Director` 无影片关联时**不自动删除**. 删 `Metadata` 时清理关联 / 评论 / 用户 tag 挂载, 人物与目录实体保留.
+-规则在投影重建之前对六个分类真值字段执行 (不修改 `raw`); 演员只有 block 会命中. 目录 API 的 rename / merge 对非演员写 alias 并修改已有 Metadata, delete 写 block 后从真值剔除再删实体. 三条治理路径均按最终真值维护投影, 仅批量写回变化的真值列; 实体改名后须独立判断投影是否仍有效, 真值未变不代表关联可保留. `user_tag` 与刮削隔离, 硬删且不写入规则表. 名称大小写敏感, 与源站原样一致, 不做模糊合并. `Actor` / `Director` 为一等实体, 无影片关联时**不自动删除**, 用户显式删除时删除实体并写 block. 删 `Metadata` 时清理关联 / 评论 / 用户 tag 挂载, 人物与目录实体保留.
++规则在投影重建之前对六个分类真值字段执行 (不修改 `raw`); 演员仅应用已有 block. 目录 API 的 rename / merge 对非演员写 alias 并修改已有 Metadata, delete 对非演员爬取侧分类写 block 后从真值剔除再删实体. 三条治理路径均按最终真值维护投影, 仅批量写回变化的真值列; 实体改名后须独立判断投影是否仍有效, 真值未变不代表关联可保留. `user_tag` 与刮削隔离, 硬删且不写规则. 名称大小写敏感, 与源站原样一致, 不做模糊合并. `Actor` / `Director` 无影片关联时**不自动删除**. 删 `Metadata` 时清理关联 / 评论 / 用户 tag 挂载, 人物与目录实体保留.
  
  `directors` / `tags` / `studios` / `publishers` / `series` 另有一位用户手工状态 `is_favorite` (收藏): 与投影重建正交 — 重建只按 name get-or-create, 改名与规则都不清它, 合并时源的收藏并入目标, 删除随实体消失. `actors` 与 `user_tags` 没有这一列: 用户标签挂载到影片与演员, 演员收藏因此由标签表达; 导演没有标签挂载点, 与其余分类实体同列. 见「用户注解」.
  
-@@ -168,7 +168,7 @@ PATCH 三态: **省略键** = 不更新 (`exclude_unset`); **显式值** = 写
+@@ -173,7 +173,7 @@ PATCH 三态: **省略键** = 不更新 (`exclude_unset`); **显式值** = 写
  
  `Actor` 另存人物元数据 (`gender` / 生日 / 身材 / 简介 / `image_urls` / `provider_ids` / `source_urls` / `raw`). `gender` 的 `unknown` 视为标量空位, 可被刮削填空或手动修改覆盖; `birthday` 与 `Metadata.release` 同为 `YYYY-MM-DD`; `image_urls[0]` 是主图 (详情 / 头像墙), 用户可编辑次序; 头像裁切以其为源, 结果前插并保留原图.
  
@@ -29,7 +29,7 @@ index ac2eba10a8d1ae23ca955233529041742ec04759..5d3c05d43fc89f330eaf159ba163987a
  ## 用户注解 (与爬取隔离)
  
 diff --git a/src/amane/agent/facet_identity.py b/src/amane/agent/facet_identity.py
-index 315c9a9358eb04708cf1eb51bf740b3746eb469d..51d2ec7e78a5ccd702a435dd897981b30ac75684 100644
+index 221d9ba5c2debcb3478c379d77893dd24a9d0106..6bc2b5fc753c372148be621caa4971b5d8d31628 100644
 --- a/src/amane/agent/facet_identity.py
 +++ b/src/amane/agent/facet_identity.py
 @@ -14,9 +14,9 @@ def build_facet_identity_capability() -> Capability[AgentDeps]:
@@ -45,7 +45,7 @@ index 315c9a9358eb04708cf1eb51bf740b3746eb469d..51d2ec7e78a5ccd702a435dd897981b3
          ),
      )
  
-@@ -63,10 +63,10 @@ def build_facet_identity_capability() -> Capability[AgentDeps]:
+@@ -78,10 +78,10 @@ def build_facet_identity_capability() -> Capability[AgentDeps]:
  
      @cap.tool
      async def delete_facet(ctx: RunContext[AgentDeps], kind: FacetKind, facet_id: int) -> str | dict[str, Any]:
@@ -73,10 +73,10 @@ index f288db5cb003dfdb25da64a08366c16dec1f44e1..1e5506aa20bdacf2983df7c419b453f0
          ok = await repo.delete_facet(kind, facet_id)
      except ValueError as e:
 diff --git a/src/amane/db/repos/facet_helpers.py b/src/amane/db/repos/facet_helpers.py
-index babaefdb8d6185f18e36d0a8acbe46730808b20c..251654948fa5c08e7d0ff08c9ee2522a504b17f5 100644
+index ebda35129cd2d5bd13593df73960882e0b9ff70f..86ec5f0536f5a1688bf8cce6798db05ab1140a50 100644
 --- a/src/amane/db/repos/facet_helpers.py
 +++ b/src/amane/db/repos/facet_helpers.py
-@@ -547,17 +547,16 @@ async def _strip_names_from_scalar_metadata(session: AsyncSession, kind: FacetKi
+@@ -793,17 +793,16 @@ async def _strip_names_from_scalar_metadata(session: AsyncSession, kind: FacetKi
      await session.flush()
  
  
@@ -99,7 +99,7 @@ index babaefdb8d6185f18e36d0a8acbe46730808b20c..251654948fa5c08e7d0ff08c9ee2522a
      other_display = set(
          (
              await session.exec(select(Actor.name).where(col(Actor.name).in_(alias_names), col(Actor.id) != actor.id))
-@@ -573,8 +572,8 @@ async def _actor_delete_block_names(session: AsyncSession, actor: Actor) -> set[
+@@ -819,8 +818,8 @@ async def _actor_delete_block_names(session: AsyncSession, actor: Actor) -> set[
          ).all()
      )
      for name in alias_names - other_display - other_rows:
@@ -110,7 +110,7 @@ index babaefdb8d6185f18e36d0a8acbe46730808b20c..251654948fa5c08e7d0ff08c9ee2522a
  
  
  async def delete_link_facet(session: AsyncSession, spec: _LinkFacetSpec, facet_id: int) -> bool:
-@@ -584,12 +583,10 @@ async def delete_link_facet(session: AsyncSession, spec: _LinkFacetSpec, facet_i
+@@ -831,12 +830,10 @@ async def delete_link_facet(session: AsyncSession, spec: _LinkFacetSpec, facet_i
      if spec.kind in SCRAPE_FACET_KINDS:
          if spec.kind == FacetKind.ACTOR:
              assert isinstance(entity, Actor)
@@ -127,23 +127,23 @@ index babaefdb8d6185f18e36d0a8acbe46730808b20c..251654948fa5c08e7d0ff08c9ee2522a
      if spec.kind == FacetKind.ACTOR:
          # 显式删除别名行与用户标签挂载, 不依赖 FK pragma.
 diff --git a/src/amane/db/repos/facets.py b/src/amane/db/repos/facets.py
-index 6f5c9abbe9e9015bfbf7a6ad7f3458abe5697cd6..c881272e35a10ca224c377eccb808905f3830e5a 100644
+index cc2d554502727ba9f9ce32b8db1d0bf9e43d2ff8..203d778fd05aa10ed96a18b4e6a0f8e94ce3cca4 100644
 --- a/src/amane/db/repos/facets.py
 +++ b/src/amane/db/repos/facets.py
-@@ -471,7 +471,7 @@ class FacetsRepoMixin(RepositoryMixinBase):
-             raise ValueError(f"unknown facet kind: {kind}")
+@@ -521,7 +521,7 @@ class FacetsRepoMixin(RepositoryMixinBase):
+             return item
  
      async def delete_facet(self, kind: FacetKind, facet_id: int) -> bool:
 -        """爬取侧写 block 并从真值剔除后再删实体. user_tag 硬删挂载与实体, 不写规则. 不存在返回 False."""
 +        """删除实体及关联. 演员与 user_tag 不新增规则, 其余爬取侧分类写 block. 不存在返回 False."""
          async with self._session() as session:
+             await acquire_write_lock(session)
              if kind == FacetKind.USER_TAG:
-                 tag = await session.get(UserTag, facet_id)
 diff --git a/tests/api/test_facets_write.py b/tests/api/test_facets_write.py
-index 08069d0f8e50bd37ca9e91f2151f42c998893d51..95286f8694258f7bfe7d7f32bdd62f78b0b6a513 100644
+index 8ef94440de502e699727ad70c273d97a38725409..f8d341a0ead96e3a0ccffda2149d8d552e02ae7f 100644
 --- a/tests/api/test_facets_write.py
 +++ b/tests/api/test_facets_write.py
-@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
+@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
  
  import pytest
  
@@ -152,7 +152,7 @@ index 08069d0f8e50bd37ca9e91f2151f42c998893d51..95286f8694258f7bfe7d7f32bdd62f78
  
  if TYPE_CHECKING:
      from httpx2 import AsyncClient, Response
-@@ -70,6 +70,13 @@ async def test_facet_http_actor_rename_merge_delete(client: AsyncClient, repo: R
+@@ -71,6 +71,13 @@ async def test_facet_http_actor_rename_merge_delete(client: AsyncClient, repo: R
          i["id"] for i in (await client.get("facets/actor?search=Carol")).json()["items"] if i["name"] == "Carol"
      )
      assert (await client.delete(f"facets/actor/{doomed}")).status_code == 204
@@ -260,10 +260,10 @@ index 2168c1ce42be75e16fee28a7a9b0c2a4bbb75201..93663e36ecfae70f7dec87d52baf2997
  
      updated = await repo.upsert_metadata(
 diff --git a/tests/db/test_repository.py b/tests/db/test_repository.py
-index 81826264cade3f3fcd851761a5a5a22344599bba..11a76d240ec35a69d4c5785720c197c03aa94c03 100644
+index 140e3d24e5864773ce34b8d33defed1efba2b3ae..373b717dc2e0abad428355f5130eb50f79060e9a 100644
 --- a/tests/db/test_repository.py
 +++ b/tests/db/test_repository.py
-@@ -10,6 +10,7 @@ from amane.aggregate.actor import AggregatedActor
+@@ -11,6 +11,7 @@ from amane.aggregate.actor import AggregatedActor
  from amane.db.models import (
      Actor,
      FacetKind,
@@ -271,7 +271,7 @@ index 81826264cade3f3fcd851761a5a5a22344599bba..11a76d240ec35a69d4c5785720c197c0
      FacetRuleAction,
      MediaFile,
      MediaFileStatus,
-@@ -583,24 +584,26 @@ class TestMetadataRepo:
+@@ -633,24 +634,26 @@ class TestMetadataRepo:
          assert (await repo.get_actors_by_names(["共享名"])) != []
  
      @pytest.mark.asyncio(loop_scope="function")
@@ -308,7 +308,7 @@ index 81826264cade3f3fcd851761a5a5a22344599bba..11a76d240ec35a69d4c5785720c197c0
  
      @pytest.mark.asyncio(loop_scope="function")
      async def test_actor_alias_rule_write_guard(self, repo: Repository):
-@@ -1133,8 +1136,9 @@ class TestMetadataRepo:
+@@ -1300,8 +1303,9 @@ class TestMetadataRepo:
          assert actors[0].id is not None
          await repo.delete_facet(FacetKind.ACTOR, actors[0].id)
  
@@ -404,10 +404,10 @@ index 0000000000000000000000000000000000000000..12eaca3dcdf94bd56648f3beac0b9e31
 +    untouched = await repo.get_metadata(another.id)
 +    assert untouched is not None and untouched.actors == []
 diff --git a/web/src/hooks/use-facet-identity-actions.ts b/web/src/hooks/use-facet-identity-actions.ts
-index b16307953addde4b049038a8f121bf2bc1cd87de..479e4f18735000a96a18282ad2e01f246cbc2f1e 100644
+index c1bb5aa37e65b2ecd54455db8bdd26525fd4c4d4..97e815a5eca5f4311931ed61d86d69cacde253e6 100644
 --- a/web/src/hooks/use-facet-identity-actions.ts
 +++ b/web/src/hooks/use-facet-identity-actions.ts
-@@ -124,7 +124,9 @@ export function useFacetIdentityActions({
+@@ -121,7 +121,9 @@ export function useFacetIdentityActions({
      async (target: FacetNamedTarget) => {
        const message = isUserTag
          ? t("manage.deleteUserTagBody", { name: target.name })
@@ -419,10 +419,10 @@ index b16307953addde4b049038a8f121bf2bc1cd87de..479e4f18735000a96a18282ad2e01f24
          title: t("common:actions.delete"),
          message,
 diff --git a/web/src/i18n/locales/en/metadata.json b/web/src/i18n/locales/en/metadata.json
-index 1f416cfc51fe64d5dcf600db6ba3fd63a33bbb46..edf63aba8829bc19060ec924d70a1b676426f630 100644
+index 349e0afccfac55f0384f757600eeab90955fa4b1..4aba35f751238502428f97e50f465b16ec6397d0 100644
 --- a/web/src/i18n/locales/en/metadata.json
 +++ b/web/src/i18n/locales/en/metadata.json
-@@ -394,6 +394,7 @@
+@@ -397,6 +397,7 @@
      "mergeActorTags": "Source actor user tags move to the target",
      "mergeActorDelete": "Source actors are deleted",
      "deleteFacetBody": "Remove \"{{name}}\" from all titles and add it to the drop list; later scrapes will drop it",
@@ -431,10 +431,10 @@ index 1f416cfc51fe64d5dcf600db6ba3fd63a33bbb46..edf63aba8829bc19060ec924d70a1b67
      "rulesTitle": "Facet rules",
      "rulesHint": "Scrapes rename by alias and drop excluded names. Removing a rule does not change existing titles",
 diff --git a/web/src/i18n/locales/zh-CN/metadata.json b/web/src/i18n/locales/zh-CN/metadata.json
-index ae3ca360b8d880b031faf247aedbdce58bd5c94c..f35c6ad32bd0db0ca286767aff0e37a78594cd2d 100644
+index 9335f4c59fcd8ecde4481b7d63c3b8deb5f742f3..aab1296b933a1d69f73ee5a587b022092a370893 100644
 --- a/web/src/i18n/locales/zh-CN/metadata.json
 +++ b/web/src/i18n/locales/zh-CN/metadata.json
-@@ -369,6 +369,7 @@
+@@ -372,6 +372,7 @@
      "mergeActorTags": "来源演员的用户标签转移到目标",
      "mergeActorDelete": "来源演员会被删除",
      "deleteFacetBody": "将从所有影片中移除「{{name}}」, 并加入剔除名单, 后续刮削时自动剔除",

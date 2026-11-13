@@ -1,10 +1,10 @@
 diff --git a/docs/dev/content-routes.md b/docs/dev/content-routes.md
-index 89d56fa..8f3cf06 100644
+index 5b740dbc548536332a4a1090dad0a9de1b243188..9c5c546a77e9a4efef7a2c0eabdbc44b4541ad1f 100644
 --- a/docs/dev/content-routes.md
 +++ b/docs/dev/content-routes.md
 @@ -31,7 +31,7 @@
  
- **javbus.com** — 有碼首页、無碼 `/uncensored` (日期番号风格); 有碼首页会混素人号. 搜索回退带 `parent=ce`, 无碼主要靠 `/{number}` 直达. 有碼详情 `extrafanart` 热链 `pics.dmm.co.jp`, 发行日与 DMM 配信日相同, 片商用 DMM 日文名. 图片 (`/pics/`) 校验同源 Referer (见 [crawlers.md](crawlers.md)). **不解析 plot**; 无碼是另一套目录. 欧美入口指向 `javbus.org`: 正文可以是字面 `404`, 关公告后没有影片网格, `javbus.hair` 证书无效 — **欧美目录不可用**, 不允许放入欧美默认路由.
+ **javbus.com** — 有碼首页、無碼 `/uncensored` (日期番号风格); 有碼首页会混素人号. 搜索回退带 `parent=ce`, 无碼主要靠 `/{number}` 直达. 有碼详情 `extrafanart` 热链 `pics.dmm.co.jp`, 发行日与 DMM 配信日相同, 片商用 DMM 日文名. 封面与海报按根一一对应: 有码 `/pics/cover/` → `/pics/thumb/`, 无码 `/imgs/cover/` → `/imgs/thumbs/` (目录是复数); 跨根拼出的地址是另一部作品的海报且照样 200, 不能回退; 图片校验同源 Referer (见 [crawlers.md](crawlers.md)). **不解析 plot**; 无碼是另一套目录. 欧美入口指向 `javbus.org`: 正文可以是字面 `404`, 关公告后没有影片网格, `javbus.hair` 证书无效 — **欧美目录不可用**, 不允许放入欧美默认路由.
  
 -**freejavbt.com** — 显式分有碼 / 無碼 / 歐美 / FC2, 首页还有「國產」「成人動畫」. 覆盖最宽的 BT 向索引, 元数据质量一般, 适合排在链尾; 详情页按语言前缀 (`/zh` / `/en` / `/ru`) 给同一份内容, 栏位没有片商与发行商.
 +**freejavbt.com** — 覆盖有碼 / 無碼 / 歐美 / FC2、国产与动画的 BT 向索引, 元数据质量一般, 排在链尾; `/zh` / `/en` / `/ru` 共用详情内容, 不提供片商与发行商. 欧美紧凑链接由 `src/amane/crawlers/sites/freejavbt.py::_western_card_matches` 与卡片番号共同核对, 不扩展共享番号规则.
@@ -12,20 +12,20 @@ index 89d56fa..8f3cf06 100644
  **avsox.click** — 日本无码情报站. 同源 AVMOO = 有碼, AVHEAT = 欧美 (`avheat.shop`), 项目只接入 AVSOX. 搜索对有无短横线都能命中, `_` 与 `-` 是两部; 对不上不取首条.
  
 diff --git a/docs/dev/task-system.md b/docs/dev/task-system.md
-index 8be9975..c50ad84 100644
+index 00558633670cba38be94785af0aa87257aeab624..edb09f800416b490bfe1377fb8ee36cab4c6fd60 100644
 --- a/docs/dev/task-system.md
 +++ b/docs/dev/task-system.md
-@@ -122,7 +122,7 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
+@@ -125,7 +125,7 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
  
  - **`scraping.download_resources`** 控制本步下载哪些类型 (thumb / poster / extrafanart / trailer).
- - **URL 重排契约**: 封面与海报由 `src/amane/media/liu1443452494_image_quality.py::ImagePool` 完整解码后按实际文件字节数降序排列; 海报等大小优先日亚, 其余沿用候选顺序. 预告片仍按成功者保序前置, 失败地址保留在尾部供后续重试. 未下载类型与剧照分组不重排; 新图均失败时保留旧图, 图片锁定字段不自动下载.
+ - **URL 重排契约**: 封面与海报由 `src/amane/media/liu1443452494_image_quality.py::ImagePool` 完整解码后按实际文件字节数降序排列; 海报等大小优先日亚, 其余沿用候选顺序. 预告片命中即停止并前置成功地址, 其余候选保序留待后续重试. 未下载类型与剧照分组不重排; 新图均失败时保留旧图, 图片锁定字段不自动下载.
 -- **高清海报**: `ScrapeHandler` 从来源 `raw` 按 DMM、AVBase、JavBus 顺序选取日文, 再回退其他合格原文, 禁止使用翻译或姓名映射结果. `src/amane/media/liu1443452494_posters.py::PosterResolver.resolve` 经 Tenhow 商品号核实 ASIN 后查询日亚; 标题搜索清除当前番号与末尾演员名, 最多缩短重试一次, 光盘与数字视频均按完整原题和演员核对. 同一地址去重, 同 ASIN 新图片仍参与比较; `raw` 不变.
 +- **高清海报**: `ScrapeHandler` 从 `raw` 按 DMM、AVBase、JavBus 再到其他合格来源选取日文, 禁止使用翻译或映射姓名. `src/amane/media/liu1443452494_posters.py::PosterResolver.resolve` 经 Tenhow 核实 ASIN 后查询日亚; 标题搜索清除当前番号与末尾演员名, 最多缩短一次. 数字版本去除已知版式后须与完整原题全等, 演员和商品身份继续核对. 地址去重, 同 ASIN 新图仍参与排序; `raw` 不变.
- - **裁剪海报**: 保留原触发条件与右侧裁剪比例, 仅当裁剪结果宽高均不减小且至少一项增大时替换下载海报; 失败保留下载结果. 超分就地覆盖, 失败不阻断刮削.
+ - **裁剪海报**: 有码与无码沿用右侧裁剪比例, 仅当裁剪结果宽高均不减小且至少一项增大时替换下载海报; 失败保留下载结果. 超分就地覆盖, 失败不阻断刮削.
  
  手动裁切复用同一派生通道 (`op=crop`, `args=box:…`), 见 [data-model.md](data-model.md).
 diff --git a/src/amane/crawlers/sites/freejavbt.py b/src/amane/crawlers/sites/freejavbt.py
-index 1471f17..4817288 100644
+index 1471f17166b7f346f0c03127074d9499dceb6d9b..48172886bd3cab530e3d11bfa541fbe10594dab5 100644
 --- a/src/amane/crawlers/sites/freejavbt.py
 +++ b/src/amane/crawlers/sites/freejavbt.py
 @@ -1,12 +1,12 @@
@@ -92,10 +92,10 @@ index 1471f17..4817288 100644
      """``h1`` 写作「番号 + 标题 + 尾注」; 番号与尾注都不属于标题."""
      text = re.sub(r"\s+", " ", _TITLE_TAIL.sub("", extract_text(html, "string(//h1)"))).strip()
 diff --git a/src/amane/media/liu1443452494_posters.py b/src/amane/media/liu1443452494_posters.py
-index f1a5710..82fc1d6 100644
+index d0219ea7cdf803854cbd7e525075f78d145fd716..d300481aa609ed226e79017cf7853a96fa4ad98a 100644
 --- a/src/amane/media/liu1443452494_posters.py
 +++ b/src/amane/media/liu1443452494_posters.py
-@@ -325,11 +325,25 @@ def poster_search_titles(query: PosterQuery) -> list[str]:
+@@ -326,11 +326,25 @@ def poster_search_titles(query: PosterQuery) -> list[str]:
      return titles
  
  
@@ -122,7 +122,7 @@ index f1a5710..82fc1d6 100644
      if not wanted or not actual:
          return False
      if wanted == actual:
-@@ -343,6 +357,8 @@ def _actors_match(text: str, query: PosterQuery) -> bool:
+@@ -344,6 +358,8 @@ def _actors_match(text: str, query: PosterQuery) -> bool:
  
  
  def _amazon_media(card: Selector, title: str) -> bool:
@@ -687,7 +687,7 @@ HcmV?d00001
 
 diff --git a/tests/crawlers/liu1443452494_cases/freejavbt/empty_search.toml b/tests/crawlers/liu1443452494_cases/freejavbt/empty_search.toml
 new file mode 100644
-index 0000000..ade2995
+index 0000000000000000000000000000000000000000..ade29954d3efd21a5379f16d8c0762c5572bec00
 --- /dev/null
 +++ b/tests/crawlers/liu1443452494_cases/freejavbt/empty_search.toml
 @@ -0,0 +1,7 @@
@@ -700,7 +700,7 @@ index 0000000..ade2995
 +expected_none = true
 diff --git a/tests/crawlers/liu1443452494_cases/freejavbt/western_absent_day.toml b/tests/crawlers/liu1443452494_cases/freejavbt/western_absent_day.toml
 new file mode 100644
-index 0000000..4ac6555
+index 0000000000000000000000000000000000000000..4ac6555c578d4248beb6e791dc34f75298c3877b
 --- /dev/null
 +++ b/tests/crawlers/liu1443452494_cases/freejavbt/western_absent_day.toml
 @@ -0,0 +1,8 @@
@@ -714,7 +714,7 @@ index 0000000..4ac6555
 +expected_none = true
 diff --git a/tests/crawlers/liu1443452494_cases/freejavbt/western_full_year.toml b/tests/crawlers/liu1443452494_cases/freejavbt/western_full_year.toml
 new file mode 100644
-index 0000000..ee225bf
+index 0000000000000000000000000000000000000000..ee225bf4bcaf8e1a8d07fb927624b57631c6b145
 --- /dev/null
 +++ b/tests/crawlers/liu1443452494_cases/freejavbt/western_full_year.toml
 @@ -0,0 +1,8 @@
@@ -728,7 +728,7 @@ index 0000000..ee225bf
 +expected_urls = ["https://freejavbt.com/en/BLACKED-170125"]
 diff --git a/tests/crawlers/liu1443452494_cases/freejavbt/western_other_day.toml b/tests/crawlers/liu1443452494_cases/freejavbt/western_other_day.toml
 new file mode 100644
-index 0000000..ca09791
+index 0000000000000000000000000000000000000000..ca0979155c9231e5d45d2997520a201b62d3f815
 --- /dev/null
 +++ b/tests/crawlers/liu1443452494_cases/freejavbt/western_other_day.toml
 @@ -0,0 +1,8 @@
@@ -742,7 +742,7 @@ index 0000000..ca09791
 +expected_urls = ["https://freejavbt.com/en/BLACKED-170110"]
 diff --git a/tests/crawlers/liu1443452494_cases/freejavbt/western_short_year.toml b/tests/crawlers/liu1443452494_cases/freejavbt/western_short_year.toml
 new file mode 100644
-index 0000000..e3f5dd0
+index 0000000000000000000000000000000000000000..e3f5dd0d2a0cb77940d4bd9368c20cd12dfd9013
 --- /dev/null
 +++ b/tests/crawlers/liu1443452494_cases/freejavbt/western_short_year.toml
 @@ -0,0 +1,8 @@
@@ -756,7 +756,7 @@ index 0000000..e3f5dd0
 +expected_urls = ["https://freejavbt.com/en/BLACKED-170125"]
 diff --git a/tests/crawlers/test_liu1443452494_freejavbt.py b/tests/crawlers/test_liu1443452494_freejavbt.py
 new file mode 100644
-index 0000000..cded69e
+index 0000000000000000000000000000000000000000..cded69e3013e68ff0516ed0d58fe839d7584687e
 --- /dev/null
 +++ b/tests/crawlers/test_liu1443452494_freejavbt.py
 @@ -0,0 +1,75 @@
@@ -836,10 +836,10 @@ index 0000000..cded69e
 +    crawler = FreejavbtCrawler(client=http_client(mock_web))
 +    assert await crawler._search(SearchQuery("Blacked.17.01.25")) is None
 diff --git a/tests/media/test_liu1443452494_image_quality.py b/tests/media/test_liu1443452494_image_quality.py
-index a6f511c..94ed706 100644
+index ea2822289d3ac1c81c5207465e72b48fc2e5f2cb..1af0e3d5e8634df0ebd5f0fee51be652286c4b7c 100644
 --- a/tests/media/test_liu1443452494_image_quality.py
 +++ b/tests/media/test_liu1443452494_image_quality.py
-@@ -473,6 +473,50 @@ async def test_all_matching_amazon_cards_participate(resource_store: ResourceSto
+@@ -555,6 +555,58 @@ async def test_all_matching_amazon_cards_participate(resource_store: ResourceSto
      assert client.downloaded == [first, second]
  
  
@@ -877,7 +877,15 @@ index a6f511c..94ed706 100644
 +        },
 +    )
 +    result = await materialize_images(
-+        [], [], [], resource_store, cast("WebClient", client), HotSettings(), tmp_path, poster_query=poster_query()
++        [],
++        [],
++        [],
++        resource_store,
++        cast("WebClient", client),
++        HotSettings(),
++        tmp_path,
++        content_type=ContentType.CENSORED,
++        poster_query=poster_query(),
 +    )
 +    assert result.poster_urls == [digital, dvd]
 +    assert client.downloaded == [dvd, digital]
@@ -891,7 +899,7 @@ index a6f511c..94ed706 100644
  async def test_search_confirms_actor_from_product_details(resource_store: ResourceStore, tmp_path: Path) -> None:
      query = poster_query()
 diff --git a/tests/media/test_liu1443452494_posters.py b/tests/media/test_liu1443452494_posters.py
-index b9311a7..2d952c1 100644
+index b9311a7e21f9c1a5ab81731ab789ed0f201fb0a2..2d952c1b19617d0f00d0510e241f438335847ccf 100644
 --- a/tests/media/test_liu1443452494_posters.py
 +++ b/tests/media/test_liu1443452494_posters.py
 @@ -5,11 +5,14 @@ from html import escape

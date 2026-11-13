@@ -1,5 +1,5 @@
 diff --git a/docs/dev/data-model.md b/docs/dev/data-model.md
-index c59c5d0dab6a16a23c549dbd1a57562889e7f3cd..c5e71aa7efc6719544b1584ce545473f5cedb7ac 100644
+index 1c55cf2c842c76a7c05d2b85d982037925d28faa..70e9616bba73d3520df8c86b65ebfe70043eb92e 100644
 --- a/docs/dev/data-model.md
 +++ b/docs/dev/data-model.md
 @@ -27,6 +27,8 @@
@@ -12,20 +12,20 @@ index c59c5d0dab6a16a23c549dbd1a57562889e7f3cd..c5e71aa7efc6719544b1584ce545473f
  
  Metadata 列表与 `/media` 文件行的角标与筛选: 有码 / 无码取条目类型 (没有挂载文件也成立), 无码再并上「存在无码标记的文件」; 中字 / 分辨率 / 破解 / 流出按关联 EXISTS 或页级聚合 (`file_phase`) 判定, 任一挂载文件具备即亮, `definition` 取最高档; 布尔取值的口径见 [api.md](api.md). 文件行同样返回派生的 `censored` / `uncensored`: `censored` 取这一份文件的性质 (带无码标记的副本不算有码), `uncensored` 与列表筛选同口径, 未绑定条目的文件只看自身标记. VR 标识与 `GET /metadata` 的 `vr` 筛选不来自文件相位, 也不物化: 只依据 `Metadata.tags` 与 `parsing/file_info.py::VR_TAGS` 的整体相等判定, 番号不参与; Python 与 SQL 两侧共用同一份词表 (`db/models.py::metadata_vr_predicate`, 用法同 `has_subtitle_predicate`), 因此重命名 / 合并标签后判定立即变化, 无需回填. 代价是判定随 `tags` 的单源取值: 字段链首个非空站点不给 VR 标签的条目判为否.
 diff --git a/docs/dev/database.md b/docs/dev/database.md
-index a1d4d79a1ce14fef936d559bf28ca7c3f572e57f..01be408d9e5fc55c36e34300d175a956efb104f3 100644
+index 2b5c0240d79ecbf3d41adaf9c4ff8adfe8d80c16..84a86aa705dbe52eb2f1059aaabd249408ce1ec9 100644
 --- a/docs/dev/database.md
 +++ b/docs/dev/database.md
-@@ -42,7 +42,7 @@ pysqlite 只在 DML 之前发出 `BEGIN`, 纯 SELECT 落在事务之外 (SQLAlch
- 2. **落后 head**: 先用 sqlite3 **online backup API** 写 `{db}.pre-migrate-{oldrev}-{utc}.bak` (含 WAL 一致快照; 同目录保留最近 5 份), 再升级.
- 3. **迁移连接**单独 `autocommit=False` + Alembic `transactional_ddl=True`: 单次 revision 内 DDL 与 `alembic_version` 同事务, 失败则回滚, 避免「表已创建但版本未升」的半成品. 业务连接不修改事务模式, 仍只开 WAL + FK.
+@@ -43,7 +43,7 @@ r18 库由项目导入 / 管理但 schema 不受我们控制, **不能纳入 Ale
+ 3. **落后 head**: 先用 sqlite3 **online backup API** 写 `{db}.pre-migrate-{oldrev}-{utc}.bak` (含 WAL 一致快照; 同目录保留最近 5 份), 再升级.
+ 4. **迁移连接**单独 `autocommit=False` + Alembic `transactional_ddl=True`: 单次 revision 内 DDL 与 `alembic_version` 同事务, 失败则回滚, 避免「表已创建但版本未升」的半成品. 业务连接不修改事务模式, 仍只开 WAL + FK.
  
 -自用水印与上游迁移通过 `src/amane/db/migrations/versions/0bbd0974b7c7_合并上游清理任务与自用水印迁移.py::down_revision` 合并为单一终点; 已发布迁移的标识与父版本保持稳定, 保证既有数据库补齐尚未执行的分支.
-+自用与上游迁移经 `src/amane/db/migrations/versions/060a2c478ef0_合并剧照模板与自用迁移.py::down_revision` 合并为单一终点; 已发布迁移的标识与父版本保持稳定, 缺失分支在启动升级时补齐.
++自用与上游迁移经 `src/amane/db/migrations/versions/272fb8ced57b_合并上游分辨率与自用迁移.py::down_revision` 合并; 已发布父版本不变, 启动补齐分支并归一人工分辨率, 保留覆盖与清空状态.
  
  迁移内不允许文件系统 I/O 与其它无界等待: 整条链共用一个事务, 中止即整体回滚、重试仍从零开始, 而网盘挂载点上逐目录列举会把启动阻塞数分钟以上且没有可见进度. 需要遍历磁盘的回填由运行期承担 (如 `REFRESH` 库扫描). 迁移内也不允许中途 `commit()`: DDL 会随之提前落盘, 而 `alembic_version` 在 revision 返回后才推进, 失败后重跑报 `duplicate column name`.
  
 diff --git a/docs/dev/task-system.md b/docs/dev/task-system.md
-index 79be0b5d468b9de33cfc4701a5cbee7bad172bbb..2393fcc9bb04d0dcabd6deb681ccd49bd6eee035 100644
+index f1e098133e8bb07026b8570eff4915f7d1f7f34a..d945e504c997568df28ce3a1fe9a278a9a096a14 100644
 --- a/docs/dev/task-system.md
 +++ b/docs/dev/task-system.md
 @@ -94,7 +94,7 @@ handler 之间复用的阶段逻辑, 不是一条可跳步的总管线:
@@ -38,10 +38,10 @@ index 79be0b5d468b9de33cfc4701a5cbee7bad172bbb..2393fcc9bb04d0dcabd6deb681ccd49b
  `execute_file_operations` 是落盘执行单元, 仅 ORGANIZE 经 `apply_file_operations` 调用. 不变量:
  
 diff --git a/src/amane/api/models/metadata.py b/src/amane/api/models/metadata.py
-index 33284655..30612908 100644
+index 95b679446078ceb41c501b809ca693eb11c1e778..3f347f76c222f30eb393ec4810daf9a2e5a69154 100644
 --- a/src/amane/api/models/metadata.py
 +++ b/src/amane/api/models/metadata.py
-@@ -31,6 +31,7 @@ class MetadataResponse(BaseModel):
+@@ -33,6 +33,7 @@ class MetadataListItem(BaseModel):
      id: int
      number: str
      content_type: ContentType
@@ -50,10 +50,10 @@ index 33284655..30612908 100644
      actors: list[str] = []
      studio: str | None = None
 diff --git a/src/amane/api/routes/metadata.py b/src/amane/api/routes/metadata.py
-index 53e2e9d2..b5aaa995 100644
+index 28fa596de0a001a89e068c01539aa2162b4edb49..48ef72a325d0d998b62eb4b86780c15257da8eff 100644
 --- a/src/amane/api/routes/metadata.py
 +++ b/src/amane/api/routes/metadata.py
-@@ -39,6 +39,7 @@ from ..models import (
+@@ -41,6 +41,7 @@ from ..models import (
      UserTagResponse,
      to_media_file_response,
  )
@@ -61,7 +61,7 @@ index 53e2e9d2..b5aaa995 100644
  from ..support.metadata_filters import MetadataFilters, parse_metadata_filters, require_known_definition
  from .saved_queries import resolve_saved_query_id_subquery
  
-@@ -325,8 +326,12 @@ async def get_metadata(metadata_id: int, repo: RepoDep) -> MetadataDetailRespons
+@@ -339,7 +340,9 @@ async def get_metadata(metadata_id: int, repo: RepoDep) -> MetadataDetailRespons
  
  
  @router.patch("/{metadata_id}")
@@ -69,13 +69,10 @@ index 53e2e9d2..b5aaa995 100644
 +async def update_metadata(
 +    metadata_id: int, req: PartialMetadata, repo: RepoDep, runtime: RuntimeDep
 +) -> MetadataResponse:
-     updates = cast("MetadataFields", {k: v for k, v in req.model_dump().items() if v is not None})
-+    if "organize_number" in req.model_fields_set:
-+        updates["organize_number"] = req.organize_number
+     # exclude_unset 区分省略键与显式 null; 三态见 docs/dev/data-model.md.
+     updates = cast("MetadataFields", req.model_dump(exclude_unset=True))
      if not updates:
-         raise HTTPException(status_code=422, detail="没有需要修改的字段")
-     if "release" in updates:
-@@ -338,7 +343,11 @@ async def update_metadata(metadata_id: int, req: PartialMetadata, repo: RepoDep)
+@@ -353,7 +356,11 @@ async def update_metadata(metadata_id: int, req: PartialMetadata, repo: RepoDep)
              updates["release"] = normalized
          else:
              raise HTTPException(status_code=422, detail="发行日期必须为 YYYY-MM-DD")
@@ -90,7 +87,7 @@ index 53e2e9d2..b5aaa995 100644
      logger.info("metadata updated", metadata_id=metadata_id, fields=list(updates.keys()))
 diff --git a/src/amane/api/support/liu1443452494_organize_number.py b/src/amane/api/support/liu1443452494_organize_number.py
 new file mode 100644
-index 00000000..1a41d55d
+index 0000000000000000000000000000000000000000..1a41d55d919daf6a8a944bc10b84189ecb4d08bd
 --- /dev/null
 +++ b/src/amane/api/support/liu1443452494_organize_number.py
 @@ -0,0 +1,56 @@
@@ -150,9 +147,75 @@ index 00000000..1a41d55d
 +                        )
 +                await repo.update_media_file(media.id, organized_outputs=baseline)
 +        return await repo.update_metadata(metadata_id, mode=WriteMode.MANUAL, **updates)
+diff --git "a/src/amane/db/migrations/versions/060a2c478ef0_\345\220\210\345\271\266\345\211\247\347\205\247\346\250\241\346\235\277\344\270\216\350\207\252\347\224\250\350\277\201\347\247\273.py" "b/src/amane/db/migrations/versions/060a2c478ef0_\345\220\210\345\271\266\345\211\247\347\205\247\346\250\241\346\235\277\344\270\216\350\207\252\347\224\250\350\277\201\347\247\273.py"
+new file mode 100644
+index 0000000000000000000000000000000000000000..cc4cfdc907dd3b96c7f655e58bd88338fcb347bc
+--- /dev/null
++++ "b/src/amane/db/migrations/versions/060a2c478ef0_\345\220\210\345\271\266\345\211\247\347\205\247\346\250\241\346\235\277\344\270\216\350\207\252\347\224\250\350\277\201\347\247\273.py"
+@@ -0,0 +1,23 @@
++"""合并剧照模板与自用迁移。
++
++迁移版本：060a2c478ef0
++父版本：c4b12eeaee74、fb4fd486708c
++创建时间：2026-11-08 12:02:13.553315
++
++仅合并版本关系，结构与数据变更由父分支执行。
++"""
++
++from collections.abc import Sequence
++
++revision: str = "060a2c478ef0"
++down_revision: str | Sequence[str] | None = ("c4b12eeaee74", "fb4fd486708c")
++branch_labels: str | Sequence[str] | None = None
++depends_on: str | Sequence[str] | None = None
++
++
++def upgrade() -> None:
++    pass
++
++
++def downgrade() -> None:
++    pass
+diff --git "a/src/amane/db/migrations/versions/272fb8ced57b_\345\220\210\345\271\266\344\270\212\346\270\270\345\210\206\350\276\250\347\216\207\344\270\216\350\207\252\347\224\250\350\277\201\347\247\273.py" "b/src/amane/db/migrations/versions/272fb8ced57b_\345\220\210\345\271\266\344\270\212\346\270\270\345\210\206\350\276\250\347\216\207\344\270\216\350\207\252\347\224\250\350\277\201\347\247\273.py"
+new file mode 100644
+index 0000000000000000000000000000000000000000..e5a3b45c9bdef9f430961db9bf08a529e92cffa4
+--- /dev/null
++++ "b/src/amane/db/migrations/versions/272fb8ced57b_\345\220\210\345\271\266\344\270\212\346\270\270\345\210\206\350\276\250\347\216\207\344\270\216\350\207\252\347\224\250\350\277\201\347\247\273.py"
+@@ -0,0 +1,31 @@
++"""合并上游分辨率与自用迁移。
++
++迁移版本：272fb8ced57b
++父版本：060a2c478ef0、e06def65f72a
++创建时间：2026-11-13 11:44:19.685644
++"""
++
++from collections.abc import Sequence
++
++import sqlalchemy as sa
++from alembic import op
++
++revision: str = "272fb8ced57b"
++down_revision: tuple[str, str] = ("060a2c478ef0", "e06def65f72a")
++branch_labels: str | Sequence[str] | None = None
++depends_on: str | Sequence[str] | None = None
++
++
++def upgrade() -> None:
++    # 人工值只归一名称，禁止按路径重新计算，否则会覆盖用户选择。
++    op.execute(
++        sa.text(
++            "UPDATE media_files SET watermark_definition = CASE watermark_definition "
++            "WHEN 'HD' THEN '720p' WHEN 'SD' THEN '480p' END "
++            "WHERE watermark_definition IN ('HD', 'SD')"
++        )
++    )
++
++
++def downgrade() -> None:
++    """档位名称合并不可逆，保留规范名称与人工保护状态。"""
 diff --git "a/src/amane/db/migrations/versions/c4b12eeaee74_\345\242\236\345\212\240\345\275\261\347\211\207\346\225\264\347\220\206\347\224\250\347\225\252\345\217\267.py" "b/src/amane/db/migrations/versions/c4b12eeaee74_\345\242\236\345\212\240\345\275\261\347\211\207\346\225\264\347\220\206\347\224\250\347\225\252\345\217\267.py"
 new file mode 100644
-index 00000000..c4608acb
+index 0000000000000000000000000000000000000000..c4608acbcfde61d9df164f042ce5dea58f75cf84
 --- /dev/null
 +++ "b/src/amane/db/migrations/versions/c4b12eeaee74_\345\242\236\345\212\240\345\275\261\347\211\207\346\225\264\347\220\206\347\224\250\347\225\252\345\217\267.py"
 @@ -0,0 +1,24 @@
@@ -181,7 +244,7 @@ index 00000000..c4608acb
 +def downgrade() -> None:
 +    op.drop_column("metadata", "organize_number")
 diff --git a/src/amane/db/models.py b/src/amane/db/models.py
-index 5147c4b999868f051d51911071e86110a3b90dff..ef8205c099098bdc6276bbfb3a50dfd678f310e0 100644
+index 0dd169e8b69ea8d01823f20fc6c332998d4e57ab..c8a5e9ca15a612a11742947c1e9af75ed15fd25b 100644
 --- a/src/amane/db/models.py
 +++ b/src/amane/db/models.py
 @@ -1,7 +1,8 @@
@@ -202,7 +265,7 @@ index 5147c4b999868f051d51911071e86110a3b90dff..ef8205c099098bdc6276bbfb3a50dfd6
  from ..organize.path_templates import VIDEO_TEMPLATE_DEFAULT, ExtrafanartNameTemplate, PathTemplate
  from ..organize.strm_content import StrmContentTemplate
  from ..parsing import VR_TAGS, ContentType, Mosaic, MosaicNature, WatermarkMode, is_vr
-@@ -301,6 +303,11 @@ class Metadata(SQLModel, table=True):
+@@ -306,6 +308,11 @@ class Metadata(SQLModel, table=True):
      #: 番号类型; 只在条目创建时落定 (契约见 docs/dev/data-model.md), 不随挂载文件或后续刮削变化, 也不进对外 PATCH.
      content_type: ContentType = Field(default=ContentType.WESTERN, index=True)
  
@@ -215,7 +278,7 @@ index 5147c4b999868f051d51911071e86110a3b90dff..ef8205c099098bdc6276bbfb3a50dfd6
      actors: list[str] = Field(default_factory=list, sa_column=Column(JSON))
      # studio/publisher/series 同时投影到目录表.
 diff --git a/src/amane/db/repo_types.py b/src/amane/db/repo_types.py
-index 2ac22731..ee29babe 100644
+index 8cbd2e24bf0a1a479b9d67cd97d7a9426d8a823b..d8f48fed7445779d734265b5d206264052e8bb5c 100644
 --- a/src/amane/db/repo_types.py
 +++ b/src/amane/db/repo_types.py
 @@ -298,6 +298,7 @@ class ActorBrowseParams(BaseModel):
@@ -227,10 +290,10 @@ index 2ac22731..ee29babe 100644
      actors: list[str]
      studio: str | None
 diff --git a/src/amane/db/repos/metadata.py b/src/amane/db/repos/metadata.py
-index 5ebc0040..b6868013 100644
+index 08ef15d9240a1d9956941451168f6e54d959cd4d..906ff89c8360eeaab0cc5e855c5177b3538f2c3f 100644
 --- a/src/amane/db/repos/metadata.py
 +++ b/src/amane/db/repos/metadata.py
-@@ -11,6 +11,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
+@@ -12,6 +12,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
  
  from ...enums import ActorGender, MetadataField
  from ...liu1443452494_metadata_tags import build_metadata_tags
@@ -238,7 +301,7 @@ index 5ebc0040..b6868013 100644
  from ...parsing import ContentType, Mosaic, infer_content_type
  from ...utils.collections import unique_ids
  from ...utils.text import normalize_long_text
-@@ -454,6 +455,8 @@ class MetadataRepoMixin(RepositoryMixinBase):
+@@ -493,6 +494,8 @@ class MetadataRepoMixin(RepositoryMixinBase):
              else:
                  metadata.locked_fields = _merge_auto_locks(updates, locked)
              # 显式赋值, 禁止 setattr; 字段集由 MetadataFields 与 Metadata 静态对齐.
@@ -248,10 +311,10 @@ index 5ebc0040..b6868013 100644
                  metadata.title = updates["title"]
              if "actors" in updates:
 diff --git a/src/amane/handlers/file.py b/src/amane/handlers/file.py
-index 74f0f2c0..4062d253 100644
+index e84eb9f224c55ccbb3637eb59fee70a5904ef428..42618809d3edcf1677edad6f40823fdb0ebe6a98 100644
 --- a/src/amane/handlers/file.py
 +++ b/src/amane/handlers/file.py
-@@ -279,7 +279,11 @@ async def apply_file_operations(
+@@ -282,7 +282,11 @@ async def apply_file_operations(
          safe_dirs=safe_dirs,
          actor_genders=actor_genders,
      )
@@ -266,7 +329,7 @@ index 74f0f2c0..4062d253 100644
      if tracking and media_file.organized_outputs is None:
 diff --git a/src/amane/liu1443452494_organize_number.py b/src/amane/liu1443452494_organize_number.py
 new file mode 100644
-index 00000000..8ea81922
+index 0000000000000000000000000000000000000000..8ea81922c7f4a44cb6d219e9f5d3829ab98e47d7
 --- /dev/null
 +++ b/src/amane/liu1443452494_organize_number.py
 @@ -0,0 +1,27 @@
@@ -316,10 +379,10 @@ index 2bace74a8387ba5888615b13f44a4b325b72bb91..022bcb44cd75928886b82eae4399ce54
              code.write(f"  <originaltitle>{title}</originaltitle>\n")
              code.write(f"  <sorttitle>{title}</sorttitle>\n")
 diff --git a/src/amane/organize/path_templates.py b/src/amane/organize/path_templates.py
-index 3ef81c25..7adab2cd 100644
+index 3d80b6048c4df1ca4f33452ec8a30983f99a385f..083d6c467091f1144878d1bf00e3d624ec50b226 100644
 --- a/src/amane/organize/path_templates.py
 +++ b/src/amane/organize/path_templates.py
-@@ -84,6 +84,7 @@ def resolve_paths(
+@@ -157,6 +157,7 @@ def resolve_paths(
          library_root=base_path,
      )
  
@@ -327,7 +390,7 @@ index 3ef81c25..7adab2cd 100644
      # 先渲染视频, 注入 `{video_*}` 后再渲染链接与刮削产物.
      video = PathEngine(library.video_template).resolve(ctx, base_path, safe_dirs)
      if path_key(video) == path_key(base_path):
-@@ -165,6 +166,7 @@ def resolve_subtitle_path(
+@@ -239,6 +240,7 @@ def resolve_subtitle_path(
          actor_genders=actor_genders,
          library_root=base_path,
      )
@@ -346,12 +409,12 @@ index a3f9347c838fceaa8749320754adadd291d14c12..36f4bc4d5da3c5ce37376d3fe5912f16
 -from .path_templates import ResolvedPaths, resolve_paths
 +from .path_templates import ResolvedPaths, render_extrafanart_names, resolve_paths
  from .subtitles import discover_subtitles
-
+ 
  if TYPE_CHECKING:
 @@ -123,6 +123,23 @@ def _nfo_matches(path: Path, number: str) -> bool:
          return False
-
-
+ 
+ 
 +def _extrafanart_baseline_paths(library: Library, metadata: Metadata, paths: ResolvedPaths) -> list[Path]:
 +    legacy = {path for path in paths.extrafanart_dir.glob("*.jpg") if path.stem.isdecimal()}
 +    maximum = max((len(urls) for urls in metadata.extrafanart_urls.values()), default=0)
@@ -394,7 +457,7 @@ index a3f9347c838fceaa8749320754adadd291d14c12..36f4bc4d5da3c5ce37376d3fe5912f16
      subtitle_dirs = {paths.nfo.parent, paths.link.parent if paths.link is not None else paths.nfo.parent}
 diff --git a/tests/api/test_liu1443452494_organize_number.py b/tests/api/test_liu1443452494_organize_number.py
 new file mode 100644
-index 00000000..f9ae6c3c
+index 0000000000000000000000000000000000000000..f9ae6c3cd94aa39fdb99e2e56e4213a06395f52f
 --- /dev/null
 +++ b/tests/api/test_liu1443452494_organize_number.py
 @@ -0,0 +1,145 @@
@@ -544,10 +607,10 @@ index 00000000..f9ae6c3c
 +    )
 +    assert all(path.read_bytes() == data for path, data in first_outputs.items())
 diff --git a/tests/api/test_schema_repo_compat.py b/tests/api/test_schema_repo_compat.py
-index fd3a342c..2d9c0b9b 100644
+index 2b143938fe114ac00bb2167a8618ed7c3e5d8256..5759ade8cd8150dc29128fa5b41f785c668b77c3 100644
 --- a/tests/api/test_schema_repo_compat.py
 +++ b/tests/api/test_schema_repo_compat.py
-@@ -476,7 +476,7 @@ _ROUNDTRIP = [
+@@ -477,7 +477,7 @@ _ROUNDTRIP = [
          ),
      ),
      (ScheduleUpdates, _make_schedule, "update_schedule", frozenset(), frozenset()),
@@ -558,10 +621,10 @@ index fd3a342c..2d9c0b9b 100644
  _ROUNDTRIP_IDS = ["media", "library", "schedule", "metadata", "feed"]
 diff --git a/tests/db/test_liu1443452494_organize_number_migration.py b/tests/db/test_liu1443452494_organize_number_migration.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..594dc0ddff578b5670170d917f6e3eb2460ae841
+index 0000000000000000000000000000000000000000..5bf02710b82f07054cad32222fa75eaa8936d5a2
 --- /dev/null
 +++ b/tests/db/test_liu1443452494_organize_number_migration.py
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,159 @@
 +"""整理用番号迁移保留原番号及其唯一约束。"""
 +
 +from pathlib import Path
@@ -621,8 +684,11 @@ index 0000000000000000000000000000000000000000..594dc0ddff578b5670170d917f6e3eb2
 +        (("c4b12eeaee74",), True, False),
 +        (("fb4fd486708c",), False, True),
 +        (("c4b12eeaee74", "fb4fd486708c"), True, True),
++        (("060a2c478ef0",), True, True),
++        (("e06def65f72a",), False, True),
++        (("060a2c478ef0", "e06def65f72a"), True, True),
 +    ],
-+    ids=["自用终点", "上游终点", "两分支均已升级"],
++    ids=["自用终点", "上游终点", "两分支均已升级", "已发布自用", "分辨率上游", "分辨率与自用双终点"],
 +)
 +def test_startup_merges_extrafanart_and_custom_migrations(
 +    tmp_path: Path,
@@ -718,200 +784,104 @@ index 0000000000000000000000000000000000000000..594dc0ddff578b5670170d917f6e3eb2
 +        assert upgrade_sqlite_database(path) is None
 +    finally:
 +        engine.dispose()
-diff --git a/tests/handlers/test_liu1443452494_organize_number.py b/tests/handlers/test_liu1443452494_organize_number.py
-new file mode 100644
-index 00000000..29eb1ed3
---- /dev/null
-+++ b/tests/handlers/test_liu1443452494_organize_number.py
-@@ -0,0 +1,46 @@
-+"""整理用番号不能改变刮削查询或被刮削结果覆盖。"""
-+
-+import pytest
-+
-+from amane.config import HotSettings
-+from amane.crawlers.models import FetchOptions, MediaMetadata, SearchQuery
-+from amane.db.repo_types import WriteMode
-+from amane.db.repository import Repository
-+from amane.enums import SiteName
-+from amane.handlers import ScrapeHandler, ScrapePayload
-+from amane.media import ResourceStore
-+from amane.parsing import ContentType
-+from tests.handlers.test_liu1443452494_image_quality import OriginalCrawler
-+from tests.handlers.test_scraper import FakeFactory
-+
-+
-+class NumberRecordingCrawler(OriginalCrawler):
-+    def __init__(self, metadata: MediaMetadata) -> None:
-+        super().__init__(metadata)
-+        self.numbers: list[str] = []
-+
-+    async def fetch(self, query: SearchQuery, options: FetchOptions | None = None) -> MediaMetadata | None:
-+        self.numbers.append(query.number)
-+        return await super().fetch(query, options)
-+
-+
-+@pytest.mark.asyncio
-+async def test_rescrape_keeps_organize_number_and_uses_original_query(
-+    repo: Repository, resource_store: ResourceStore
-+) -> None:
-+    number = "Vixen.19.05.09"
-+    custom = f"{number}  Jia Episode 1"
-+    metadata = await repo.upsert_metadata(number=number, content_type=ContentType.WESTERN, title="旧标题")
-+    assert metadata.id is not None
-+    await repo.update_metadata(metadata.id, mode=WriteMode.MANUAL, organize_number=custom)
-+    crawler = NumberRecordingCrawler(MediaMetadata(number=number, title="重新取得的标题"))
-+    config = HotSettings()
-+    config.scraping.content_routes[ContentType.WESTERN] = [SiteName.DMM]
-+    handler = ScrapeHandler(repo, FakeFactory({"dmm": crawler}), resource_store, config)
-+    result = await handler.handle(ScrapePayload(number=number, content_type=ContentType.WESTERN, use_cache=set()))
-+    assert result.success and crawler.numbers == [number]
-+    saved = await repo.get_metadata(metadata.id)
-+    assert saved is not None and saved.organize_number == custom and saved.number == number
-+    assert saved.title == "重新取得的标题" and saved.raw["dmm"]["number"] == number
-+    assert "organize_number" not in saved.raw["dmm"]
-+    assert await repo.get_metadata_by_number(custom) is None
-diff --git a/tests/organize/test_liu1443452494_organize_number.py b/tests/organize/test_liu1443452494_organize_number.py
-new file mode 100644
-index 0000000000000000000000000000000000000000..77cf5fd22ea0fbe28bd8efd609097e8e4c9142c8
---- /dev/null
-+++ b/tests/organize/test_liu1443452494_organize_number.py
-@@ -0,0 +1,70 @@
-+"""整理用番号的输入边界、路径和 NFO 输出。"""
-+
-+from pathlib import Path
-+from xml.etree import ElementTree
-+
-+import pytest
-+
-+from amane.db.models import Library, Metadata
-+from amane.liu1443452494_organize_number import normalize_organize_number
-+from amane.media import write_nfo
-+from amane.organize import resolve_paths
-+from amane.organize.path_templates import render_extrafanart_names
-+from amane.organize.strm_content import render_strm_content
+diff --git a/tests/db/test_liu1443452494_watermark_migration.py b/tests/db/test_liu1443452494_watermark_migration.py
+index b2eab74aa4dde0b00e7268b0a776fac2eb8d6a9e..36c9ca777ce8070faee2d8acf731ba0dbf724449 100644
+--- a/tests/db/test_liu1443452494_watermark_migration.py
++++ b/tests/db/test_liu1443452494_watermark_migration.py
+@@ -15,6 +15,86 @@ from amane.parsing import ContentType, Mosaic, MosaicNature, WatermarkMode
+ from tests.helpers import alembic_config
+ 
+ 
++@pytest.mark.parametrize("existing_empty_file", [False, True], ids=["尚未建库", "空数据库文件"])
++def test_empty_database_reaches_merged_head(tmp_path: Path, existing_empty_file: bool) -> None:
++    path = tmp_path / "空数据库.db"
++    if existing_empty_file:
++        path.touch()
++    config = alembic_config(path)
++    assert upgrade_sqlite_database(path) is None
++    engine = create_engine(f"sqlite:///{path}")
++    try:
++        heads = ScriptDirectory.from_config(config).get_heads()
++        assert len(heads) == 1
++        with engine.connect() as connection:
++            assert connection.execute(text("SELECT version_num FROM alembic_version")).scalars().all() == heads
++            assert connection.execute(text("SELECT organize_number FROM metadata")).all() == []
++            assert (
++                connection.execute(
++                    text("SELECT watermark_definition,watermark_definition_locked,organized_outputs FROM media_files")
++                ).all()
++                == []
++            )
++        assert upgrade_sqlite_database(path) is None
++    finally:
++        engine.dispose()
 +
 +
-+@pytest.mark.parametrize(
-+    ("value", "expected", "error"),
-+    [
-+        (None, None, None),
-+        ("", None, None),
-+        ("   ", None, None),
-+        ("  Vixen.19.05.09  Jia Episode 1  ", "Vixen.19.05.09  Jia Episode 1", None),
-+        ("中文片名 & Episode 2", "中文片名 & Episode 2", None),
-+        ("a" * 200, "a" * 200, None),
-+        ("中" * 66, "中" * 66, None),
-+        ("a" * 201, None, "过长"),
-+        ("中" * 67, None, "过长"),
-+        *[(value, None, "非法字符") for value in ("../电影", "目录\\电影", "a:b", 'a"b', "a?b", "a*b", "a|b", "a<b>")],
-+        *[(value, None, "控制字符") for value in ("电影\n", "\t电影", "电影\x00", "电影\x7f")],
-+        *[(value, None, "句点") for value in (".", "..", "电影.")],
-+        *[(value, None, "保留名称") for value in ("CON", "nul.mp4", "COM1", "lpt²", "CON .txt", "CONIN$", "CONOUT$")],
-+        ("电影\ud800", None, "无法编码为 UTF-8"),
-+    ],
-+)
-+def test_organize_number_validation(value: str | None, expected: str | None, error: str | None) -> None:
-+    if error is not None:
-+        with pytest.raises(ValueError, match=error):
-+            normalize_organize_number(value)
-+    else:
-+        assert normalize_organize_number(value) == expected
-+
-+
-+@pytest.mark.asyncio
-+@pytest.mark.parametrize("custom", [None, "Vixen.19.05.09  Jia Episode 1", "中文片名 & Episode 2"])
-+async def test_organize_number_changes_outputs_without_changing_identity(tmp_path: Path, custom: str | None) -> None:
-+    metadata = Metadata(
-+        number="Vixen.19.05.09",
-+        organize_number=custom,
-+        title="时光与场所",
-+        external_ids={"javdb": "来源标识"},
++def test_definition_migration_preserves_manual_choices(tmp_path: Path) -> None:
++    """档位名称合并不得用路径覆盖人工选择，也不得改变其他人工设置。"""
++    path = tmp_path / "人工分辨率.db"
++    config = alembic_config(path)
++    command.upgrade(config, "060a2c478ef0")
++    cases = (
++        ("MANUAL", True, "HD", "720p"),
++        ("MANUAL", True, "SD", "480p"),
++        ("MANUAL", True, "720p", "720p"),
++        ("MANUAL", True, "4K", "4K"),
++        ("MANUAL", True, None, None),
++        ("MANUAL", False, "HD", "720p"),
++        ("AUTO", False, "SD", "480p"),
++        ("MANUAL", True, "未知值", "未知值"),
 +    )
-+    library = Library(name="测试库", path=str(tmp_path), video_template="{number}/{number}.{ext}")
-+    expected = custom or metadata.number
-+    paths = resolve_paths(library, metadata, ext="mp4")
-+    assert paths.video == tmp_path / expected / f"{expected}.mp4"
-+    for template in ("{number}-{index_padded}.jpg", "{video_name}-{index_padded}.jpg"):
-+        assert render_extrafanart_names(template, paths.context, 12) == [
-+            f"{expected}-{index:02d}.jpg" for index in range(1, 13)
-+        ]
-+    assert render_strm_content("https://example.test/{number}", paths.video, tmp_path, metadata) == (
-+        "https://example.test/Vixen.19.05.09\n"
++    preserved = text(
++        "SELECT path,status,library_id,created_at,updated_at,definition,has_subtitle_in_name,has_external_subtitle,"
++        "watermark_mode,watermark_subtitle,watermark_mosaic,watermark_definition_locked,organized_outputs "
++        "FROM media_files ORDER BY id"
 +    )
-+    assert render_strm_content(None, paths.video, tmp_path, metadata) == f"{paths.video}\n"
-+    assert await write_nfo(metadata, paths.nfo)
-+    root = ElementTree.parse(paths.nfo).getroot()
-+    assert root.findtext("num") == expected
-+    for field in ("title", "originaltitle", "sorttitle"):
-+        assert root.findtext(field) == f"{expected} 时光与场所"
-+    assert root.findtext("javdbid") == "来源标识"
-+    assert metadata.number == "Vixen.19.05.09" and metadata.title == "时光与场所"
-diff --git a/web/src/i18n/locales/en/metadata.json b/web/src/i18n/locales/en/metadata.json
-index 273dafd6..f3ac5b73 100644
---- a/web/src/i18n/locales/en/metadata.json
-+++ b/web/src/i18n/locales/en/metadata.json
-@@ -325,6 +325,10 @@
-   "confirmDelete": "Delete film #{{id}}? This cannot be undone",
-   "empty": "No films",
-   "editor": {
-+    "organize_number": {
-+      "label": "整理用番号",
-+      "description": "仅用于整理目录、文件名和 NFO，保存后需重新整理；留空使用原番号，不影响刮削"
-+    },
-     "title": {
-       "label": "Title"
-     },
-diff --git a/web/src/i18n/locales/zh-CN/metadata.json b/web/src/i18n/locales/zh-CN/metadata.json
-index a54f5ad2..2e2e5ab5 100644
---- a/web/src/i18n/locales/zh-CN/metadata.json
-+++ b/web/src/i18n/locales/zh-CN/metadata.json
-@@ -306,6 +306,10 @@
-   "confirmDelete": "确定删除影片 #{{id}}？此操作不可撤销",
-   "empty": "暂无影片记录",
-   "editor": {
-+    "organize_number": {
-+      "label": "整理用番号",
-+      "description": "仅用于整理目录、文件名和 NFO，保存后需重新整理；留空使用原番号，不影响刮削"
-+    },
-     "title": {
-       "label": "标题"
-     },
-diff --git a/src/amane/db/migrations/versions/060a2c478ef0_合并剧照模板与自用迁移.py b/src/amane/db/migrations/versions/060a2c478ef0_合并剧照模板与自用迁移.py
-new file mode 100644
-index 0000000000000000000000000000000000000000..cc4cfdc907dd3b96c7f655e58bd88338fcb347bc
---- /dev/null
-+++ b/src/amane/db/migrations/versions/060a2c478ef0_合并剧照模板与自用迁移.py
-@@ -0,0 +1,23 @@
-+"""合并剧照模板与自用迁移。
++    engine = create_engine(f"sqlite:///{path}")
++    try:
++        with engine.begin() as connection:
++            for index, (mode, locked, previous, _) in enumerate(cases):
++                connection.execute(
++                    text(
++                        "INSERT INTO media_files "
++                        "(path,status,library_id,created_at,updated_at,definition,has_subtitle_in_name,"
++                        "has_external_subtitle,watermark_mode,watermark_subtitle,watermark_mosaic,"
++                        "watermark_definition,watermark_definition_locked,organized_outputs) "
++                        "VALUES (:path,'SCRAPED',1,'2026-11-01','2026-11-01','4K',1,1,"
++                        ":mode,0,'LEAKED',:definition,:locked,:outputs)"
++                    ),
++                    {
++                        "path": f"/原目录/SSIS-{345 + index}-4K.mp4",
++                        "mode": mode,
++                        "definition": previous,
++                        "locked": locked,
++                        "outputs": f'{{"version":1,"number":"SSIS-{345 + index}","outputs":[]}}',
++                    },
++                )
++            before = connection.execute(preserved).all()
 +
-+迁移版本：060a2c478ef0
-+父版本：c4b12eeaee74、fb4fd486708c
-+创建时间：2026-11-08 12:02:13.553315
-+
-+仅合并版本关系，结构与数据变更由父分支执行。
-+"""
-+
-+from collections.abc import Sequence
-+
-+revision: str = "060a2c478ef0"
-+down_revision: str | Sequence[str] | None = ("c4b12eeaee74", "fb4fd486708c")
-+branch_labels: str | Sequence[str] | None = None
-+depends_on: str | Sequence[str] | None = None
++        backup = upgrade_sqlite_database(path)
++        assert backup is not None and backup.is_file()
++        with engine.connect() as connection:
++            assert connection.execute(preserved).all() == before
++            assert connection.execute(
++                text("SELECT watermark_definition FROM media_files ORDER BY id")
++            ).scalars().all() == [expected for _, _, _, expected in cases]
++        assert upgrade_sqlite_database(path) is None
++    finally:
++        engine.dispose()
 +
 +
-+def upgrade() -> None:
-+    pass
-+
-+
-+def downgrade() -> None:
-+    pass
+ def test_watermark_migration_preserves_existing_media(tmp_path: Path) -> None:
+     config = alembic_config(tmp_path / "迁移.db")
+     command.upgrade(config, "9054ebacea29")
 diff --git a/tests/handlers/test_liu1443452494_library_jpeg.py b/tests/handlers/test_liu1443452494_library_jpeg.py
-index 9fc347ec01ffb5e925601fb205a3d66d69fd3cfc..30fd5ea829d8a037b6cf35c4fc1bff0b590985bb 100644
+index 49675ebc8d7293aea703319772a77b3ffd8206cb..40a5e634f299555e265ce71230c503fcd68b8fa3 100644
 --- a/tests/handlers/test_liu1443452494_library_jpeg.py
 +++ b/tests/handlers/test_liu1443452494_library_jpeg.py
 @@ -8,13 +8,14 @@ import pytest
  from PIL import Image, ImageCms, JpegImagePlugin
-
+ 
  from amane.config import HotSettings, ScrapingConfig, WatermarkConfig
 -from amane.db.models import Metadata
 -from amane.enums import DownloadableResource, LibraryResource
@@ -926,7 +896,7 @@ index 9fc347ec01ffb5e925601fb205a3d66d69fd3cfc..30fd5ea829d8a037b6cf35c4fc1bff0b
  from amane.parsing import ContentType, parse_file_info
  from tests.handlers.test_file_ops import _paths
  from tests.media.test_liu1443452494_image_quality import PosterClient
-@@ -333,3 +334,80 @@ async def test_scrape_caches_webp_and_organize_only_converts_the_library_copy(
+@@ -336,3 +337,80 @@ async def test_scrape_caches_webp_and_organize_only_converts_the_library_copy(
          image.load()
          assert image.format == "JPEG" and image.size == (300, 200)
      assert client.downloaded == [url]
@@ -1007,6 +977,58 @@ index 9fc347ec01ffb5e925601fb205a3d66d69fd3cfc..30fd5ea829d8a037b6cf35c4fc1bff0b
 +    for url in urls[available:]:
 +        assert await resource_store.resolve(url) is None
 +    assert source.read_bytes() == b"original-video"
+diff --git a/tests/handlers/test_liu1443452494_organize_number.py b/tests/handlers/test_liu1443452494_organize_number.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..29eb1ed31204ef8565a298f9f3c5e8ce4eff17c3
+--- /dev/null
++++ b/tests/handlers/test_liu1443452494_organize_number.py
+@@ -0,0 +1,46 @@
++"""整理用番号不能改变刮削查询或被刮削结果覆盖。"""
++
++import pytest
++
++from amane.config import HotSettings
++from amane.crawlers.models import FetchOptions, MediaMetadata, SearchQuery
++from amane.db.repo_types import WriteMode
++from amane.db.repository import Repository
++from amane.enums import SiteName
++from amane.handlers import ScrapeHandler, ScrapePayload
++from amane.media import ResourceStore
++from amane.parsing import ContentType
++from tests.handlers.test_liu1443452494_image_quality import OriginalCrawler
++from tests.handlers.test_scraper import FakeFactory
++
++
++class NumberRecordingCrawler(OriginalCrawler):
++    def __init__(self, metadata: MediaMetadata) -> None:
++        super().__init__(metadata)
++        self.numbers: list[str] = []
++
++    async def fetch(self, query: SearchQuery, options: FetchOptions | None = None) -> MediaMetadata | None:
++        self.numbers.append(query.number)
++        return await super().fetch(query, options)
++
++
++@pytest.mark.asyncio
++async def test_rescrape_keeps_organize_number_and_uses_original_query(
++    repo: Repository, resource_store: ResourceStore
++) -> None:
++    number = "Vixen.19.05.09"
++    custom = f"{number}  Jia Episode 1"
++    metadata = await repo.upsert_metadata(number=number, content_type=ContentType.WESTERN, title="旧标题")
++    assert metadata.id is not None
++    await repo.update_metadata(metadata.id, mode=WriteMode.MANUAL, organize_number=custom)
++    crawler = NumberRecordingCrawler(MediaMetadata(number=number, title="重新取得的标题"))
++    config = HotSettings()
++    config.scraping.content_routes[ContentType.WESTERN] = [SiteName.DMM]
++    handler = ScrapeHandler(repo, FakeFactory({"dmm": crawler}), resource_store, config)
++    result = await handler.handle(ScrapePayload(number=number, content_type=ContentType.WESTERN, use_cache=set()))
++    assert result.success and crawler.numbers == [number]
++    saved = await repo.get_metadata(metadata.id)
++    assert saved is not None and saved.organize_number == custom and saved.number == number
++    assert saved.title == "重新取得的标题" and saved.raw["dmm"]["number"] == number
++    assert "organize_number" not in saved.raw["dmm"]
++    assert await repo.get_metadata_by_number(custom) is None
 diff --git a/tests/media/test_liu1443452494_nfo.py b/tests/media/test_liu1443452494_nfo.py
 index fb5e8e239f9cd9318b7592b4d5f814636b44d0ef..f7e3bdf92c8b618c4945e26001979e261968d0e5 100644
 --- a/tests/media/test_liu1443452494_nfo.py
@@ -1014,13 +1036,13 @@ index fb5e8e239f9cd9318b7592b4d5f814636b44d0ef..f7e3bdf92c8b618c4945e26001979e26
 @@ -1,4 +1,4 @@
 -"""自用 NFO 的文件标签与连续节点顺序。"""
 +"""自用 NFO 的有效番号、文件标签与连续节点顺序。"""
-
+ 
  from pathlib import Path
  from xml.etree import ElementTree
 @@ -14,6 +14,43 @@ from amane.organize import PlaceOutcome, ResolvedPaths
  from amane.parsing import ContentType, parse_file_info
-
-
+ 
+ 
 +@pytest.mark.asyncio
 +@pytest.mark.parametrize(
 +    ("custom", "title", "expected_title"),
@@ -1061,13 +1083,89 @@ index fb5e8e239f9cd9318b7592b4d5f814636b44d0ef..f7e3bdf92c8b618c4945e26001979e26
  @pytest.mark.asyncio
  @pytest.mark.parametrize(
      ("filename", "content_type", "external_subtitle", "extra_labels"),
+diff --git a/tests/organize/test_liu1443452494_organize_number.py b/tests/organize/test_liu1443452494_organize_number.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..77cf5fd22ea0fbe28bd8efd609097e8e4c9142c8
+--- /dev/null
++++ b/tests/organize/test_liu1443452494_organize_number.py
+@@ -0,0 +1,70 @@
++"""整理用番号的输入边界、路径和 NFO 输出。"""
++
++from pathlib import Path
++from xml.etree import ElementTree
++
++import pytest
++
++from amane.db.models import Library, Metadata
++from amane.liu1443452494_organize_number import normalize_organize_number
++from amane.media import write_nfo
++from amane.organize import resolve_paths
++from amane.organize.path_templates import render_extrafanart_names
++from amane.organize.strm_content import render_strm_content
++
++
++@pytest.mark.parametrize(
++    ("value", "expected", "error"),
++    [
++        (None, None, None),
++        ("", None, None),
++        ("   ", None, None),
++        ("  Vixen.19.05.09  Jia Episode 1  ", "Vixen.19.05.09  Jia Episode 1", None),
++        ("中文片名 & Episode 2", "中文片名 & Episode 2", None),
++        ("a" * 200, "a" * 200, None),
++        ("中" * 66, "中" * 66, None),
++        ("a" * 201, None, "过长"),
++        ("中" * 67, None, "过长"),
++        *[(value, None, "非法字符") for value in ("../电影", "目录\\电影", "a:b", 'a"b', "a?b", "a*b", "a|b", "a<b>")],
++        *[(value, None, "控制字符") for value in ("电影\n", "\t电影", "电影\x00", "电影\x7f")],
++        *[(value, None, "句点") for value in (".", "..", "电影.")],
++        *[(value, None, "保留名称") for value in ("CON", "nul.mp4", "COM1", "lpt²", "CON .txt", "CONIN$", "CONOUT$")],
++        ("电影\ud800", None, "无法编码为 UTF-8"),
++    ],
++)
++def test_organize_number_validation(value: str | None, expected: str | None, error: str | None) -> None:
++    if error is not None:
++        with pytest.raises(ValueError, match=error):
++            normalize_organize_number(value)
++    else:
++        assert normalize_organize_number(value) == expected
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("custom", [None, "Vixen.19.05.09  Jia Episode 1", "中文片名 & Episode 2"])
++async def test_organize_number_changes_outputs_without_changing_identity(tmp_path: Path, custom: str | None) -> None:
++    metadata = Metadata(
++        number="Vixen.19.05.09",
++        organize_number=custom,
++        title="时光与场所",
++        external_ids={"javdb": "来源标识"},
++    )
++    library = Library(name="测试库", path=str(tmp_path), video_template="{number}/{number}.{ext}")
++    expected = custom or metadata.number
++    paths = resolve_paths(library, metadata, ext="mp4")
++    assert paths.video == tmp_path / expected / f"{expected}.mp4"
++    for template in ("{number}-{index_padded}.jpg", "{video_name}-{index_padded}.jpg"):
++        assert render_extrafanart_names(template, paths.context, 12) == [
++            f"{expected}-{index:02d}.jpg" for index in range(1, 13)
++        ]
++    assert render_strm_content("https://example.test/{number}", paths.video, tmp_path, metadata) == (
++        "https://example.test/Vixen.19.05.09\n"
++    )
++    assert render_strm_content(None, paths.video, tmp_path, metadata) == f"{paths.video}\n"
++    assert await write_nfo(metadata, paths.nfo)
++    root = ElementTree.parse(paths.nfo).getroot()
++    assert root.findtext("num") == expected
++    for field in ("title", "originaltitle", "sorttitle"):
++        assert root.findtext(field) == f"{expected} 时光与场所"
++    assert root.findtext("javdbid") == "来源标识"
++    assert metadata.number == "Vixen.19.05.09" and metadata.title == "时光与场所"
 diff --git a/tests/organize/test_liu1443452494_watermark_outputs.py b/tests/organize/test_liu1443452494_watermark_outputs.py
 index 4fd4718ce212c7aca92f7b9fd705478308644584..5f1d923ea8a98bec7df0889ab67fc65611868592 100644
 --- a/tests/organize/test_liu1443452494_watermark_outputs.py
 +++ b/tests/organize/test_liu1443452494_watermark_outputs.py
 @@ -5,6 +5,7 @@ from pathlib import Path
  import pytest
-
+ 
  from amane.db.models import Library, Metadata
 +from amane.enums import LibraryResource
  from amane.media import write_nfo
@@ -1203,3 +1301,33 @@ index 4fd4718ce212c7aca92f7b9fd705478308644584..5f1d923ea8a98bec7df0889ab67fc656
 +    previous = read_output_snapshot(baseline, metadata.number)
 +    expected = {"1.jpg", "SSIS-345-1.jpeg"} if ownership == "same_file" else set()
 +    assert {output.path.name for output in previous.outputs if output.kind == "extrafanart"} == expected
+diff --git a/web/src/i18n/locales/en/metadata.json b/web/src/i18n/locales/en/metadata.json
+index da6e65f0ab2e78e23c02b477b67a4617c20fd10b..0c3adc82743f60780642e0774aa0d6285ee46b2e 100644
+--- a/web/src/i18n/locales/en/metadata.json
++++ b/web/src/i18n/locales/en/metadata.json
+@@ -327,6 +327,10 @@
+   "confirmDelete": "Delete film #{{id}}? This cannot be undone",
+   "empty": "No films",
+   "editor": {
++    "organize_number": {
++      "label": "整理用番号",
++      "description": "仅用于整理目录、文件名和 NFO，保存后需重新整理；留空使用原番号，不影响刮削"
++    },
+     "title": {
+       "label": "Title"
+     },
+diff --git a/web/src/i18n/locales/zh-CN/metadata.json b/web/src/i18n/locales/zh-CN/metadata.json
+index 139e07797b6a443dc0294c5ddb2c4a48411462bd..6225cd6a1cc3d67cc1bd69669e3aea2a3061d369 100644
+--- a/web/src/i18n/locales/zh-CN/metadata.json
++++ b/web/src/i18n/locales/zh-CN/metadata.json
+@@ -308,6 +308,10 @@
+   "confirmDelete": "确定删除影片 #{{id}}？此操作不可撤销",
+   "empty": "暂无影片记录",
+   "editor": {
++    "organize_number": {
++      "label": "整理用番号",
++      "description": "仅用于整理目录、文件名和 NFO，保存后需重新整理；留空使用原番号，不影响刮削"
++    },
+     "title": {
+       "label": "标题"
+     },

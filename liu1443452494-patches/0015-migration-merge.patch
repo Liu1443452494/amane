@@ -1,10 +1,10 @@
 diff --git a/docs/dev/database.md b/docs/dev/database.md
-index a906e41..a1d4d79 100644
+index 42cdfd930d1becf33c208051cf3c25c9f1b4d84f..2b5c0240d79ecbf3d41adaf9c4ff8adfe8d80c16 100644
 --- a/docs/dev/database.md
 +++ b/docs/dev/database.md
-@@ -42,7 +42,7 @@ pysqlite 只在 DML 之前发出 `BEGIN`, 纯 SELECT 落在事务之外 (SQLAlch
- 2. **落后 head**: 先用 sqlite3 **online backup API** 写 `{db}.pre-migrate-{oldrev}-{utc}.bak` (含 WAL 一致快照; 同目录保留最近 5 份), 再升级.
- 3. **迁移连接**单独 `autocommit=False` + Alembic `transactional_ddl=True`: 单次 revision 内 DDL 与 `alembic_version` 同事务, 失败则回滚, 避免「表已创建但版本未升」的半成品. 业务连接不修改事务模式, 仍只开 WAL + FK.
+@@ -43,7 +43,7 @@ r18 库由项目导入 / 管理但 schema 不受我们控制, **不能纳入 Ale
+ 3. **落后 head**: 先用 sqlite3 **online backup API** 写 `{db}.pre-migrate-{oldrev}-{utc}.bak` (含 WAL 一致快照; 同目录保留最近 5 份), 再升级.
+ 4. **迁移连接**单独 `autocommit=False` + Alembic `transactional_ddl=True`: 单次 revision 内 DDL 与 `alembic_version` 同事务, 失败则回滚, 避免「表已创建但版本未升」的半成品. 业务连接不修改事务模式, 仍只开 WAL + FK.
  
 -自用水印与上游迁移通过 `src/amane/db/migrations/versions/610da6db7500_合并水印与上游数据库升级.py::down_revision` 合并为单一终点; 已发布迁移的标识与父版本保持稳定, 保证既有数据库补齐尚未执行的分支.
 +自用水印与上游迁移通过 `src/amane/db/migrations/versions/0bbd0974b7c7_合并上游清理任务与自用水印迁移.py::down_revision` 合并为单一终点; 已发布迁移的标识与父版本保持稳定, 保证既有数据库补齐尚未执行的分支.
@@ -13,7 +13,7 @@ index a906e41..a1d4d79 100644
  
 diff --git "a/src/amane/db/migrations/versions/0bbd0974b7c7_\345\220\210\345\271\266\344\270\212\346\270\270\346\270\205\347\220\206\344\273\273\345\212\241\344\270\216\350\207\252\347\224\250\346\260\264\345\215\260\350\277\201\347\247\273.py" "b/src/amane/db/migrations/versions/0bbd0974b7c7_\345\220\210\345\271\266\344\270\212\346\270\270\346\270\205\347\220\206\344\273\273\345\212\241\344\270\216\350\207\252\347\224\250\346\260\264\345\215\260\350\277\201\347\247\273.py"
 new file mode 100644
-index 0000000..1de5f4a
+index 0000000000000000000000000000000000000000..1de5f4a58d6bb9c683564d609c1bace5ad8399a2
 --- /dev/null
 +++ "b/src/amane/db/migrations/versions/0bbd0974b7c7_\345\220\210\345\271\266\344\270\212\346\270\270\346\270\205\347\220\206\344\273\273\345\212\241\344\270\216\350\207\252\347\224\250\346\260\264\345\215\260\350\277\201\347\247\273.py"
 @@ -0,0 +1,23 @@
@@ -41,7 +41,7 @@ index 0000000..1de5f4a
 +def downgrade() -> None:
 +    pass
 diff --git a/tests/db/test_liu1443452494_watermark_migration.py b/tests/db/test_liu1443452494_watermark_migration.py
-index bc77436..b2eab74 100644
+index bc77436209caef87bfb309b2ceccf19381d86e23..b2eab74aa4dde0b00e7268b0a776fac2eb8d6a9e 100644
 --- a/tests/db/test_liu1443452494_watermark_migration.py
 +++ b/tests/db/test_liu1443452494_watermark_migration.py
 @@ -50,8 +50,10 @@ def test_watermark_migration_preserves_existing_media(tmp_path: Path) -> None:

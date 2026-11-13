@@ -1,8 +1,8 @@
 diff --git a/docs/dev/frontend.md b/docs/dev/frontend.md
-index c5b8bec..4dc1a3b 100644
+index 9197371d9e7ecc418605019516e2120a6729ace8..88e7a2fea146d8f4bc1120faab5e1195ee9d43a6 100644
 --- a/docs/dev/frontend.md
 +++ b/docs/dev/frontend.md
-@@ -75,6 +75,8 @@ Settings、任务提交、定时创建、metadata 编辑共用 `components/schem
+@@ -79,6 +79,8 @@ Settings、任务提交、定时创建、metadata 编辑共用 `components/schem
  
  ## 实时与状态
  
@@ -12,10 +12,10 @@ index c5b8bec..4dc1a3b 100644
  
  | 数据 | 存储位置 |
 diff --git a/docs/dev/observability.md b/docs/dev/observability.md
-index dcc9bce..d352837 100644
+index 28dcd130f2558b07206c1bc5178eb043d6ab742c..ac5ad978dd604033ac4b718d9566c9807b1497b5 100644
 --- a/docs/dev/observability.md
 +++ b/docs/dev/observability.md
-@@ -84,6 +84,8 @@ ORGANIZE / REFRESH 全量回放、浏览器 HAR、回放写生产 DB / 移动用
+@@ -86,6 +86,8 @@ ORGANIZE / REFRESH 全量回放、浏览器 HAR、回放写生产 DB / 移动用
  
  ## 排障速查
  
@@ -25,7 +25,7 @@ index dcc9bce..d352837 100644
  |------|------|
  | 无 task.log | worker 未 claim 或 Recorder 未 begin |
 diff --git a/src/amane/api/routes/__init__.py b/src/amane/api/routes/__init__.py
-index 299081e..c958c20 100644
+index 299081e4b14543f08bf2a9c93da90b16d5635f2a..c958c20efd384dfc2e2268ed9e2fdd32dc0f38c1 100644
 --- a/src/amane/api/routes/__init__.py
 +++ b/src/amane/api/routes/__init__.py
 @@ -12,6 +12,7 @@ from .feeds import router as feeds_router
@@ -46,7 +46,7 @@ index 299081e..c958c20 100644
  router.include_router(plugins_router)
 diff --git a/src/amane/api/routes/liu1443452494_processing_log.py b/src/amane/api/routes/liu1443452494_processing_log.py
 new file mode 100644
-index 0000000..04ad496
+index 0000000000000000000000000000000000000000..04ad496b25928471fff5da02e8ed6cbf48d81b57
 --- /dev/null
 +++ b/src/amane/api/routes/liu1443452494_processing_log.py
 @@ -0,0 +1,89 @@
@@ -140,10 +140,10 @@ index 0000000..04ad496
 +        response.notices.append("暂无可关联的处理记录；旧整理日志未记录番号时无法确认归属。")
 +    return response
 diff --git a/src/amane/handlers/file.py b/src/amane/handlers/file.py
-index 7aca66fd8748c44fcb50ab9438a98aca69b966e5..c1cb6609b3e25c6b3c675959e695f9cd22c1080a 100644
+index 1c51b9402bb87ca9569f2b50783eaece10c53482..3c0231cf34a0852b37f316d869d0a7e74aa98698 100644
 --- a/src/amane/handlers/file.py
 +++ b/src/amane/handlers/file.py
-@@ -16,6 +16,7 @@ from ..media import ResourceStore, apply_cover_watermarks_from_info, crop_poster
+@@ -17,6 +17,7 @@ from ..media import ResourceStore, allows_poster_crop, apply_cover_watermarks_fr
  from ..media import write_nfo as write_nfo_file
  from ..media.resource_store import internal_url_hash
  from ..net.http import WebClient
@@ -151,7 +151,7 @@ index 7aca66fd8748c44fcb50ab9438a98aca69b966e5..c1cb6609b3e25c6b3c675959e695f9cd
  from ..observability.models import OrganizeConflict, OrganizeConflictReason
  from ..organize import (
      EXTRAFANART_NAME_TEMPLATE_DEFAULT,
-@@ -164,6 +165,7 @@ async def execute_file_operations(
+@@ -165,6 +166,7 @@ async def execute_file_operations(
      # 写入 NFO.
      if org_result.outcome is PlaceOutcome.PLACED and org_result.dest and write_nfo:
          await write_nfo_file(metadata, paths.nfo, file_info=file_info)
@@ -159,31 +159,15 @@ index 7aca66fd8748c44fcb50ab9438a98aca69b966e5..c1cb6609b3e25c6b3c675959e695f9cd
  
      # 字幕按模板落到 video_dest 侧.
      subtitle_conflicts: list[SubtitleConflict] = []
-@@ -312,7 +314,6 @@ def _copy_into_library(src: Path, dst: Path) -> None:
-     """
-     try:
-         shutil.copy2(src, dst)
--        return
-     except OSError as first:
-         # 内容可能已经写好, 重拷一次以区分内容失败与元数据失败: 内容失败会在此再次抛出.
-         try:
-@@ -327,10 +328,11 @@ def _copy_into_library(src: Path, dst: Path) -> None:
-                 copyfile_error=str(second),
-             )
-             raise
--    try:
--        shutil.copystat(src, dst)
--    except OSError as exc:
--        logger.debug("copy metadata skipped", src=str(src), dst=str(dst), error=str(exc))
-+        try:
-+            shutil.copystat(src, dst)
-+        except OSError as exc:
-+            logger.debug("copy metadata skipped", src=str(src), dst=str(dst), error=str(exc))
-+    record_copied_file(src, dst)
+@@ -322,6 +324,7 @@ def _write_into_library(source: Path, target: Path) -> None:
+             tmp.unlink(missing_ok=True)
+         except OSError as exc:
+             logger.debug("temp file cleanup skipped", path=str(tmp), error=str(exc))
++    record_copied_file(source, target)
  
  
  @in_thread
-@@ -548,10 +550,26 @@ class OrganizeHandler(TaskHandler[OrganizePayload, OrganizeResult]):
+@@ -548,10 +551,26 @@ class OrganizeHandler(TaskHandler[OrganizePayload, OrganizeResult]):
                      mf_path = Path(mf.path)
                      missing = await existing_disk_path(mf_path, follow_symlinks=False) is None
                      if missing or not is_descendant(mf_path, library_root) or is_in_trash(mf_path):
@@ -210,7 +194,7 @@ index 7aca66fd8748c44fcb50ab9438a98aca69b966e5..c1cb6609b3e25c6b3c675959e695f9cd
                              skipped += 1
                          else:
                              # MEDIA, 以及 classify 返回 None 的已索引行 (不在当前扩展名白名单,
-@@ -577,30 +595,47 @@ class OrganizeHandler(TaskHandler[OrganizePayload, OrganizeResult]):
+@@ -577,30 +596,47 @@ class OrganizeHandler(TaskHandler[OrganizePayload, OrganizeResult]):
                  path_str = media_file.path
                  file_path = Path(path_str)
                  if media_file.metadata_id is None:
@@ -271,7 +255,7 @@ index 7aca66fd8748c44fcb50ab9438a98aca69b966e5..c1cb6609b3e25c6b3c675959e695f9cd
                      skipped += 1
                      await self.report_progress(i, total, file_path.name)
 diff --git a/src/amane/handlers/scrape.py b/src/amane/handlers/scrape.py
-index ae3cdc0..16e4a8d 100644
+index 4d597a76c0974c6f2f73fab64162181935fed81c..2cb4e5f4003d027582f6e5d89055ff11cfdd0883 100644
 --- a/src/amane/handlers/scrape.py
 +++ b/src/amane/handlers/scrape.py
 @@ -90,6 +90,12 @@ class ScrapeHandler(TaskHandler[ScrapePayload, ScrapeResult]):
@@ -288,7 +272,7 @@ index ae3cdc0..16e4a8d 100644
          # 仅当本次可用来源声明需要指纹时计算 oshash.
          file_hash = file.oshash if file else None
 diff --git a/src/amane/media/liu1443452494_image_quality.py b/src/amane/media/liu1443452494_image_quality.py
-index c0b0149..70a3df3 100644
+index c0b0149895adac82eeaaab36b521e585f391f8cc..70a3df3d494c07b292971c1659c0d0ccbd8c7318 100644
 --- a/src/amane/media/liu1443452494_image_quality.py
 +++ b/src/amane/media/liu1443452494_image_quality.py
 @@ -48,10 +48,13 @@ def dimensions_improve(candidate: tuple[int, int], current: tuple[int, int] | No
@@ -374,7 +358,7 @@ index c0b0149..70a3df3 100644
              return list(dict.fromkeys([*previous, *self._attempts]))
          return [candidate.url for candidate in ranked] + [
 diff --git a/src/amane/media/liu1443452494_posters.py b/src/amane/media/liu1443452494_posters.py
-index 2c5b1b5..d0219ea 100644
+index 2c5b1b5bb5d3497651c943c3abea837467f4dcb2..d0219ea7cdf803854cbd7e525075f78d145fd716 100644
 --- a/src/amane/media/liu1443452494_posters.py
 +++ b/src/amane/media/liu1443452494_posters.py
 @@ -3,7 +3,7 @@
@@ -646,20 +630,20 @@ index 2c5b1b5..d0219ea 100644
 +        else:
 +            structlog.get_logger().info("已取得有效日亚海报，跳过标题搜索")
 diff --git a/src/amane/media/pipeline.py b/src/amane/media/pipeline.py
-index 08552a2..5fa5b75 100644
+index b43e29607caf6c374c7c46ead56d368362c8ec62..99598ec6764b49897c9caca5e41708688be3dcb5 100644
 --- a/src/amane/media/pipeline.py
 +++ b/src/amane/media/pipeline.py
-@@ -115,7 +115,8 @@ async def materialize_images(
+@@ -129,7 +129,8 @@ async def materialize_images(
          kinds.discard(DownloadableResource.poster)
  
      # 裁剪使用同一份按文件大小选定的封面，包括未选择输出封面的情况。
 -    thumbs = ImagePool(store, client)
 +    logger.info("图片处理设置", download_kinds=sorted(kinds), locked_fields=sorted(locked_fields))
 +    thumbs = ImagePool(store, client, image_kind="封面")
-     need_thumb = DownloadableResource.thumb in kinds or (
-         DownloadableResource.poster in kinds and config.scraping.crop_poster
-     )
-@@ -135,7 +136,7 @@ async def materialize_images(
+     need_thumb = DownloadableResource.thumb in kinds or (DownloadableResource.poster in kinds and crop_enabled)
+     if need_thumb:
+         if "thumb_urls" in locked_fields:
+@@ -147,7 +148,7 @@ async def materialize_images(
          list(previous_poster_urls or poster_urls) if "poster_urls" in locked_fields else list(poster_urls)
      )
      if DownloadableResource.poster in kinds:
@@ -668,13 +652,15 @@ index 08552a2..5fa5b75 100644
          await posters.acquire(poster_urls)
          if poster_query is not None:
              try:
-@@ -152,6 +153,23 @@ async def materialize_images(
+@@ -164,6 +165,25 @@ async def materialize_images(
          crop_size = (min(thumb_size[0], int(thumb_size[1] * ratio)), thumb_size[1]) if thumb_size else (0, 0)
          cropped = False
  
 +        crop_reason = "符合裁剪条件，且裁剪尺寸严格改善"
 +        if not config.scraping.crop_poster:
 +            crop_reason = "裁剪功能未启用"
++        elif not allows_poster_crop(content_type):
++            crop_reason = "该内容类型不执行自动裁切"
 +        elif thumb is None:
 +            crop_reason = "没有有效封面原图"
 +        elif not should_crop_poster(thumb_size, cand_size, skip_ratio=config.scraping.poster_crop_skip_ratio):
@@ -690,9 +676,9 @@ index 08552a2..5fa5b75 100644
 +        )
 +
          if (
-             config.scraping.crop_poster
+             crop_enabled
              and should_crop_poster(thumb_size, cand_size, skip_ratio=config.scraping.poster_crop_skip_ratio)
-@@ -167,14 +185,27 @@ async def materialize_images(
+@@ -179,14 +199,27 @@ async def materialize_images(
              try:
                  crop_res = await store.acquire_derived(thumb.locator, "crop", args, crop_producer)
              except Exception as exc:
@@ -721,9 +707,9 @@ index 08552a2..5fa5b75 100644
          if not cropped and poster is not None:
              res = await store.get_by_url(poster.locator)
              if res:
-@@ -204,7 +235,7 @@ async def materialize_images(
+@@ -213,7 +246,7 @@ async def materialize_images(
          ),
-         trailer_urls=_success_first(trailer_urls, trailer_ok),
+         trailer_urls=_winner_first(trailer_urls, trailer_winner),
      )
 -    logger.debug(
 +    logger.info(
@@ -732,7 +718,7 @@ index 08552a2..5fa5b75 100644
          poster=out.poster_urls[:1],
 diff --git a/src/amane/observability/liu1443452494_process_events.py b/src/amane/observability/liu1443452494_process_events.py
 new file mode 100644
-index 0000000..6c95739
+index 0000000000000000000000000000000000000000..6c9573951a7a88ca7ab2e9a8d8c038ebeb500730
 --- /dev/null
 +++ b/src/amane/observability/liu1443452494_process_events.py
 @@ -0,0 +1,44 @@
@@ -782,7 +768,7 @@ index 0000000..6c95739
 +        current().warning("资源已复制但大小读取失败", source_path=str(source), target_path=str(target), error=str(exc))
 diff --git a/src/amane/observability/liu1443452494_processing_log.py b/src/amane/observability/liu1443452494_processing_log.py
 new file mode 100644
-index 0000000..9d592f9
+index 0000000000000000000000000000000000000000..9d592f91c57f1f44205caaa4f673333bc572b6cf
 --- /dev/null
 +++ b/src/amane/observability/liu1443452494_processing_log.py
 @@ -0,0 +1,946 @@
@@ -1734,7 +1720,7 @@ index 0000000..9d592f9
 +    return report
 diff --git a/src/amane/observability/liu1443452494_search_stats.py b/src/amane/observability/liu1443452494_search_stats.py
 new file mode 100644
-index 0000000..f24fdbd
+index 0000000000000000000000000000000000000000..f24fdbd7b977d9487755bb216770c1245c218e16
 --- /dev/null
 +++ b/src/amane/observability/liu1443452494_search_stats.py
 @@ -0,0 +1,69 @@
@@ -1809,10 +1795,10 @@ index 0000000..f24fdbd
 +        return self
 diff --git a/tests/api/test_liu1443452494_processing_log.py b/tests/api/test_liu1443452494_processing_log.py
 new file mode 100644
-index 0000000..c1b2e22
+index 0000000000000000000000000000000000000000..58b1b852e60c15609608eae11ee47c50852e2d32
 --- /dev/null
 +++ b/tests/api/test_liu1443452494_processing_log.py
-@@ -0,0 +1,187 @@
+@@ -0,0 +1,199 @@
 +"""两类详情日志独立选取，覆盖自动整理、分页、子任务、失败与单类缺失。"""
 +
 +from datetime import UTC, datetime, timedelta
@@ -1834,7 +1820,13 @@ index 0000000..c1b2e22
 +
 +
 +async def recorded_task(
-+    repo: Repository, kind: TaskType, start: datetime, finish: datetime, number: str | None = None
++    repo: Repository,
++    kind: TaskType,
++    start: datetime,
++    finish: datetime,
++    number: str | None = None,
++    *,
++    error: str | None = None,
 +) -> Task:
 +    task = await repo.create_task(kind, {"number": number} if number else {"library_id": 1})
 +    assert task.id is not None
@@ -1842,7 +1834,8 @@ index 0000000..c1b2e22
 +        claimed = await repo.claim_next_task()
 +    assert claimed is not None and claimed.id == task.id
 +    with patch("amane.db.repos.tasks._utcnow", return_value=finish):
-+        await repo.complete_task(task.id)
++        changed = await repo.complete_task(task.id) if error is None else await repo.fail_task(task.id, error)
++    assert changed
 +    saved = await repo.get_task(task.id)
 +    assert saved is not None
 +    return saved
@@ -1928,7 +1921,9 @@ index 0000000..c1b2e22
 +    with patch("amane.db.repos.tasks._utcnow", return_value=base + timedelta(seconds=20)):
 +        for task in unrelated:
 +            assert task.id is not None
-+            await repo.complete_task(task.id)
++            claimed = await repo.claim_next_task()
++            assert claimed is not None and claimed.id == task.id
++            assert await repo.complete_task(task.id)
 +    result = ProcessingLogResponse.model_validate((await client.get(endpoint)).json())
 +    assert [record.task_id for record in result.records] == [scrape.id, batch.id]
 +
@@ -1951,11 +1946,14 @@ index 0000000..c1b2e22
 +    assert [record.task_id for record in result.records] == [scrape.id, batch.id]
 +
 +    failed = await recorded_task(
-+        repo, TaskType.SCRAPE, base + timedelta(seconds=22), base + timedelta(seconds=23), "ABP-901"
++        repo,
++        TaskType.SCRAPE,
++        base + timedelta(seconds=22),
++        base + timedelta(seconds=24),
++        "ABP-901",
++        error="站点请求失败",
 +    )
 +    assert failed.id is not None
-+    with patch("amane.db.repos.tasks._utcnow", return_value=base + timedelta(seconds=24)):
-+        await repo.fail_task(failed.id, "站点请求失败")
 +    result = ProcessingLogResponse.model_validate((await client.get(endpoint)).json())
 +    assert [record.task_id for record in result.records] == [failed.id, batch.id]
 +    assert result.records[0].status is TaskStatus.FAILED
@@ -2002,10 +2000,10 @@ index 0000000..c1b2e22
 +    assert result.records[0].task_type == "scrape"
 diff --git a/tests/handlers/test_liu1443452494_processing_events.py b/tests/handlers/test_liu1443452494_processing_events.py
 new file mode 100644
-index 0000000..6300f54
+index 0000000000000000000000000000000000000000..9d993bbf4cca2aac86b098c5c262823a70af1b97
 --- /dev/null
 +++ b/tests/handlers/test_liu1443452494_processing_events.py
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,141 @@
 +"""正常日志级别记录图片数据，批量整理的日志携带当前文件归属。"""
 +
 +import logging
@@ -2026,6 +2024,7 @@ index 0000000..6300f54
 +from amane.observability.liu1443452494_processing_log import build_report, read_log
 +from amane.observability.logging import setup_logging
 +from amane.observability.recorder import Recorder
++from amane.parsing import ContentType
 +from tests.media.test_liu1443452494_image_quality import (
 +    PosterClient,
 +    image_bytes,
@@ -2072,6 +2071,7 @@ index 0000000..6300f54
 +                cast(WebClient, client),
 +                config,
 +                tmp_path,
++                content_type=ContentType.CENSORED,
 +                poster_query=poster_query(),
 +            )
 +            task.status = TaskStatus.DONE
@@ -2147,7 +2147,7 @@ index 0000000..6300f54
 +        assert str(library_root / f"{other}.mp4") not in report.model_dump_json()
 diff --git a/tests/media/test_liu1443452494_search_stats.py b/tests/media/test_liu1443452494_search_stats.py
 new file mode 100644
-index 0000000..0d0a673
+index 0000000000000000000000000000000000000000..0d0a6730fe5c24008806ab185806f5147ce79fd9
 --- /dev/null
 +++ b/tests/media/test_liu1443452494_search_stats.py
 @@ -0,0 +1,290 @@
@@ -2443,7 +2443,7 @@ index 0000000..0d0a673
 +    assert "raw private error" not in stats.model_dump_json()
 diff --git a/tests/observability/test_liu1443452494_processing_log.py b/tests/observability/test_liu1443452494_processing_log.py
 new file mode 100644
-index 0000000..868405b
+index 0000000000000000000000000000000000000000..868405bd6b7c2d4d0bf808a3625ffd0c8b63aab6
 --- /dev/null
 +++ b/tests/observability/test_liu1443452494_processing_log.py
 @@ -0,0 +1,679 @@
@@ -3128,7 +3128,7 @@ index 0000000..868405b
 +    assert all(value not in text for value in ("https://", "private-token", "<script>", "Traceback", "0 条"))
 diff --git a/web/src/components/media/liu1443452494-processing-log.module.css b/web/src/components/media/liu1443452494-processing-log.module.css
 new file mode 100644
-index 0000000..37eed14
+index 0000000000000000000000000000000000000000..37eed141dbfab44eeb761138f8fba9803a6c87c7
 --- /dev/null
 +++ b/web/src/components/media/liu1443452494-processing-log.module.css
 @@ -0,0 +1,172 @@
@@ -3306,7 +3306,7 @@ index 0000000..37eed14
 +}
 diff --git a/web/src/components/media/liu1443452494-processing-log.tsx b/web/src/components/media/liu1443452494-processing-log.tsx
 new file mode 100644
-index 0000000..b3c98c6
+index 0000000000000000000000000000000000000000..b3c98c6394fba415a2bca6ed32c5556d6737d75b
 --- /dev/null
 +++ b/web/src/components/media/liu1443452494-processing-log.tsx
 @@ -0,0 +1,293 @@
@@ -3604,7 +3604,7 @@ index 0000000..b3c98c6
 +  );
 +}
 diff --git a/web/src/routes/meta.$metadataId.tsx b/web/src/routes/meta.$metadataId.tsx
-index 6ef131e..9442824 100644
+index 6ef131e7de1831301b84f3d02f4302d9b9e8fc59..9442824bedfd13b19ac3f612293bcf79c795d79a 100644
 --- a/web/src/routes/meta.$metadataId.tsx
 +++ b/web/src/routes/meta.$metadataId.tsx
 @@ -57,6 +57,7 @@ import {

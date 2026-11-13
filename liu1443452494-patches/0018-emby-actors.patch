@@ -1,5 +1,5 @@
 diff --git a/docs/dev/config.md b/docs/dev/config.md
-index ce7cbc30..d485c569 100644
+index 60b6b2e9e60a01ba0ab5dbc87d39bfa5fd1e48d5..843cf34010e7effd592026671b474fa3f4c02607 100644
 --- a/docs/dev/config.md
 +++ b/docs/dev/config.md
 @@ -95,13 +95,15 @@ Worker 替换不取消运行中任务: `_rebuild()` 构建新 worker 后旧 work
@@ -21,7 +21,7 @@ index ce7cbc30..d485c569 100644
  
  只有 `auto_maintain`: 打开且视觉塔就绪时, 图片变化的条目立即增量重算且视觉塔常驻; 否则只删变动图片的旧向量, 等下次索引重建.
 diff --git a/docs/dev/frontend.md b/docs/dev/frontend.md
-index 6920260e745a305fe4ee6b7b0e802f015d12407c..e8ed071bcbf1e7d6bec9ead5953abf6c81fb3908 100644
+index c7d3011922bc5ca56978e607f4f841def2047f48..cc41648634be79640bebb979687553d425c31c00 100644
 --- a/docs/dev/frontend.md
 +++ b/docs/dev/frontend.md
 @@ -73,6 +73,8 @@ Settings、任务提交、定时创建、metadata 编辑共用 `components/schem
@@ -34,7 +34,7 @@ index 6920260e745a305fe4ee6b7b0e802f015d12407c..e8ed071bcbf1e7d6bec9ead5953abf6c
  
  `/` 的实现边界见 [agent.md](agent.md). 前端四点: 对话经 AG-UI (`@ag-ui/client` + `@assistant-ui/react-ag-ui`), 不经 hey-api 也不经 `/ws`, 且 `@ag-ui/client` 必须停留在 0.0.x —— react-ag-ui 的 peer 依赖为 `^0.0.59`, 1.x 调整了 `Message` 内容部件的类型, 与之不兼容; 请求统一经由 `lib/api-token.ts` 的 `apiFetch` (纯透传, 只把 401 转成登录门); 读 assistant-ui 线程状态的 hook (`useAuiState` / `useAgUi*`) 须在 `AssistantRuntimeProvider` 之内 — 持有 provider 的那个组件读不到, 要另起子组件; 展示只认回放行 — `lib/agent/trace.ts::foldTrace` 的产物直接渲染, 本页发起的回合也跟随 `.../agui/events` (从 `after_seq` 接上, 回合未收尾时重开), 运行时的消息虽同步同一份 fold 但不参与渲染, 因此直播与刷新同形, 决不允许另建一份消息状态.
 diff --git a/docs/dev/observability.md b/docs/dev/observability.md
-index d3528370..0fd4d65f 100644
+index ac5ad978dd604033ac4b718d9566c9807b1497b5..093256b7d2149587e6929885b3250ab965deba50 100644
 --- a/docs/dev/observability.md
 +++ b/docs/dev/observability.md
 @@ -9,6 +9,8 @@
@@ -47,7 +47,7 @@ index d3528370..0fd4d65f 100644
  
  `observability/logging.py` 把 structlog 同时输出到三处, 另有一条 EventBus `log` event 流转到前端 Logs 页:
 diff --git a/docs/dev/task-system.md b/docs/dev/task-system.md
-index b8f34da0..f84eb56f 100644
+index d945e504c997568df28ce3a1fe9a278a9a096a14..88a4b1c9b176a68a39bdd9900664ceae2fac42fc 100644
 --- a/docs/dev/task-system.md
 +++ b/docs/dev/task-system.md
 @@ -17,6 +17,7 @@
@@ -90,10 +90,10 @@ index b8f34da0..f84eb56f 100644
  
  Metadata 是一等公民, CLEANUP **从不**因「无关联 MediaFile」删除 Metadata. 两个独立开关: `remove_missing_files` 删路径在磁盘上不存在的 MediaFile 索引行; `remove_unreferenced_resources` 删不被任何 Metadata / Actor 媒体 URL 字段引用的 Resource. 存活引用从 `poster_urls` / `thumb_urls` / `trailer_urls` / `extrafanart_urls` 与 `Actor.image_urls` 收集, 匹配规则见 [data-model.md](data-model.md) Resource 一节.
 diff --git a/docs/user/media-server.md b/docs/user/media-server.md
-index 6993c11f..60974af9 100644
+index fafdcf6c814034b612107b92882a6c2493bd6f70..b2be7d79219e22b316649694aa51a702b3320866 100644
 --- a/docs/user/media-server.md
 +++ b/docs/user/media-server.md
-@@ -41,6 +41,21 @@ Amane 与 Emby / Jellyfin 分工互补: 媒体服务器管理视频文件, 负
+@@ -43,6 +43,21 @@ Amane 与 Emby / Jellyfin 分工互补: 媒体服务器管理视频文件, 负
  
  「设置 → 演员刮削 → 自动推送」默认关闭. 开启之后, 演员刮削成功会再提交一个只包含该演员的推送任务, 优先级较低, 不抢占手动提交的任务; 媒体服务器尚未配置时不会提交. 推送失败不影响演员刮削的结果.
  
@@ -116,7 +116,7 @@ index 6993c11f..60974af9 100644
  
  使用默认模板整理一部带外挂字幕的影片后, 目录结构如下:
 diff --git a/src/amane/api/models/tasks.py b/src/amane/api/models/tasks.py
-index c5c2d4b4..46f480c6 100644
+index 525b0d8d763b3087cc93b8909446851522c66395..9b255fecdfe5775c84fbd9a16e8246773c6da760 100644
 --- a/src/amane/api/models/tasks.py
 +++ b/src/amane/api/models/tasks.py
 @@ -16,6 +16,7 @@ from ...handlers import (
@@ -136,7 +136,7 @@ index c5c2d4b4..46f480c6 100644
      | SemanticIndexResult
      | SemanticBenchmarkResult,
 diff --git a/src/amane/api/routes/__init__.py b/src/amane/api/routes/__init__.py
-index c958c20e..78ffe1d5 100644
+index c958c20efd384dfc2e2268ed9e2fdd32dc0f38c1..78ffe1d5ecaf9811ee9e8ff06d9e6a3dd6afb731 100644
 --- a/src/amane/api/routes/__init__.py
 +++ b/src/amane/api/routes/__init__.py
 @@ -12,6 +12,7 @@ from .feeds import router as feeds_router
@@ -157,7 +157,7 @@ index c958c20e..78ffe1d5 100644
  router.include_router(media_router)
 diff --git a/src/amane/api/routes/liu1443452494_emby_actors.py b/src/amane/api/routes/liu1443452494_emby_actors.py
 new file mode 100644
-index 00000000..0a25ce96
+index 0000000000000000000000000000000000000000..0a25ce96505cd4948bfe9022dc7e7bdcd08be4fe
 --- /dev/null
 +++ b/src/amane/api/routes/liu1443452494_emby_actors.py
 @@ -0,0 +1,49 @@
@@ -211,7 +211,7 @@ index 00000000..0a25ce96
 +    assert task.id is not None
 +    return EmbyActorTaskResponse(task_id=task.id)
 diff --git a/src/amane/app/runtime.py b/src/amane/app/runtime.py
-index 8ac9c7ab..9f89d08b 100644
+index 8ac9c7abc354f442b2bcd16fff3a8919f8df0469..9f89d08ba8a6bb893c6d1488b6c92dbbe8dc8af0 100644
 --- a/src/amane/app/runtime.py
 +++ b/src/amane/app/runtime.py
 @@ -34,6 +34,7 @@ from ..handlers import (
@@ -233,7 +233,7 @@ index 8ac9c7ab..9f89d08b 100644
              repo,
              hot,
 diff --git a/src/amane/crawlers/factory.py b/src/amane/crawlers/factory.py
-index ccbb8edd..1ede5250 100644
+index ccbb8edd01009ae8f1103be56b3ff4f20d62eb67..1ede52505fb5e2364fc784763e1aadba2504d7f7 100644
 --- a/src/amane/crawlers/factory.py
 +++ b/src/amane/crawlers/factory.py
 @@ -189,3 +189,7 @@ class CrawlerFactory:
@@ -245,7 +245,7 @@ index ccbb8edd..1ede5250 100644
 +        """独立演员任务不传数据目录，来源实例与 gFriends 索引仅保留在当次任务内存中。"""
 +        return CrawlerFactory(self._http, self._site_configs, gfriends_repo=self._gfriends_repo)
 diff --git a/src/amane/db/models.py b/src/amane/db/models.py
-index f6deda35..a982378f 100644
+index c8a5e9ca15a612a11742947c1e9af75ed15fd25b..0c24e1644ef98cdc33de615a7bb6766381734ede 100644
 --- a/src/amane/db/models.py
 +++ b/src/amane/db/models.py
 @@ -47,6 +47,7 @@ class TaskType(StrEnum):
@@ -258,7 +258,7 @@ index f6deda35..a982378f 100644
  class RoutineType(StrEnum):
 diff --git a/src/amane/handlers/liu1443452494_emby_actors.py b/src/amane/handlers/liu1443452494_emby_actors.py
 new file mode 100644
-index 00000000..6a409b86
+index 0000000000000000000000000000000000000000..6a409b8631f5a0f67fb43ec896fd5d7d7c10ba31
 --- /dev/null
 +++ b/src/amane/handlers/liu1443452494_emby_actors.py
 @@ -0,0 +1,302 @@
@@ -565,7 +565,7 @@ index 00000000..6a409b86
 +        result.failed += 1
 +        cls._detail(result, name, message)
 diff --git a/src/amane/handlers/models.py b/src/amane/handlers/models.py
-index 4051da4b..94c2106a 100644
+index 4051da4b52ce392ddbbb366249b8711770127e87..94c2106a054990047f3a272e66d93bfadfaa9752 100644
 --- a/src/amane/handlers/models.py
 +++ b/src/amane/handlers/models.py
 @@ -4,13 +4,14 @@ from enum import StrEnum
@@ -616,7 +616,7 @@ index 4051da4b..94c2106a 100644
      requested: int
 diff --git a/src/amane/liu1443452494_emby_client.py b/src/amane/liu1443452494_emby_client.py
 new file mode 100644
-index 00000000..e1a3b83a
+index 0000000000000000000000000000000000000000..e1a3b83a6a9fc4443531db0a36d749499896b888
 --- /dev/null
 +++ b/src/amane/liu1443452494_emby_client.py
 @@ -0,0 +1,172 @@
@@ -793,7 +793,7 @@ index 00000000..e1a3b83a
 +        """错误记录仅保留状态信息，不包含可能携带人物资料的响应正文。"""
 +        MediaServerClient._raise_for_status(status, "")
 diff --git a/src/amane/observability/redact.py b/src/amane/observability/redact.py
-index 8b28994d..0ec75648 100644
+index 8b28994d35f9d7e97a99e6bee9c8a7dd3eb331f4..0ec7564826e033f4ac33a3537b53e42d3c002071 100644
 --- a/src/amane/observability/redact.py
 +++ b/src/amane/observability/redact.py
 @@ -16,6 +16,9 @@ _SCRAPE_HOT_KEYS: tuple[str, ...] = ("scraping", "network", "llm", "r18", "plugi
@@ -808,10 +808,10 @@ index 8b28994d..0ec75648 100644
      drop = {"watcher", "worker", "logging"}
 diff --git a/tests/api/test_liu1443452494_emby_actors.py b/tests/api/test_liu1443452494_emby_actors.py
 new file mode 100644
-index 00000000..f1ea16c7
+index 0000000000000000000000000000000000000000..2bcfe81c2fa012da0d43bc59f3e81519c59d325d
 --- /dev/null
 +++ b/tests/api/test_liu1443452494_emby_actors.py
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,97 @@
 +"""Emby 设置页的媒体库读取、提交校验及任务结果接线。"""
 +
 +from typing import TYPE_CHECKING
@@ -895,11 +895,14 @@ index 00000000..f1ea16c7
 +    assert task.json()["payload"] == payload
 +    filtered = await client.get("tasks", params={"type": "emby_actor_scrape"})
 +    assert filtered.status_code == 200 and filtered.json()["total"] == 1
-+    await repo.complete_task(
++    claimed = await repo.claim_next_task()
++    assert claimed is not None and claimed.id == task_id
++    assert await repo.complete_task(
 +        task_id, EmbyActorScrapeResult(requested=2, processed=2, updated=1, skipped=1).model_dump(mode="json")
 +    )
 +    finished = await client.get(f"tasks/{task_id}")
 +    assert finished.status_code == 200
++    assert finished.json()["status"] == "done"
 +    assert finished.json()["result"]["type"] == "emby_actor_scrape"
 +    assert finished.json()["result"]["processed"] == 2
 +
@@ -907,10 +910,10 @@ index 00000000..f1ea16c7
 +    unavailable = await client.get("media-server/emby/libraries")
 +    assert unavailable.status_code == 502 and "认证失败" in unavailable.json()["detail"]
 diff --git a/tests/api/test_tasks.py b/tests/api/test_tasks.py
-index 1150343a..d1dc18f5 100644
+index 36143f3c5251307c08cc75c482a0895eef68e295..4a1f5cb99d4d734ab57bd6ce3cbfa3c0ed2d31ad 100644
 --- a/tests/api/test_tasks.py
 +++ b/tests/api/test_tasks.py
-@@ -179,8 +179,10 @@ class TestSubmitTask:
+@@ -182,8 +182,10 @@ class TestSubmitTask:
          schema = await client.get("tasks/schema")
          assert schema.status_code == 200
          covered = set(schema.json()["discriminator"]["mapping"].keys())
@@ -925,7 +928,7 @@ index 1150343a..d1dc18f5 100644
      async def test_submit_semantic_benchmark(self, client: AsyncClient, stop_worker: None):
 diff --git a/tests/crawlers/test_liu1443452494_emby_factory.py b/tests/crawlers/test_liu1443452494_emby_factory.py
 new file mode 100644
-index 00000000..fa7d211c
+index 0000000000000000000000000000000000000000..fa7d211ccbfe3bc730cd95cef211affc6fa7f54a
 --- /dev/null
 +++ b/tests/crawlers/test_liu1443452494_emby_factory.py
 @@ -0,0 +1,39 @@
@@ -970,7 +973,7 @@ index 00000000..fa7d211c
 +    assert list(tmp_path.iterdir()) == [cache]
 diff --git a/tests/handlers/test_liu1443452494_emby_actors.py b/tests/handlers/test_liu1443452494_emby_actors.py
 new file mode 100644
-index 00000000..32b31523
+index 0000000000000000000000000000000000000000..32b31523391e71162eca6e31f13a3f5d4f6821ba
 --- /dev/null
 +++ b/tests/handlers/test_liu1443452494_emby_actors.py
 @@ -0,0 +1,529 @@
@@ -1504,7 +1507,7 @@ index 00000000..32b31523
 +    assert outcome.result.updated == updated and outcome.result.images == images
 +    assert "不允许保存的写入响应正文" not in str(outcome.as_dict())
 diff --git a/tests/handlers/test_protocol.py b/tests/handlers/test_protocol.py
-index f8a9870b..b41d6908 100644
+index f8a9870bfede5d6413c59bae81fad4e98238c90a..b41d6908a2e336ab5fa6f9705b403d13198567c4 100644
 --- a/tests/handlers/test_protocol.py
 +++ b/tests/handlers/test_protocol.py
 @@ -18,6 +18,7 @@ from amane.handlers.models import (
@@ -1528,7 +1531,7 @@ index f8a9870b..b41d6908 100644
              metadata_id=7,
 diff --git a/tests/media_server/test_liu1443452494_emby_client.py b/tests/media_server/test_liu1443452494_emby_client.py
 new file mode 100644
-index 00000000..ffce4e35
+index 0000000000000000000000000000000000000000..ffce4e35758c5ad4696e29064987b3e1557eb82d
 --- /dev/null
 +++ b/tests/media_server/test_liu1443452494_emby_client.py
 @@ -0,0 +1,240 @@
@@ -1774,7 +1777,7 @@ index 00000000..ffce4e35
 +        assert await client.library_actors(["a"]) == []
 diff --git a/web/src/components/media/liu1443452494-emby-actors-panel.tsx b/web/src/components/media/liu1443452494-emby-actors-panel.tsx
 new file mode 100644
-index 00000000..822327f2
+index 0000000000000000000000000000000000000000..822327f221c523d991828cd9ccba7f7bd18961fb
 --- /dev/null
 +++ b/web/src/components/media/liu1443452494-emby-actors-panel.tsx
 @@ -0,0 +1,157 @@
@@ -1937,7 +1940,7 @@ index 00000000..822327f2
 +}
 diff --git a/web/src/components/media/liu1443452494-emby-actors.ts b/web/src/components/media/liu1443452494-emby-actors.ts
 new file mode 100644
-index 00000000..3221d976
+index 0000000000000000000000000000000000000000..3221d97637cedd67a282852d93bbf6d62268e867
 --- /dev/null
 +++ b/web/src/components/media/liu1443452494-emby-actors.ts
 @@ -0,0 +1,35 @@
@@ -1977,7 +1980,7 @@ index 00000000..3221d976
 +  };
 +}
 diff --git a/web/src/components/schema-form/schema-form.tsx b/web/src/components/schema-form/schema-form.tsx
-index f299b6c2..960ecdad 100644
+index f299b6c2afb313bf34759412ec09c9c9e664f78c..960ecdad81bbf608a9ecef597f5dabe5c9c81ac7 100644
 --- a/web/src/components/schema-form/schema-form.tsx
 +++ b/web/src/components/schema-form/schema-form.tsx
 @@ -151,6 +151,8 @@ interface SchemaFormProps {
@@ -2016,7 +2019,7 @@ index f299b6c2..960ecdad 100644
      </Stack>
    );
 diff --git a/web/src/components/task/task-result-panel.tsx b/web/src/components/task/task-result-panel.tsx
-index 2e62a6ec..d8f7c49b 100644
+index 2e62a6ec7e037fe21eec1ea1500cfbf0d7acc90f..d8f7c49b7b91b6c72c10230cca69ed3a8d8076f9 100644
 --- a/web/src/components/task/task-result-panel.tsx
 +++ b/web/src/components/task/task-result-panel.tsx
 @@ -81,6 +81,8 @@ function resultBranch(result: TaskResult, failed: boolean): ReactNode {
@@ -2076,7 +2079,7 @@ index 2e62a6ec..d8f7c49b 100644
    const { t } = useTranslation("tasks");
    return (
 diff --git a/web/src/i18n/locales/en/settings.json b/web/src/i18n/locales/en/settings.json
-index 6fd88354..d9010431 100644
+index 8c570565bf62a96bc6e880da08deeab599203f6f..3f506f79284ab5938896343f2eee4afaeef2a687 100644
 --- a/web/src/i18n/locales/en/settings.json
 +++ b/web/src/i18n/locales/en/settings.json
 @@ -14,6 +14,23 @@
@@ -2104,10 +2107,10 @@ index 6fd88354..d9010431 100644
      "loadError": "Failed to load configuration"
    },
 diff --git a/web/src/i18n/locales/en/tasks.json b/web/src/i18n/locales/en/tasks.json
-index 81229d32..85471109 100644
+index 7173166ebac6f7e29f46c20d6d98373cb1ab03ca..166a2d3b36fc6498b1ddcdab0f39821cad35b206 100644
 --- a/web/src/i18n/locales/en/tasks.json
 +++ b/web/src/i18n/locales/en/tasks.json
-@@ -82,7 +82,8 @@
+@@ -83,7 +83,8 @@
      "delete": "Delete",
      "semantic_index": "Semantic index",
      "semantic_benchmark": "Benchmark",
@@ -2117,7 +2120,7 @@ index 81229d32..85471109 100644
    },
    "loadMoreChildren": "Load more ({{count}})",
    "loadMoreChildren_one": "Load more ({{count}})",
-@@ -170,7 +171,8 @@
+@@ -174,7 +175,8 @@
      "actorPushNotFound": "Not found {{value}}",
      "actorPushNoImage": "No image {{value}}",
      "actorPushMissing": "Missing actors {{value}}",
@@ -2127,7 +2130,7 @@ index 81229d32..85471109 100644
    },
    "status": {
      "queued": "Queued",
-@@ -194,7 +196,8 @@
+@@ -198,7 +200,8 @@
        "delete": "Delete",
        "semantic_index": "Semantic index",
        "semantic_benchmark": "Benchmark",
@@ -2138,7 +2141,7 @@ index 81229d32..85471109 100644
      "cleanup": {
        "remove_missing_files": {
 diff --git a/web/src/i18n/locales/zh-CN/settings.json b/web/src/i18n/locales/zh-CN/settings.json
-index 0dbf2fe2..4a8a5f95 100644
+index b44f378b1ed283cb3a834548d0049837509a129c..258fba01e9eb963b2373930bff9376083d1b9559 100644
 --- a/web/src/i18n/locales/zh-CN/settings.json
 +++ b/web/src/i18n/locales/zh-CN/settings.json
 @@ -14,6 +14,23 @@
@@ -2166,10 +2169,10 @@ index 0dbf2fe2..4a8a5f95 100644
      "loadError": "加载配置失败"
    },
 diff --git a/web/src/i18n/locales/zh-CN/tasks.json b/web/src/i18n/locales/zh-CN/tasks.json
-index 4084a024..b9f1dbb4 100644
+index 58beadcf43574b50858e73f526c859abadd7f21a..91214757a73df193ea4823fe0b49b943a147ef6c 100644
 --- a/web/src/i18n/locales/zh-CN/tasks.json
 +++ b/web/src/i18n/locales/zh-CN/tasks.json
-@@ -70,7 +70,8 @@
+@@ -71,7 +71,8 @@
      "delete": "删除",
      "semantic_index": "语义索引",
      "semantic_benchmark": "性能测试",
@@ -2179,7 +2182,7 @@ index 4084a024..b9f1dbb4 100644
    },
    "loadMoreChildren": "加载更多 ({{count}})",
    "logView": {
-@@ -139,7 +140,8 @@
+@@ -143,7 +144,8 @@
      "actorPushNotFound": "未找到 {{value}}",
      "actorPushNoImage": "无头像 {{value}}",
      "actorPushMissing": "缺少演员 {{value}}",
@@ -2189,7 +2192,7 @@ index 4084a024..b9f1dbb4 100644
    },
    "status": {
      "queued": "排队中",
-@@ -162,7 +164,8 @@
+@@ -166,7 +168,8 @@
        "delete": "删除",
        "semantic_index": "语义索引",
        "semantic_benchmark": "性能测试",
@@ -2200,10 +2203,10 @@ index 4084a024..b9f1dbb4 100644
      "cleanup": {
        "remove_missing_files": {
 diff --git a/web/src/lib/exhaustive-maps.ts b/web/src/lib/exhaustive-maps.ts
-index a8339f80..1ba7e3fb 100644
+index ad10f22412ea4030f99096873feefc6fe4293d83..b40b4f72bb417ee48452a13107f5d078f789990a 100644
 --- a/web/src/lib/exhaustive-maps.ts
 +++ b/web/src/lib/exhaustive-maps.ts
-@@ -98,6 +98,7 @@ export const TASK_TYPES = exhaustiveTuple<TaskType>()(
+@@ -104,6 +104,7 @@ export const TASK_TYPES = exhaustiveTuple<TaskType>()(
    "semantic_index",
    "semantic_benchmark",
    "actor_push",
@@ -2212,7 +2215,7 @@ index a8339f80..1ba7e3fb 100644
  
  export const DOWNLOADABLE_RESOURCES = exhaustiveTuple<DownloadableResource>()(
 diff --git a/web/src/lib/task/display.ts b/web/src/lib/task/display.ts
-index 3051dd87..b3bf569b 100644
+index 3051dd874e33d02efdedc9014418ae17b63b3bc3..b3bf569b42cd27b63554a7a42cc732f764540f79 100644
 --- a/web/src/lib/task/display.ts
 +++ b/web/src/lib/task/display.ts
 @@ -41,6 +41,7 @@ export const TASK_ICONS: Record<TaskType, Icon> = exhaustiveRecord<TaskType>()({
@@ -2224,7 +2227,7 @@ index 3051dd87..b3bf569b 100644
  
  const EMPTY_CHILD_STATUS: Required<TaskChildStatusCounts> = {
 diff --git a/web/src/routes/settings.tsx b/web/src/routes/settings.tsx
-index a523b066..30e76b7c 100644
+index a523b06635fe1365a2d3bf588406e497767daa4e..30e76b7c5ce9738c8d3794aaf19c5cac7e230158 100644
 --- a/web/src/routes/settings.tsx
 +++ b/web/src/routes/settings.tsx
 @@ -16,6 +16,7 @@ import { createFileRoute } from "@tanstack/react-router";
@@ -2255,7 +2258,7 @@ index a523b066..30e76b7c 100644
                );
 diff --git a/web/tests/emby-actors.test.mjs b/web/tests/emby-actors.test.mjs
 new file mode 100644
-index 00000000..bf055e02
+index 0000000000000000000000000000000000000000..bf055e027f71a2e2f627c6a9120f7f7fac2cef0d
 --- /dev/null
 +++ b/web/tests/emby-actors.test.mjs
 @@ -0,0 +1,58 @@

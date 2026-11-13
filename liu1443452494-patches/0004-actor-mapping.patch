@@ -1,10 +1,10 @@
 diff --git a/docs/dev/data-model.md b/docs/dev/data-model.md
-index a43cf1391a7e379399fc5ad167cb12b18fbea46e..2a88e70c71880f71311cf53e43c849eeb280b6a0 100644
+index 6cbd493316ead502f6369901f86d3a2c7c5c5076..43607ed015f821856e759aa84ed198b59350597a 100644
 --- a/docs/dev/data-model.md
 +++ b/docs/dev/data-model.md
-@@ -136,6 +136,8 @@ PATCH 三态: **省略键** = 不更新 (`exclude_unset`); **显式值** = 写
+@@ -141,6 +141,8 @@ PATCH 三态: **省略键** = 不更新 (`exclude_unset`); **显式值** = 写
  
- `Metadata` 上的 `actors` / `tags` / `directors` (JSON list) 与 `studio` / `publisher` / `series` (标量) **仍是刮削聚合、NFO、路径模板的真值来源**. 分类实体表 + 关联表是**查询投影**: `upsert_metadata` / `update_metadata` 写入后重建 (按 name get-or-create; list 字段带 `position` 保序).
+ `Metadata` 上的 `actors` / `tags` / `directors` (JSON list) 与 `studio` / `publisher` / `series` (标量) **仍是刮削聚合、NFO、路径模板的真值来源**. 分类实体表 + 关联表是**查询投影**: `upsert_metadata` / `update_metadata` 写入后重建 (按 name get-or-create; list 字段带 `position` 保序, 值等于真值列表下标).
  
 +影片刮削在写入前经 `src/amane/liu1443452494_actor_mapping.py::map_actor_names` 读取数据目录的 `mapping_actor.xml`; 唯一匹配转换为标准名, 原名交给现有别名解析. 歧义与未匹配保留原始输入, raw 快照不变; 每次读取支持用户更新文件.
 +
@@ -12,7 +12,7 @@ index a43cf1391a7e379399fc5ad167cb12b18fbea46e..2a88e70c71880f71311cf53e43c849ee
  
  用户对爬取侧分类的改名 / 合并 / 删除意图落在 `FacetRule` (按 `(kind, source_name)` 唯一), **不**修改投影表本身:
 diff --git a/src/amane/handlers/scrape.py b/src/amane/handlers/scrape.py
-index 16f281b64b87371d8bc5231c66536cab014400c9..fe6e6eb5af71a0850269931a5cf676ba2732e560 100644
+index 2cb20215523884a2b15a269e5f6a9d29696d0c2e..b5b38a8db9247909155f26ef6366be0f9e3a6612 100644
 --- a/src/amane/handlers/scrape.py
 +++ b/src/amane/handlers/scrape.py
 @@ -8,6 +8,7 @@ from ..crawlers.models import SearchQuery
@@ -23,7 +23,7 @@ index 16f281b64b87371d8bc5231c66536cab014400c9..fe6e6eb5af71a0850269931a5cf676ba
  from ..media import materialize_images
  from ..observability import current
  from ..observability.models import SiteOutcomeKind
-@@ -172,7 +173,7 @@ class ScrapeHandler(TaskHandler[ScrapePayload, ScrapeResult]):
+@@ -173,7 +174,7 @@ class ScrapeHandler(TaskHandler[ScrapePayload, ScrapeResult]):
          await self.report_progress(len(SCALAR_FIELDS) + 1, progress_total, "materialize")
  
          # 写库并关联 MediaFile. Metadata.actors 仍是展示名; 性别写入 Actor 空位.
