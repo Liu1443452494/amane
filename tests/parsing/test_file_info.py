@@ -123,6 +123,18 @@ CASES: list[object] = [
     # 帧率后缀仍识别分辨率
     _Case("ABC-123.1080p60.mp4", definition="1080p", number="ABC-123"),
     _Case("ABC-123.2160p30.mp4", definition="4K", number="ABC-123"),
+    # 帧率 / 位深标记整段剥除: 尾段不得被无短横线素人规则吸成番号
+    _Case("/media/ABC-123-60FPS-98T.mp4", number="ABC-123", content_type=ContentType.CENSORED),
+    _Case("/media/ABC-123-30fps-98T.mp4", number="ABC-123", content_type=ContentType.CENSORED),
+    _Case("/media/ABC-123.120FPS.98T.mp4", number="ABC-123", content_type=ContentType.CENSORED),
+    _Case("/media/ABC-123-10BIT-98T.mp4", number="ABC-123", content_type=ContentType.CENSORED),
+    _Case("/media/ABC-123-60FPS-1080p.mp4", definition="1080p", number="ABC-123", content_type=ContentType.CENSORED),
+    # 素人番号的数字前缀属于番号本身, 不得随标记剥除而丢失
+    _Case("/media/300MIUM-123-60FPS-98T.mp4", number="300MIUM-123", content_type=ContentType.AMATEUR),
+    _Case("/media/261ARA-423-30FPS-98T.mp4", number="261ARA-423", content_type=ContentType.AMATEUR),
+    # 标记是番号本身 (开头位置), 不剥除
+    _Case("/media/60FPS-98T.mp4", number="60FPS-98T", content_type=ContentType.AMATEUR),
+    _Case("/media/60FPS-98T-1080p.mp4", definition="1080p", number="60FPS-98T", content_type=ContentType.AMATEUR),
     # 分辨率数字不得被番号规则吸走: 无短横线的日期号 + 分辨率
     _Case("120115_318-mura-1080p.mp4", definition="1080p", number="120115_318"),
     _Case("120115_318-mura-720p.mp4", definition="720p", number="120115_318"),
@@ -178,6 +190,9 @@ CASES: list[object] = [
     _Case("/media/FC2PPV1234567.mp4", number="FC2-1234567", content_type=ContentType.FC2),
     _Case("/media/HEYZO-1234.mp4", number="HEYZO-1234", content_type=ContentType.UNCENSORED),
     _Case("/media/H4610-ki221218.mp4", number="H4610-KI221218", content_type=ContentType.UNCENSORED),
+    # gol 系列只有三位序号, 与 ori / hitozuma / ki 等四位以上的系列同属站内写法
+    _Case("/media/H4610-gol207.mp4", number="H4610-GOL207", content_type=ContentType.UNCENSORED),
+    _Case("/media/H0930-gol143.mp4", number="H0930-GOL143", content_type=ContentType.UNCENSORED),
     # heydouga 的两段数字都属于番号; 省略短横线与 4K / 分集尾标不改变结果
     _Case(
         "/media/heydouga-4037-1002-4K.mp4",
@@ -208,6 +223,11 @@ CASES: list[object] = [
     _Case("/media/C0930-ki220519.mp4", number="C0930-KI220519", content_type=ContentType.UNCENSORED),
     _Case("/media/H0930-ki190101.mp4", number="H0930-KI190101", content_type=ContentType.UNCENSORED),
     _Case("/media/MCB3D-012.mp4", number="MCB3D-012", content_type=ContentType.UNCENSORED),
+    _Case("/media/MXX-13-1080p.mp4", definition="1080p", number="MXX-13", content_type=ContentType.UNCENSORED),
+    _Case("/media/[無碼]MCB-11.mp4", mosaic="uncensored", number="MCB-11", content_type=ContentType.UNCENSORED),
+    _Case("/media/MCBD-11-CD1.mp4", cd=1, number="MCBD-11", content_type=ContentType.UNCENSORED),
+    # 逐字前缀须连短横线相等, 同字母开头的其它厂牌番号仍是分类器的默认判定
+    _Case("/media/MERMAID-01.mp4", number="MERMAID-01", content_type=ContentType.CENSORED),
     # 纯数字后缀非站内写法 (该族后缀带字母段): 整段保留, 类型仍按无码前缀表
     _Case("/media/H4610-123.mp4", number="H4610-123", content_type=ContentType.UNCENSORED),
     # 单段 TH101 与短 FC2 同样非站内写法: 整段保留, 类型不从形态推断
@@ -432,6 +452,11 @@ INFER_CONTENT_TYPE_CASES: list[tuple[str, str | None, ContentType]] = [
     ("C0930-ki220519", None, ContentType.UNCENSORED),
     ("H0930-ki190101", None, ContentType.UNCENSORED),
     ("MCB3D-012", None, ContentType.UNCENSORED),
+    ("MCDV-30", None, ContentType.UNCENSORED),
+    ("MXX-13", None, ContentType.UNCENSORED),
+    ("MCB-11", None, ContentType.UNCENSORED),
+    ("MCBD-11", None, ContentType.UNCENSORED),
+    ("MERMAID-01", None, ContentType.CENSORED),
     ("FC2-123", None, ContentType.WESTERN),
     ("010115-001", None, ContentType.UNCENSORED),
     ("010115_001", None, ContentType.UNCENSORED),
@@ -484,6 +509,16 @@ UNCENSORED_CASES: list[tuple[str, bool]] = [
     ("DRG-123", True),
     ("DRGBD-045", True),
     ("SMDV-028", True),
+    # メルシーボークー 的发行前缀: 该社作品以完全無修正发行
+    # MER 不收录: 该前缀同时是有码作品线 (メビウス 2003), 数量更多, 维持默认的有码判定
+    ("MER-03", False),
+    ("MER-003", False),
+    ("MXX-13", True),
+    ("MCB-11", True),
+    ("MCBD-11", True),
+    # 前缀须连短横线一起相等: 同字母开头的其它厂牌番号不命中
+    ("MERMAID-01", False),
+    ("MCBRIDE-12", False),
     ("vixen.23.04.15", False),
     ("MIDV-123", False),
     ("SSIS-456", False),

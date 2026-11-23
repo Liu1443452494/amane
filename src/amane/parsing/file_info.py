@@ -144,6 +144,11 @@ _UNCENSORED_PREFIXES = (
     "H0930-",
     "S2M",
     "MCB3D",
+    # メルシーボークー (Merci Beaucoup) 的发行型前缀. 该社作品以完全無修正发行, 与上面按系列列出的 Blu-ray / DVD 系列同源.
+    # MER 不收录: 该前缀同时是 メビウスエンターテイメント (MERCURY) 2003 年有码作品线, 且数量更多.
+    "MXX-",
+    "MCB-",
+    "MCBD-",
 )
 
 #: 前缀内含数字的有码番号前缀 (R18-292 的 R18). 只参与类型判定, 不参与番号抽取;
@@ -211,6 +216,15 @@ _ESCAPE_MARKERS = (
     "AAC",
     "XXX",
     "PRT",
+    # 帧率与位深同为「数字 + 字母」, 与数字分辨率同因: 不剥除时尾段会被无短横线素人规则
+    # 当作整段番号 (<番号>-60FPS-98T → 60FPS-98T). 匹配同样要求两侧为分隔符.
+    "10BIT",
+    "12BIT",
+    "16BIT",
+    "60FPS",
+    "30FPS",
+    "24FPS",
+    "120FPS",
 )
 
 _ROOT_PARTS = frozenset({"/", ".", ""})
@@ -543,7 +557,7 @@ def _match(basename: str, escape_strings: list[str], *, generic: bool) -> tuple[
         hd = re.sub(r"[-_. ]+", "-", c)
         if m := re.search(r"HEYDOUGA-?(\d{2,4})-(\d{1,4})", hd):
             return f"HEYDOUGA-{m[1]}-{m[2]}", ContentType.UNCENSORED
-    if m := re.search(r"(H4610|C0930|H0930)-[A-Z]+\d{4,}", c):
+    if m := re.search(r"(H4610|C0930|H0930)-[A-Z]+\d{3,}", c):
         return m.group(), ContentType.UNCENSORED
     # kin8 归欧美链 (theporndb 为第一源); 该类型表示路由归属, 与马赛克标记正交.
     if m := re.search(r"KIN8(TENGOKU)?-?\d{3,}", c):

@@ -18,6 +18,8 @@ from .sites import (
     AiravCrawler,
     AvbaseCrawler,
     AvsoxCrawler,
+    C0930Crawler,
+    CaribbeanComCrawler,
     DahliaCrawler,
     DmmCrawler,
     FalenoCrawler,
@@ -27,6 +29,9 @@ from .sites import (
     FreejavbtCrawler,
     GetchuCrawler,
     GigaCrawler,
+    H0930Crawler,
+    H4610Crawler,
+    HeyzoCrawler,
     IqqtvCrawler,
     Jav321Crawler,
     JavBusCrawler,
@@ -34,9 +39,13 @@ from .sites import (
     JavLibraryCrawler,
     Kin8Crawler,
     MGStageCrawler,
+    MuramuraCrawler,
     OfficialCrawler,
+    OnePondoCrawler,
+    PacoPacoMamaCrawler,
     PrestigeCrawler,
     R18DevCrawler,
+    TenMusumeCrawler,
     ThePornDBCrawler,
     XCityCrawler,
 )
@@ -51,6 +60,11 @@ registry.register(FreejavbtCrawler)
 registry.register(Jav321Crawler)
 registry.register(AiravCrawler)
 registry.register(AvsoxCrawler)
+registry.register(CaribbeanComCrawler)
+registry.register(OnePondoCrawler)
+registry.register(TenMusumeCrawler)
+registry.register(PacoPacoMamaCrawler)
+registry.register(MuramuraCrawler)
 registry.register(AvbaseCrawler)
 registry.register(XCityCrawler)
 registry.register(DahliaCrawler)
@@ -65,6 +79,10 @@ registry.register(PrestigeCrawler)
 registry.register(R18DevCrawler)
 registry.register(ThePornDBCrawler)
 registry.register(OfficialCrawler)
+registry.register(H4610Crawler)
+registry.register(HeyzoCrawler)
+registry.register(C0930Crawler)
+registry.register(H0930Crawler)
 
 # 演员站在 amane.crawlers.actor 导入时注册.
 
@@ -75,6 +93,8 @@ __all__ = [
     "AvbaseActorCrawler",
     "AvbaseCrawler",
     "AvsoxCrawler",
+    "C0930Crawler",
+    "CaribbeanComCrawler",
     "Crawler",
     "DahliaCrawler",
     "DmmCrawler",
@@ -88,6 +108,9 @@ __all__ = [
     "GFriendsActorCrawler",
     "GetchuCrawler",
     "GigaCrawler",
+    "H0930Crawler",
+    "H4610Crawler",
+    "HeyzoCrawler",
     "HttpClient",
     "IqqtvCrawler",
     "Jav321Crawler",
@@ -101,10 +124,14 @@ __all__ = [
     "MediaMetadata",
     "MetadataField",
     "MinnanoActorCrawler",
+    "MuramuraCrawler",
     "OfficialCrawler",
+    "OnePondoCrawler",
+    "PacoPacoMamaCrawler",
     "PrestigeCrawler",
     "R18DevCrawler",
     "SiteName",
+    "TenMusumeCrawler",
     "ThePornDBActorCrawler",
     "ThePornDBCrawler",
     "WikipediaActorCrawler",

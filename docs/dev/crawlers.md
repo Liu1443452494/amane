@@ -18,7 +18,7 @@ CrawlerFactory (缓存实例)
 爬虫异步并发安全. `SiteConfig` 在构造期注入, `__init__` 内合并 profile 默认与用户配置, 子类直接使用 `self.base_url` / `self.cookies`; 实例可缓存, 仅配置变化时重建工厂.
 
 - 演员站与影片站共用 HttpClient / 限速; 实现位于 `crawlers/actor/`, 只注册 `actor_registry` (可以不在影片 `registry`). **双料站**指同一 `SiteName` 在影片 / 演员注册表各有一个类并共用 `site_config`; 不允许在 `site_roles` 中手写双料名单.
-- gFriends 额外依赖 `data_dir` (Filetree 缓存) 与 `actor_scraping.gfriends_repo`.
+- gFriends 额外依赖 `data_dir` (Filetree 索引缓存与 ETag 记录) 与 `actor_scraping.gfriends_repo`. 校验或下载失败时沿用旧索引并在退避间隔内不重发请求, 上游不可达时不允许每个演员各触发一次超时; ETag 必须随索引一起写, 索引没写成却更新 ETag, 下一次比对会误判为未变化.
 - **能力声明**位于 `CrawlerProfile`: 演员爬虫必须显式给出 `capabilities` (`ACTOR_PROFILE` / `ACTOR_IMAGE`) 与 `genders`; 影片爬虫空 `capabilities` 视为 `film_metadata`. 行为开关一律写在 `traits` (取值见 `SourceTrait`), 与「来源提供什么」分开: `needs_partial` 表示依赖前序聚合结果, 排在第二段执行; `multi_language` 表示消费 `FetchOptions.language`; `uses_file_hash` 表示刮削前需要文件指纹 (扫描不读取文件内容). `site_roles` 只从两个注册表推导配置 schema 用的站点列表 (档案序 = 注册序); 聚合引擎只对声明 `multi_language` 的站点展开 `(site, lang)` 节点. Handler 按 `Actor.gender` 对 `profile().genders` 裁站, 见 [task-system.md](task-system.md). 影片来源的这些声明经 `CrawlerProfile.to_descriptor()` 进入来源目录, 刮削只读目录, 不读实例的 profile; 演员来源不进入目录.
 
 ## 影片出演者
@@ -35,7 +35,7 @@ CrawlerFactory (缓存实例)
 
 ## 连通性探测
 
-`Crawler.check_connectivity` / `ActorCrawler.check_connectivity` 是「网络检测」页的逐来源探测点, 缺省 GET `base_url` 并带上已合并的 cookies 与 headers, 与刮削同用一条 HTTP 通道 (代理 / 指纹 / 限速 / 同源 Referer), 判定复用 `net/errors.py` 的拦截分类. **实际入口不是 `base_url` 的来源必须覆盖它**, 否则会把「入口 404 / 是 API 端点」误报成不可达; 缺凭据的来源返回 `SKIPPED` 并给出 `SkipReason`. 探测是单次尝试 (重试只会把同一个结论拖长), 编排与端点见 [api.md](api.md) 的 `/network/check`.
+`Crawler.check_connectivity` / `ActorCrawler.check_connectivity` 是「网络检测」页的逐来源探测点, 缺省 GET `base_url` 并带上已合并的 cookies 与 headers, 与刮削同用一条 HTTP 通道 (代理 / 指纹 / 限速 / 同源 Referer), 判定复用 `net/errors.py` 的拦截分类. **入口不是 `base_url`、或失效域名仍回 200 跳转壳的来源必须覆盖它**: 前者否则误报不可达 (入口 404 / 是 API 端点), 后者否则误报可达; 缺凭据的来源返回 `SKIPPED` 并给出 `SkipReason`. 探测是单次尝试 (重试只会把同一个结论拖长), 编排与端点见 [api.md](api.md) 的 `/network/check`.
 
 ## 番号入参
 
@@ -54,10 +54,22 @@ CrawlerFactory (缓存实例)
 
 站点检索是模糊匹配, 与「哪条结果算命中」有关的比对都由爬虫自行处理:
 
-- 番号: 站内 ID 带 `-` 时, 入参 `HEYZO-3607` 与 `HEYZO3607` 都应能对上 (大小写, 短横线与空格不参与比对). 不允许把 `_` 改写为 `-`, 除非该站把两种当成同一部. 欧美日期号 (`Studio.YY.MM.DD`) 的年份 2 位与 4 位写法, 以及 FC2 的 `FC2-PPV-<id>` 与 `FC2-<id>` (官方电子市场只写带 `PPV` 的写法, 索引站多写不带的写法), 都视为同一番号. 比对与归一用 `crawlers/parsing.py` 的 `fold_number` / `is_same_number` / `fc2_article_id` / `leading_token`.
+- 番号: 站内 ID 带 `-` 时, 入参 `HEYZO-3607` 与 `HEYZO3607` 都应能对上 (大小写, 短横线与空格不参与比对). 两侧都带短横线时位置须一致, 折叠后同串不算命中. 不允许把 `_` 改写为 `-`, 除非该站把两种当成同一部. 欧美日期号 (`Studio.YY.MM.DD`) 的年份 2 位与 4 位写法, 以及 FC2 的 `FC2-PPV-<id>` 与 `FC2-<id>` (官方电子市场只写带 `PPV` 的写法, 索引站多写不带的写法), 都视为同一番号. 比对与归一用 `crawlers/parsing.py` 的 `fold_number` / `is_same_number` / `fc2_article_id` / `leading_token`.
 - 检索形态: 站内写法省略番号开头的数字段时比对放宽到「仅差数字段」, 由 `select_number_index` 取条目 (精确优先, 仅差数字段者唯一时才取). 检索词与 URL 随形态而变的来源按 `crawlers/parsing.py::number_variants` 逐个形态尝试, 命中即止; 候选只由 FC2 的两种写法, 站点省略的数字段与素人系标签 (`parsing/file_info.py::SUREN_LABELS`) 三处产生. 已知站内只写某一种写法的来源把该写法排在首位 (如 airav 的 `FC2-PPV-<id>`), 少发一次请求.
 - 演员: 检索行或实体的名字 (含别名) 与查找名相等才算命中, 用 `normalize_name` / `fold_name` / `is_same_name`; 站内的注记括号, 拆名规则由各站自行剥离.
-- 确认不了的结果视为该来源无此番号 / 无此演员, 不允许回退首条. 站点特例见 [content-routes.md](content-routes.md).
+- 确认不了的结果视为该来源无此番号 / 无此演员, 不允许回退首条. 检索列表命中不构成确认: 重定向对爬虫不可见, 站点可能把入参转到相近番号的另一部, 因此跳转后的详情页须再按页面自报的番号 (`canonical`) 确认一次. 站点特例见 [content-routes.md](content-routes.md).
+- 未命中的记法: 站点明确回答「没有这个番号」(404 / 空结果) 是未命中, 返回 `None`; 只有取不到答复 (超时 / 5xx / 拦截页) 才是来源失败并冒泡 `SourceError`. 多候选逐个尝试时, 全部候选「不存在」不构成失败, 不得把最后一个 `RequestError` 当作来源结果抛出.
+- 站点私有形态: 站内番号特有的前后缀只在来源内剥离, 不进入 `parsing.py` 的跨来源判等与 `number_variants`; 还原成番号后再交给 `number_match` / `select_number_index` 核对. 同一来源的检索与详情共用同一套还原与取舍规则, 否则详情产出的 `number` 与检索用的键会分叉.
+
+## 来源自建索引
+
+站点本身提供全量目录时, 来源可以在实例内缓存一份索引, 用它替代逐个候选探测:
+
+- **回退顺序**: 索引命中 → 直连候选 → 检索接口兜底. 索引未就绪 (首次拉取中 / 拉取失败退避中) 时直接落到后两档, 索引不可用不允许让整个来源失效.
+- **缓存位置**: 挂在该来源的爬虫实例上. 工厂热重载会重建实例, 索引随之丢弃并重新拉取; 索引只服务这一个来源, 放进程级会与热重载和配置切换脱节.
+- **刷新**: 到期重新拉取; 失败时保留旧索引并退避, 不清空. 首次拉取失败同样退避, 否则每个刮削请求各付一次超时.
+- **解析**: 大正文的解析与建模搬到 `asyncio.to_thread`, 不让它阻塞事件循环; 内存里只保留检索要用的字段, 正文用完即释放.
+- **连通性探测不取索引**: 索引正文按 MB 计, 探测与逐站点重试都付不起, 探测仍落在与索引同 host 的轻量端点上.
 
 ## HTTP 层
 
@@ -100,7 +112,7 @@ Cloudflare managed challenge 只能执行 JS 越过, 因此受保护的来源由
 ## 新爬虫接入
 
 1. `enums.py` 加 `SiteName` (frozen dict 加载时按代码枚举补默认槽, 见 [config.md](config.md)).
-2. 影片: `crawlers/sites/{site}.py` 实现 `profile` + `_search` / `_scrape` (或 override `fetch`); 演员: `crawlers/actor/sites/{site}.py`, `profile()` 声明 `capabilities` 与 `genders`. 消费 language 的影片爬虫在 `traits` 声明 `multi_language`, 需要文件指纹的声明 `uses_file_hash`; 测试须覆盖番号有无短横线两种形态.
+2. 影片: `crawlers/sites/{site}.py` 实现 `profile` + `_search` / `_scrape` (或 override `fetch`); 演员: `crawlers/actor/sites/{site}.py`, `profile()` 声明 `capabilities` 与 `genders`. 共用同一套接口或 CMS、只差番号形态与厂牌名的站群收在一个模块里 (`official.py` 用表, `d2pass.py` 用子类), 不按站拆文件. 消费 language 的影片爬虫在 `traits` 声明 `multi_language`, 需要文件指纹的声明 `uses_file_hash`; 测试须覆盖番号有无短横线两种形态.
 3. 导出后 `registry.register` / `actor_registry.register`. 双料站两个类用同一 `SiteName` 各注册一次; 不允许修改 `site_roles` 常量. 演员 `register` 顺序即默认 `profile_sites` 优先级. 需要 cookie / token 时给 `SiteConfig` 加字段.
 4. 加 TOML 用例 (见 [crawler-testing.md](crawler-testing.md)) 并 `just test`.
 

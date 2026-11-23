@@ -51,7 +51,7 @@
 
 ## 海报栅格
 
-片库 grid 短边锚定 (`layout="adaptive"`, 行切分见 `lib/media/adaptive.ts`), 演员墙与分类详情列宽相等. 两者都按图片加载后的自然尺寸取比例, 缓存在 `lib/media/poster-image.ts`, 键是卡片实际请求的地址, 跨路由复用, 首屏混合比例的页面因此只重排一次. 自适应栅格另需复用上次测得的容器宽度: 行切分依赖它, 首帧没有行就没有高度, 路由回退的滚动恢复会被限制为列表顶部. `ProxyImage` 的每个渲染分支都必须转发 `onLoad` / `onError`, 否则拿不到比例, 失败也不退化为番号占位.
+片库 grid 短边锚定 (`layout="adaptive"`, 行切分见 `lib/media/adaptive.ts`), 演员墙与分类详情列宽相等. 两者都按图片加载后的自然尺寸取比例, 缓存在 `lib/media/poster-image.ts`, 键是卡片实际请求的地址, 跨路由复用, 首屏混合比例的页面因此只重排一次. 自适应栅格另需复用上次测得的容器宽度: 行切分依赖它, 首帧没有行就没有高度, 路由回退的滚动恢复会被限制为列表顶部; 片库、演员墙、演员作品与分类详情的 infinite query 另以 `lib/infinite-list.ts` 的 `BROWSE_GC_TIME` 保留已加载页, 库默认的 5 分钟过期后同样只剩第一页. `ProxyImage` 的每个渲染分支都必须转发 `onLoad` / `onError`, 否则拿不到比例, 失败也不退化为番号占位. 四个浏览栅格的哨兵按一屏预取 (`GRID_PREFETCH_MARGIN`), 并在每页到达后重建观察器: 交叉状态不变时观察器不再回调, 追加一页后哨兵仍在预取区内就会停在底部不再取页.
 
 ## 窄屏
 
@@ -67,7 +67,7 @@
 
 ## Schema 表单
 
-Settings、任务提交、定时创建、metadata 编辑共用 `components/schema-form/`: Pydantic → OpenAPI → FieldRouter; `x-*` 清单见 `schema/types.ts`, 字段控件细节见该目录与字段注释.
+Settings、任务提交、定时创建、metadata 编辑共用 `components/schema-form/`: Pydantic → OpenAPI → FieldRouter; `x-*` 清单见 `schema/types.ts`, 字段控件细节见该目录与字段注释. 数值字段不设 `min` / `max` / `step`: 越界值由表单校验在字段下方提示, 控件既不钳位也不提供微调箭头, 这是既定形态而非遗漏的参数.
 
 `SchemaForm` 双模式 `patch` (dirty 门控, 只提交 diff) / `create` (完整值); dirty 保存条用 `affix` 固定于视口底, 编辑弹窗里必须抬到 Modal 之上. 空值编码统一经 `schema-form/encode.ts` (按 Create / 列 schema 判空), `x-frozen-keys` 必须保留全部 key; 不允许对着 PATCH partial schema 编码, 手写 Library / Feed 表单经同一个编码器出 body. 任务与定时提交用 `DiscriminatedSchemaForm`; 短枚举共用 `EnumToggle`, 定时 cron 用 `CronPicker` (产出 5-field, 与后端 croniter 一致).
 

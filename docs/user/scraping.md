@@ -100,11 +100,20 @@
 | javbus | javbus.com | 有码、无码、素人 | | 不提供剧情; 欧美目录不可用 |
 | official | Will / Outvision 等制作商官网 | 有码 | | 按番号前缀匹配制作商官网, 匹配不到时不发出请求; 提供剧情、导演与剧照; 可在站点配置的「制作商路由」中按前缀指定 |
 | avsox | avsox.click | 无码 | | 无码专站 |
+| h4610 | h4610.com | 无码 | | 同模板三站 (h4610、c0930、h0930) 各自编号, 同一站内 id 在三站是不同影片 |
+| heyzo | heyzo.com | 无码 | | 自营无码厂牌; 预告片是 HLS; 不提供时长 |
+| c0930 | c0930.com | 无码 | | 同上 |
+| h0930 | h0930.com | 无码 | | 同上 |
 | freejavbt | freejavbt.com | 无码、FC2、国产、欧美 | | 覆盖面宽, 位于链尾; 不提供制作商与发行商 |
+| 1pondo | 1pondo.tv | 无码 | | 一本道官网; 提供无码预告片; 番号形如 `112226_001` |
+| caribbeancom | caribbeancom.com | 无码 | | カリビアンコム官网; 提供无码预告片; 番号形如 `112226-001` |
+| 10musume | 10musume.com | 无码 | | 天然むすめ官网; 提供无码预告片; 番号形如 `112226_01` |
+| pacopacomama | pacopacomama.com | 无码 | | パコパコママ官网; 提供无码预告片; 番号形如 `112126_100` |
+| muramura | muramura.tv | 无码 | | ムラムラ官网; 提供无码预告片; 番号形如 `112126_1276` |
 | fc2ppvdb | fc2ppvdb.com | FC2 | | 可能被 Cloudflare 拦截, 拦截时由后续站点补位 |
 | fc2 | adult.contents.fc2.com | FC2 | | FC2 官方市场; 已下架的商品视为无此番号 |
 | airav | airav.io | FC2、国产 | | 中文标题 |
-| iqqtv | iqq5.xyz | 国产 | | 国产第一来源; 按「字段语言偏好」请求对应语言的页面 |
+| iqqtv | iqqbl.com | 国产 | | 国产第一来源; 按「字段语言偏好」请求对应语言的页面 |
 | mgstage | mgstage.com | 素人 | | 素人第一来源; 素人影片不记录站内化名为演员 |
 | theporndb | theporndb.net | 欧美 | :material-check: | 需要 API Token, 未填写时跳过; 有媒体文件时按文件指纹匹配 |
 | getchu | getchu.com | 动漫 | | 动漫第一来源 |
@@ -113,7 +122,7 @@
 | javlibrary | javlibrary.com | | | 经常出现 Cloudflare 验证页 |
 | avbase | avbase.net | | :material-check: | 受 Cloudflare 保护, 通常需要 [浏览器渲染](network.md#browser) |
 | xcity | xcity.jp | | | 内容与 DMM 重叠 |
-| prestige | prestige-av.com | | | 单一制作商; 对每个番号都会发出多次请求 |
+| prestige | prestige-av.com | | | 单一制作商; 带特典的版本与通常版视为同一部影片; 首次刮削会先下载站点商品目录 |
 | faleno | faleno.jp | | | 单一制作商, 含 maryGOLD 与 JimmyScandal |
 | dahlia | dahlia-av.jp | | | 单一制作商 |
 | giga | giga-web.jp | | | 单一制作商; 自动完成年龄确认, 同一时刻只处理一个请求 |
@@ -145,7 +154,7 @@
 | 类型 | 默认路由 |
 |------|----------|
 | 有码 | dmm → javdb → javbus → official |
-| 无码 | javdb → javbus → avsox → freejavbt |
+| 无码 | javdb → javbus → avsox → freejavbt → 1pondo → caribbeancom → 10musume → pacopacomama → muramura → h4610 → c0930 → h0930 → heyzo |
 | FC2 | javdb → fc2ppvdb → fc2 → freejavbt → airav |
 | 国产 | iqqtv → javdb → airav → freejavbt |
 | 素人 | mgstage → dmm → javdb → javbus |
@@ -282,7 +291,7 @@ wikipedia 来源先在 Wikidata 中检索演员, 只采用描述或职业属于�
 
 ### gfriends 头像
 
-gfriends 从「gFriends 仓库」读取头像索引, 索引缓存在数据目录中. 访问 GitHub 受限时, 可以把仓库地址改为镜像, 或为 gfriends 配置站点代理 (见 [网络与站点访问](network.md#proxy)).
+gfriends 从「gFriends 仓库」读取头像索引, 索引缓存在数据目录中, 每天与上游比对一次; 内容没有变化时不重新下载, 上游新增的头像最多延迟一天; 比对或下载失败时继续使用旧索引, 稍后重试. 访问 GitHub 受限时, 可以把仓库地址改为镜像, 或为 gfriends 配置站点代理 (见 [网络与站点访问](network.md#proxy)).
 
 ## LLM 翻译 {#llm}
 
