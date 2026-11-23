@@ -12,15 +12,15 @@ index 1c55cf2c842c76a7c05d2b85d982037925d28faa..70e9616bba73d3520df8c86b65ebfe70
  
  Metadata 列表与 `/media` 文件行的角标与筛选: 有码 / 无码取条目类型 (没有挂载文件也成立), 无码再并上「存在无码标记的文件」; 中字 / 分辨率 / 破解 / 流出按关联 EXISTS 或页级聚合 (`file_phase`) 判定, 任一挂载文件具备即亮, `definition` 取最高档; 布尔取值的口径见 [api.md](api.md). 文件行同样返回派生的 `censored` / `uncensored`: `censored` 取这一份文件的性质 (带无码标记的副本不算有码), `uncensored` 与列表筛选同口径, 未绑定条目的文件只看自身标记. VR 标识与 `GET /metadata` 的 `vr` 筛选不来自文件相位, 也不物化: 只依据 `Metadata.tags` 与 `parsing/file_info.py::VR_TAGS` 的整体相等判定, 番号不参与; Python 与 SQL 两侧共用同一份词表 (`db/models.py::metadata_vr_predicate`, 用法同 `has_subtitle_predicate`), 因此重命名 / 合并标签后判定立即变化, 无需回填. 代价是判定随 `tags` 的单源取值: 字段链首个非空站点不给 VR 标签的条目判为否.
 diff --git a/docs/dev/database.md b/docs/dev/database.md
-index 2b5c0240d79ecbf3d41adaf9c4ff8adfe8d80c16..84a86aa705dbe52eb2f1059aaabd249408ce1ec9 100644
+index ff34d4698b540ee3eb1f2a03545bcfddd6c562ce..92c3ea0ea602d6ac57dc490d0eda9bc3a9967d03 100644
 --- a/docs/dev/database.md
 +++ b/docs/dev/database.md
-@@ -43,7 +43,7 @@ r18 库由项目导入 / 管理但 schema 不受我们控制, **不能纳入 Ale
+@@ -44,7 +44,7 @@ r18 库由项目导入 / 管理但 schema 不受我们控制, **不能纳入 Ale
  3. **落后 head**: 先用 sqlite3 **online backup API** 写 `{db}.pre-migrate-{oldrev}-{utc}.bak` (含 WAL 一致快照; 同目录保留最近 5 份), 再升级.
  4. **迁移连接**单独 `autocommit=False` + Alembic `transactional_ddl=True`: 单次 revision 内 DDL 与 `alembic_version` 同事务, 失败则回滚, 避免「表已创建但版本未升」的半成品. 业务连接不修改事务模式, 仍只开 WAL + FK.
  
 -自用水印与上游迁移通过 `src/amane/db/migrations/versions/0bbd0974b7c7_合并上游清理任务与自用水印迁移.py::down_revision` 合并为单一终点; 已发布迁移的标识与父版本保持稳定, 保证既有数据库补齐尚未执行的分支.
-+自用与上游迁移经 `src/amane/db/migrations/versions/272fb8ced57b_合并上游分辨率与自用迁移.py::down_revision` 合并; 已发布父版本不变, 启动补齐分支并归一人工分辨率, 保留覆盖与清空状态.
++自用与上游迁移经 `src/amane/db/migrations/versions/36307968ef2f_合并上游番号与自用迁移.py::down_revision` 合并; 已发布父版本不变, 启动补齐分支, 保留人工覆盖、清空状态与整理记录.
  
  迁移内不允许文件系统 I/O 与其它无界等待: 整条链共用一个事务, 中止即整体回滚、重试仍从零开始, 而网盘挂载点上逐目录列举会把启动阻塞数分钟以上且没有可见进度. 需要遍历磁盘的回填由运行期承担 (如 `REFRESH` 库扫描). 迁移内也不允许中途 `commit()`: DDL 会随之提前落盘, 而 `alembic_version` 在 revision 返回后才推进, 失败后重跑报 `duplicate column name`.
  
@@ -621,10 +621,10 @@ index 2b143938fe114ac00bb2167a8618ed7c3e5d8256..5759ade8cd8150dc29128fa5b41f785c
  _ROUNDTRIP_IDS = ["media", "library", "schedule", "metadata", "feed"]
 diff --git a/tests/db/test_liu1443452494_organize_number_migration.py b/tests/db/test_liu1443452494_organize_number_migration.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..5bf02710b82f07054cad32222fa75eaa8936d5a2
+index 0000000000000000000000000000000000000000..db3e762081331a5fd27dfb13d0bd47be433c6b75
 --- /dev/null
 +++ b/tests/db/test_liu1443452494_organize_number_migration.py
-@@ -0,0 +1,159 @@
+@@ -0,0 +1,246 @@
 +"""整理用番号迁移保留原番号及其唯一约束。"""
 +
 +from pathlib import Path
@@ -687,8 +687,21 @@ index 0000000000000000000000000000000000000000..5bf02710b82f07054cad32222fa75eaa
 +        (("060a2c478ef0",), True, True),
 +        (("e06def65f72a",), False, True),
 +        (("060a2c478ef0", "e06def65f72a"), True, True),
++        (("272fb8ced57b",), True, True),
++        (("dc04a8ae624e",), False, True),
++        (("272fb8ced57b", "dc04a8ae624e"), True, True),
 +    ],
-+    ids=["自用终点", "上游终点", "两分支均已升级", "已发布自用", "分辨率上游", "分辨率与自用双终点"],
++    ids=[
++        "自用终点",
++        "上游终点",
++        "两分支均已升级",
++        "已发布自用",
++        "分辨率上游",
++        "分辨率与自用双终点",
++        "分辨率合并自用",
++        "番号回填上游",
++        "番号回填与自用双终点",
++    ],
 +)
 +def test_startup_merges_extrafanart_and_custom_migrations(
 +    tmp_path: Path,
@@ -781,6 +794,80 @@ index 0000000000000000000000000000000000000000..5bf02710b82f07054cad32222fa75eaa
 +            )
 +        with pytest.raises(IntegrityError, match="UNIQUE"), engine.begin() as connection:
 +            connection.execute(insert, {"number": "ssis-345"})
++        assert upgrade_sqlite_database(path) is None
++    finally:
++        engine.dispose()
++
++
++@pytest.mark.parametrize(
++    ("number", "expected_type", "expected_mosaic"),
++    [
++        ("MXX-13", "UNCENSORED", None),
++        ("MCB-11", "UNCENSORED", None),
++        ("MCBD-11", "UNCENSORED", None),
++        ("MER-03", "CENSORED", "CRACKED"),
++        ("MIDV-123", "CENSORED", "CRACKED"),
++        ("MCBX-11", "CENSORED", "CRACKED"),
++    ],
++)
++def test_prefix_migration_preserves_custom_settings(
++    tmp_path: Path, number: str, expected_type: str, expected_mosaic: str | None
++) -> None:
++    """番号回填只更新命中条目的自动属性，保留人工水印、整理名称与产物记录。"""
++    path = tmp_path / "番号回填.db"
++    config = alembic_config(path)
++    command.upgrade(config, "272fb8ced57b")
++    engine = create_engine(f"sqlite:///{path}")
++    saved_outputs = (
++        f'{{"version":1,"number":"{number}","outputs":[{{"kind":"nfo",'
++        '"path":"/原目录/整理结果.nfo","parent":"/原目录","size":128,'
++        '"modified_ns":1,"changed_ns":1,"device":1,"inode":1,"symlink":false}]}'
++    )
++    preserved = text(
++        "SELECT m.number,m.title,m.organize_number,f.path,f.status,f.library_id,f.metadata_id,"
++        "f.definition,f.has_subtitle_in_name,f.has_external_subtitle,f.watermark_mode,"
++        "f.watermark_subtitle,f.watermark_mosaic,f.watermark_definition,f.watermark_definition_locked,"
++        "f.organized_outputs FROM metadata AS m JOIN media_files AS f ON f.metadata_id=m.id"
++    )
++    try:
++        with engine.begin() as connection:
++            connection.execute(
++                text(
++                    "INSERT INTO libraries "
++                    "(id,name,path,automation,recursive,patterns,move_mode,link_mode,video_template,"
++                    "write_nfo,copy_resources,trailer_pattern,blacklist_patterns,subtitle_extensions,min_file_size) "
++                    "VALUES (1,'原有媒体库','/原目录','SCRAPE',1,'[]','MOVE','STRM','{number}.{ext}',"
++                    "1,'[]','','[]','[]',0)"
++                )
++            )
++            connection.execute(
++                text(
++                    "INSERT INTO metadata "
++                    "(id,number,title,content_type,organize_number,created_at,updated_at) "
++                    "VALUES (1,:number,'原有标题','CENSORED',:organize_number,'2026-11-01','2026-11-01')"
++                ),
++                {"number": number, "organize_number": f"{number} 整理名称"},
++            )
++            connection.execute(
++                text(
++                    "INSERT INTO media_files "
++                    "(path,status,library_id,metadata_id,created_at,updated_at,mosaic,definition,"
++                    "has_subtitle_in_name,has_external_subtitle,watermark_mode,watermark_subtitle,"
++                    "watermark_mosaic,watermark_definition,watermark_definition_locked,organized_outputs) "
++                    "VALUES (:path,'SCRAPED',1,1,'2026-11-01','2026-11-01','CRACKED','4K',1,1,"
++                    "'MANUAL',0,'LEAKED',NULL,1,:outputs)"
++                ),
++                {"path": f"/原目录/{number}-C-4K.mp4", "outputs": saved_outputs},
++            )
++            before = connection.execute(preserved).one()
++
++        backup = upgrade_sqlite_database(path)
++        assert backup is not None and backup.is_file()
++        with engine.connect() as connection:
++            assert connection.execute(preserved).one() == before
++            assert connection.execute(
++                text("SELECT m.content_type,f.mosaic FROM metadata AS m JOIN media_files AS f ON f.metadata_id=m.id")
++            ).one() == (expected_type, expected_mosaic)
 +        assert upgrade_sqlite_database(path) is None
 +    finally:
 +        engine.dispose()
@@ -1331,3 +1418,32 @@ index 139e07797b6a443dc0294c5ddb2c4a48411462bd..6225cd6a1cc3d67cc1bd69669e3aea2a
      "title": {
        "label": "标题"
      },
+diff --git a/src/amane/db/migrations/versions/36307968ef2f_合并上游番号与自用迁移.py b/src/amane/db/migrations/versions/36307968ef2f_合并上游番号与自用迁移.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..414df6e681af67a5c23278add589b4e0206c1522
+--- /dev/null
++++ b/src/amane/db/migrations/versions/36307968ef2f_合并上游番号与自用迁移.py
+@@ -0,0 +1,23 @@
++"""合并上游番号与自用迁移。
++
++迁移版本：36307968ef2f
++父版本：272fb8ced57b、dc04a8ae624e
++创建时间：2026-11-23 13:55:33.538453
++
++仅合并版本关系，结构与数据变更由父分支执行。
++"""
++
++from collections.abc import Sequence
++
++revision: str = "36307968ef2f"
++down_revision: tuple[str, str] = ("272fb8ced57b", "dc04a8ae624e")
++branch_labels: str | Sequence[str] | None = None
++depends_on: str | Sequence[str] | None = None
++
++
++def upgrade() -> None:
++    pass
++
++
++def downgrade() -> None:
++    pass
