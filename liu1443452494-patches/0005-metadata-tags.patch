@@ -57,7 +57,7 @@ index d884104688575545997ae9a03ef6999c50cba5b3..fd6f8c9454c093a1d2537dc2bbcd5082
      @StdlibArgs `
      --copy-metadata genai_prices `
 diff --git a/src/amane/db/repos/metadata.py b/src/amane/db/repos/metadata.py
-index 3150a1384a045ff664e2f66ab5c4477d47afe6a7..bd732b18a93fe2dd1a8f356139d23892b81ff7f3 100644
+index 77a35911bec63dc8fc20f7b1c75f4381b66124cd..b23d44ac6be6be51927d536722c879f828290f3f 100644
 --- a/src/amane/db/repos/metadata.py
 +++ b/src/amane/db/repos/metadata.py
 @@ -11,6 +11,7 @@ from sqlmodel import col, select
@@ -83,8 +83,8 @@ index 3150a1384a045ff664e2f66ab5c4477d47afe6a7..bd732b18a93fe2dd1a8f356139d23892
 +        ``enrich_tags`` 仅由自用刮削启用，标签未锁定时转换简繁并追加最终演员姓名。
          """
          fields = _normalize_text_fields(kwargs)
-         async with self._session() as session:
-@@ -439,6 +442,8 @@ class MetadataRepoMixin(RepositoryMixinBase):
+         changed = False
+@@ -440,6 +443,8 @@ class MetadataRepoMixin(RepositoryMixinBase):
                  session.add(existing)
                  await session.flush()
                  await clean_actor_names(session, existing, actor_genders, rules_by_kind)
@@ -93,15 +93,15 @@ index 3150a1384a045ff664e2f66ab5c4477d47afe6a7..bd732b18a93fe2dd1a8f356139d23892
                  await apply_facet_rules_to_metadata(session, existing, rules_by_kind)
                  await sync_metadata_facets(session, existing)
                  await session.commit()
-@@ -451,6 +456,8 @@ class MetadataRepoMixin(RepositoryMixinBase):
-             session.add(meta)
-             await session.flush()
-             await clean_actor_names(session, meta, actor_genders, rules_by_kind)
-+            if enrich_tags:
-+                meta.tags = build_metadata_tags(meta.tags, meta.actors)
-             await apply_facet_rules_to_metadata(session, meta, rules_by_kind)
-             await sync_metadata_facets(session, meta)
-             await session.commit()
+@@ -452,6 +457,8 @@ class MetadataRepoMixin(RepositoryMixinBase):
+                 session.add(meta)
+                 await session.flush()
+                 await clean_actor_names(session, meta, actor_genders, rules_by_kind)
++                if enrich_tags:
++                    meta.tags = build_metadata_tags(meta.tags, meta.actors)
+                 await apply_facet_rules_to_metadata(session, meta, rules_by_kind)
+                 await sync_metadata_facets(session, meta)
+                 await session.commit()
 diff --git a/src/amane/handlers/scrape.py b/src/amane/handlers/scrape.py
 index b5b38a8db9247909155f26ef6366be0f9e3a6612..0a841fc2f0962e8f2fa67746ab2a993aaa0ca42b 100644
 --- a/src/amane/handlers/scrape.py
